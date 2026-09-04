@@ -48,4 +48,4 @@ KeenVPN — консольный менеджер на Python для безоп�
 
 ## Лицензия
 
-Проект распространяется по лицензии [Apache License 2.0](LICENSE).
+Проект распространяется по лицензии [Apache License 2.0](LICENSE). Xray, XKeen, Entware и другие внешние компоненты сохраняют собственные лицензии и не перелицензируются как часть KeenVPN. Сведения о них приведены в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

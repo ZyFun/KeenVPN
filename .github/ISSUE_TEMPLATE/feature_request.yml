@@ -1,0 +1,70 @@
+name: Предложить улучшение
+description: Предложить новую возможность или изменение KeenVPN
+title: "[Предложение]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Опишите проблему и ожидаемый результат. Не добавляйте секреты, реальные VPN-ссылки и приватные конфигурации.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую проблему нужно решить
+      description: Опишите пользовательский сценарий и существующее ограничение.
+    validations:
+      required: true
+
+  - type: textarea
+    id: result
+    attributes:
+      label: Ожидаемый результат
+      description: Опишите поведение, которое должно появиться.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Область проекта
+      options:
+        - CLI и меню
+        - Установка и обновление
+        - VPN-подключения
+        - Правила маршрутизации
+        - Устройства и сегменты
+        - DNS
+        - Диагностика
+        - Резервное копирование и восстановление
+        - Документация
+        - Другое
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Рассмотренные альтернативы
+      description: Укажите существующий обходной путь или другой вариант решения.
+    validations:
+      required: false
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Риски и влияние
+      description: Может ли изменение затронуть DNS, доступ к роутеру, маршрутизацию или совместимость конфигурации?
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Подтверждение
+      options:
+        - label: Я проверил существующие Issues и не нашёл аналогичного предложения.
+          required: true
+        - label: Предложение не содержит секретов и приватной конфигурации.
+          required: true

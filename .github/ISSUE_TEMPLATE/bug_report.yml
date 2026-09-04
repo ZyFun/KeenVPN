@@ -1,0 +1,114 @@
+name: Сообщить об ошибке
+description: Сообщить о воспроизводимой проблеме в KeenVPN
+title: "[Ошибка]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо за сообщение. Не публикуйте VPN-ссылки, пароли, ключи, токены, личные адреса и необработанные конфигурации. Для уязвимостей используйте Private vulnerability reporting.
+
+  - type: input
+    id: version
+    attributes:
+      label: Версия KeenVPN
+      description: Укажите версию или commit. Если выпусков ещё нет, напишите «разработка».
+      placeholder: Например, разработка или abc1234
+    validations:
+      required: true
+
+  - type: input
+    id: router
+    attributes:
+      label: Модель роутера и архитектура
+      placeholder: Например, Keenetic KN-1811, aarch64
+    validations:
+      required: true
+
+  - type: input
+    id: keeneticos
+    attributes:
+      label: Версия KeeneticOS
+      placeholder: Например, 5.1.4
+    validations:
+      required: true
+
+  - type: input
+    id: components
+    attributes:
+      label: Версии XKeen и Xray
+      description: Если компонент не установлен или версия неизвестна, укажите это.
+      placeholder: XKeen …, Xray …
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scenario
+    attributes:
+      label: Сценарий
+      options:
+        - Локальный запуск CLI
+        - Подключение к существующей установке
+        - Новая установка
+        - Изменение маршрутизации
+        - Резервное копирование или восстановление
+        - Диагностика
+        - Другое
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Описание проблемы
+      description: Опишите наблюдаемое поведение без секретных и персональных данных.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+      description: Укажите минимальную последовательность действий.
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемое поведение
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Фактическое поведение
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Обезличенная диагностика
+      description: Удалите VPN URI, пароли, ключи, токены, домены, публичные и локальные адреса, если они не обязательны для воспроизведения.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Подтверждение
+      options:
+        - label: Я проверил существующие Issues и не нашёл дубликат.
+          required: true
+        - label: В сообщении нет VPN-ссылок, паролей, токенов, закрытых ключей и необработанных приватных конфигураций.
+          required: true
+        - label: Эта проблема не требует приватного сообщения об уязвимости.
+          required: true

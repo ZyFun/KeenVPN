@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Виртуальные окружения
+.venv/
+venv/
+env/
+
+# Сборка и пакеты
+build/
+dist/
+*.egg-info/
+
+# Локальные настройки и секреты
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+config.local.*
+
+# Редакторы и ОС
+.DS_Store
+.idea/
+.vscode/

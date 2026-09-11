@@ -21,6 +21,12 @@ SPEC = importlib.util.spec_from_file_location(
 audit = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(audit)
 
+REQUIREMENTS_SPEC = importlib.util.spec_from_file_location(
+    "check_python", Path(__file__).resolve().parents[1] / "scripts" / "check_python.py",
+)
+requirements = importlib.util.module_from_spec(REQUIREMENTS_SPEC)
+REQUIREMENTS_SPEC.loader.exec_module(requirements)
+
 
 def tar_bytes(entries, compressed=True):
     """Собрать маленький архив для проверки чтения и расчёта размеров."""
@@ -41,6 +47,33 @@ def package(entries):
     """Создать IPK с содержимым и согласованной записью каталога."""
     data = tar_bytes([("./data.tar.gz", tar_bytes(entries))])
     return data, {"Size": str(len(data)), "SHA256sum": hashlib.sha256(data).hexdigest()}
+
+
+def write_snapshot(directory, version):
+    """Подготовить целостный искусственный набор IPK с заданной версией Python."""
+    library = 'opt/lib/python' + '.'.join(version.split('.')[:2])
+    modules = [(library + '/' + name.replace('.', '/') + '.pyc', b'test-only')
+               for name in requirements.REQUIRED_MODULES]
+    modules += [(library + '/lib-dynload/' + name + '.cpython-test.so', b'test-only')
+                for name in ('_ssl', '_hashlib', '_uuid')]
+    certificate = Path(__file__).with_name('fixtures').joinpath('ca-test.crt').read_bytes()
+    records = []
+    for name in audit.ROOT_PACKAGES:
+        entries = modules if name == 'python3-light' else []
+        if name == 'ca-bundle':
+            entries = [('opt/etc/ssl/certs/ca-certificates.crt', certificate)]
+        data, record = package(entries)
+        filename = name + '.ipk'
+        Path(directory, filename).write_bytes(data)
+        record.update({
+            'Package': name, 'Version': '20250419-2' if name == 'ca-bundle' else version,
+            'Architecture': 'all' if name == 'ca-bundle' else 'aarch64-3.10',
+            'Filename': filename, 'Installed-Size': '10240',
+        })
+        records.append('\n'.join(key + ': ' + value for key, value in record.items()))
+    index = Path(directory, 'Packages')
+    index.write_text('\n\n'.join(records) + '\n')
+    return index
 
 
 class DependencyTests(unittest.TestCase):
@@ -134,6 +167,42 @@ class ArchiveTests(unittest.TestCase):
 
 
 class CertificateAndCommandTests(unittest.TestCase):
+    def test_consistent_python_311_snapshot_is_rejected(self):
+        """Совпадение версий и файлов модулей не разрешает устаревшую ветку Python."""
+        with tempfile.TemporaryDirectory() as directory:
+            index = write_snapshot(directory, '3.11.14-1')
+            output, errors = io.StringIO(), io.StringIO()
+            with (
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors),
+                patch.object(audit, 'inspect_ipk', wraps=audit.inspect_ipk) as inspect,
+            ):
+                code = audit.main([str(index), directory])
+            self.assertEqual(code, 1)
+            inspect.assert_not_called()
+            self.assertEqual(output.getvalue(), '')
+            self.assertNotIn(directory, errors.getvalue())
+
+    def test_package_python_versions_use_project_policy(self):
+        """Нижняя граница проверяется численно; prerelease и неизвестный формат отклоняются."""
+        cases = (
+            ('3.9.99-1', 1), ('3.12.0-1', 0), ('3.12.14', 0), ('3.13.9-2', 0),
+            ('3.100.0-1', 0), ('4.0.0-1', 1), ('3.12.0rc1-1', 1),
+            ('3.12.0~rc1-1', 1), ('3.12.0-rc1', 1), ('3.12', 1), ('unknown', 1),
+        )
+        for version, expected_code in cases:
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                index = write_snapshot(directory, version)
+                output, errors = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                    code = audit.main([str(index), directory])
+                self.assertEqual(code, expected_code, errors.getvalue())
+                if expected_code == 0:
+                    self.assertIn('"module_owners"', output.getvalue())
+                    self.assertEqual(errors.getvalue(), '')
+                else:
+                    self.assertEqual(output.getvalue(), '')
+                    self.assertNotIn(directory, errors.getvalue())
+
     def test_public_test_ca_loads_without_network_processes_or_keylog(self):
         """Искусственный открытый CA загружается офлайн; закрытого ключа в git нет."""
         certificate = Path(__file__).with_name('fixtures').joinpath('ca-test.crt').read_bytes()

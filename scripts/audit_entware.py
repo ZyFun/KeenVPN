@@ -158,8 +158,19 @@ def ca_count(data):
     return count
 
 
-def audit(index_data, archive_directory, required_modules):
+def load_python_requirements():
+    """Загрузить общее правило версии и список модулей диагностической утилиты."""
+    spec = importlib.util.spec_from_file_location("check_python", Path(__file__).with_name("check_python.py"))
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    return checker
+
+
+def audit(index_data, archive_directory, required_modules=None):
     """Вернуть публичный статический отчёт; пути и исходные исключения не выводятся."""
+    checker = load_python_requirements()
+    if required_modules is None:
+        required_modules = checker.REQUIRED_MODULES
     selected = dependency_closure(parse_index(index_data))
     python_versions = {
         record["Version"] for name, record in selected.items()
@@ -167,6 +178,12 @@ def audit(index_data, archive_directory, required_modules):
     }
     if len(python_versions) != 1:
         raise AuditError("Выбранные пакеты Python относятся к разным сборкам.")
+    match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:-[0-9]+)?", next(iter(python_versions)))
+    if match is None:
+        raise AuditError("Неподдерживаемый формат версии пакетов Python.")
+    version_info = tuple(int(part) for part in match.groups()) + ("final", 0)
+    if not checker.version_is_eligible(version_info, "cpython"):
+        raise AuditError("Выбранная ветка Python не соответствует требованиям проекта.")
     inventories, packages = {}, {}
     for name, record in selected.items():
         filename = record["Filename"]
@@ -212,10 +229,7 @@ def main(argv=None):
         print("Использование: python3 -I -S -B scripts/audit_entware.py PACKAGES IPK_DIR", file=sys.stderr)
         return 2
     try:
-        spec = importlib.util.spec_from_file_location("check_python", Path(__file__).with_name("check_python.py"))
-        checker = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(checker)
-        report = audit(read_limited(argv[0], MAX_INDEX), argv[1], checker.REQUIRED_MODULES)
+        report = audit(read_limited(argv[0], MAX_INDEX), argv[1])
     except Exception:
         print("Ошибка аудита: проверьте каталог, полный набор архивов, их целостность, зависимости и CA.", file=sys.stderr)
         return 1

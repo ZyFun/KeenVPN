@@ -1,0 +1,118 @@
+{
+  "routing": {
+    "domainStrategy": "IPOnDemand",
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": [
+          "dns-local"
+        ],
+        "outboundTag": "direct",
+        "ruleTag": "fixture-rule-01"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "full:localhost",
+          "domain:host-02.example",
+          "full:host-03.example"
+        ],
+        "outboundTag": "direct",
+        "ruleTag": "fixture-rule-02"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "force-proxy-redirect",
+          "force-proxy-tproxy"
+        ],
+        "ruleTag": "fixture-rule-03",
+        "balancerTag": "vpn-group"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "domain:host-04.example",
+          "domain:host-05.example"
+        ],
+        "ruleTag": "fixture-rule-04",
+        "balancerTag": "vpn-group"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "domain:host-06.example",
+          "domain:host-07.example",
+          "domain:host-08.example",
+          "domain:host-09.example",
+          "domain:host-10.example",
+          "domain:host-11.example",
+          "domain:host-12.example",
+          "domain:host-13.example",
+          "domain:host-14.example",
+          "domain:ru",
+          "domain:host-15.example",
+          "domain:host-16.example",
+          "domain:su",
+          "domain:xn--p1ai",
+          "domain:host-17.example",
+          "domain:host-18.example"
+        ],
+        "outboundTag": "direct",
+        "ruleTag": "fixture-rule-05"
+      },
+      {
+        "type": "field",
+        "ip": [
+          "0.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "127.0.0.0/8",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.0.0.0/24",
+          "192.0.2.0/24",
+          "192.88.99.0/24",
+          "192.168.0.0/16",
+          "198.51.100.0/24",
+          "203.0.113.0/24",
+          "224.0.0.0/4",
+          "255.255.255.255/32",
+          "::/128",
+          "::1/128",
+          "fc00::/7",
+          "fe80::/10",
+          "ff00::/8"
+        ],
+        "outboundTag": "direct",
+        "ruleTag": "fixture-rule-06"
+      },
+      {
+        "type": "field",
+        "ip": [
+          "geoip:ru"
+        ],
+        "outboundTag": "direct",
+        "ruleTag": "fixture-rule-07"
+      },
+      {
+        "type": "field",
+        "network": "tcp,udp",
+        "ruleTag": "fixture-rule-08",
+        "balancerTag": "vpn-group"
+      }
+    ],
+    "balancers": [
+      {
+        "tag": "vpn-group",
+        "selector": [
+          "trojan-out"
+        ],
+        "fallbackTag": "blocked",
+        "strategy": {
+          "type": "leastPing"
+        }
+      }
+    ]
+  }
+}

@@ -36,7 +36,7 @@ python3 -I -S -B scripts/audit_entware.py /path/to/Packages /path/to/ipk-directo
 python3 -I -S -B -m unittest discover -s tests -v
 ```
 
-Тесты используют искусственные данные и не требуют сети или роутера.
+Тесты используют искусственные данные и [обезличенные фикстуры конфигурации](tests/fixtures/router_snapshot/README.md). Сеть и роутер не требуются.
 
 ## Безопасность и участие
 

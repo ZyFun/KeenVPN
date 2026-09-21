@@ -1,0 +1,84 @@
+{
+  "inbounds": [
+    {
+      "tag": "redirect",
+      "listen": "::",
+      "port": 1181,
+      "protocol": "tunnel",
+      "settings": {
+        "followRedirect": true,
+        "network": "tcp"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls"
+        ],
+        "routeOnly": true
+      }
+    },
+    {
+      "tag": "tproxy",
+      "listen": "::",
+      "port": 1181,
+      "protocol": "tunnel",
+      "settings": {
+        "followRedirect": true,
+        "network": "udp"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "quic"
+        ],
+        "routeOnly": true
+      },
+      "streamSettings": {
+        "sockopt": {
+          "tproxy": "tproxy"
+        }
+      }
+    },
+    {
+      "tag": "force-proxy-redirect",
+      "listen": "::",
+      "port": 1191,
+      "protocol": "tunnel",
+      "settings": {
+        "followRedirect": true,
+        "network": "tcp"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls"
+        ],
+        "routeOnly": true
+      }
+    },
+    {
+      "tag": "force-proxy-tproxy",
+      "listen": "::",
+      "port": 1191,
+      "protocol": "tunnel",
+      "settings": {
+        "followRedirect": true,
+        "network": "udp"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "quic"
+        ],
+        "routeOnly": true
+      },
+      "streamSettings": {
+        "sockopt": {
+          "tproxy": "tproxy"
+        }
+      }
+    }
+  ]
+}

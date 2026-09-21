@@ -1,0 +1,19 @@
+{
+  "settings": {
+    "xkeen": {
+      "verify_downloads": "strict",
+      "killswitch": "on"
+    }
+  },
+  "init_flags": {
+    "start_auto": "on",
+    "proxy_dns": "off",
+    "proxy_router": "off",
+    "ipv6_support": "on"
+  },
+  "lists": {
+    "port_exclude.lst": "# Обезличенный снимок: исходные комментарии опущены.\n53\n",
+    "port_proxying.lst": "# Обезличенный снимок: исходные комментарии опущены.\n",
+    "ip_exclude.lst": "# Обезличенный снимок: исходные комментарии опущены.\n"
+  }
+}

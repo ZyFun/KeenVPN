@@ -1,0 +1,51 @@
+{
+  "outbounds": [
+    {
+      "tag": "trojan-out",
+      "protocol": "trojan",
+      "settings": {
+        "servers": [
+          {
+            "address": "host-01.example",
+            "port": 443,
+            "password": "fixture-password-not-a-credential"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "host-01.example",
+          "fingerprint": "firefox",
+          "allowInsecure": false
+        },
+        "wsSettings": {
+          "host": "host-01.example",
+          "path": "/fixture/ws"
+        },
+        "sockopt": {
+          "mark": 255,
+          "domainStrategy": "UseIPv4v6"
+        }
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {
+        "domainStrategy": "UseIPv4v6"
+      },
+      "streamSettings": {
+        "sockopt": {
+          "mark": 255
+        }
+      }
+    },
+    {
+      "tag": "blocked",
+      "protocol": "blackhole",
+      "settings": {}
+    }
+  ]
+}

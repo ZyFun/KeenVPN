@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "kind": "anonymized-config-projection",
+  "files": {
+    "keenetic.json": "587e329d5f448ac6a68af27d77de5a9fdcd9a65957a7bf7b9ebb221a00bdd5ba",
+    "xkeen.json": "c9cfc3b1f4037774e4a49af4e7a1ad48d127bdfbfe8d2b8a408bb8fa50aa1d27",
+    "xray/01_log.json": "fa5aa59c390cb3fad7830f6317c328ada1ec90950114f6151afab402f2295db0",
+    "xray/02_dns.json": "9b70d7ec42d72cfddcb36e386d552b52205c2f33291a5d6b06ae4e28a301fc0f",
+    "xray/03_inbounds.json": "54e4fea3d68f6d1020c8ba60f587a52e67d35b0c275a928fe42fb5ed87121f34",
+    "xray/04_outbounds.json": "d40f1ba9c9706e1c4faf31328600cec440cf2e4eeeb3bc826af531b573ccf75b",
+    "xray/05_routing.json": "faab7dacaee75cea7c05a29ed83c69156d07a98545b9589ae7346a7b340dddec",
+    "xray/06_policy.json": "5d5ec11248c5659861a93ab37dce42cd7e58af362709ce90823cb78382b22054",
+    "xray/07_observatory.json": "afd8f6097a1010d84d673aaa6cf2309cd5b2a58f607864231500efc4b08b401b"
+  }
+}

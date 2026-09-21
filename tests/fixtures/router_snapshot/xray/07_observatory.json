@@ -1,0 +1,14 @@
+{
+  "burstObservatory": {
+    "subjectSelector": [
+      "trojan-out"
+    ],
+    "pingConfig": {
+      "destination": "https://probe.example/check",
+      "interval": "15s",
+      "sampling": 1,
+      "timeout": "5s",
+      "httpMethod": "HEAD"
+    }
+  }
+}

@@ -1,0 +1,748 @@
+{
+  "ip/policy": {
+    "Policy10": {
+      "description": "fixture-policy-1",
+      "permit": [
+        {
+          "enabled": true,
+          "interface": "GigabitEthernet1"
+        },
+        {
+          "enabled": true,
+          "interface": "WifiMaster1/WifiStation0"
+        }
+      ]
+    },
+    "Policy20": {
+      "description": "fixture-policy-2",
+      "permit": [
+        {
+          "enabled": true,
+          "interface": "GigabitEthernet1"
+        },
+        {
+          "no": true,
+          "enabled": false,
+          "interface": "WifiMaster1/WifiStation0"
+        }
+      ]
+    },
+    "Policy30": {
+      "description": "fixture-policy-3",
+      "permit": [
+        {
+          "enabled": true,
+          "interface": "GigabitEthernet1"
+        },
+        {
+          "enabled": true,
+          "interface": "WifiMaster1/WifiStation0"
+        }
+      ]
+    }
+  },
+  "ip/hotspot": {
+    "policy": [
+      {
+        "interface": "Bridge0",
+        "policy": "Policy10"
+      },
+      {
+        "interface": "Bridge1",
+        "access": "deny"
+      }
+    ],
+    "host": [
+      {
+        "mac": "02:00:00:54:00:01",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy10"
+      },
+      {
+        "mac": "02:00:00:54:00:02",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy10"
+      },
+      {
+        "mac": "02:00:00:54:00:03",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy10"
+      },
+      {
+        "mac": "02:00:00:54:00:04",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy10"
+      },
+      {
+        "mac": "02:00:00:54:00:05",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy10"
+      },
+      {
+        "mac": "02:00:00:54:00:06",
+        "access": "deny",
+        "deny": true
+      },
+      {
+        "mac": "02:00:00:54:00:07",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy10"
+      },
+      {
+        "mac": "02:00:00:54:00:08",
+        "access": "permit",
+        "permit": true
+      },
+      {
+        "mac": "02:00:00:54:00:09",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy30",
+        "priority": 1
+      },
+      {
+        "mac": "02:00:00:54:00:0a",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy10"
+      },
+      {
+        "mac": "02:00:00:54:00:0b",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy30",
+        "priority": 2
+      },
+      {
+        "mac": "02:00:00:54:00:0c",
+        "access": "permit",
+        "permit": true,
+        "conform": true
+      },
+      {
+        "mac": "02:00:00:54:00:0d",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy10",
+        "priority": 3
+      },
+      {
+        "mac": "02:00:00:54:00:0e",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy10"
+      },
+      {
+        "mac": "02:00:00:54:00:0f",
+        "access": "permit",
+        "permit": true,
+        "conform": true
+      },
+      {
+        "mac": "02:00:00:54:00:10",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy30"
+      },
+      {
+        "mac": "02:00:00:54:00:11",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy30"
+      },
+      {
+        "mac": "02:00:00:54:00:12",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy10",
+        "priority": 2
+      },
+      {
+        "mac": "02:00:00:54:00:13",
+        "access": "permit",
+        "permit": true,
+        "policy": "Policy30",
+        "priority": 1
+      }
+    ],
+    "auto-register": {
+      "disable": false
+    }
+  },
+  "known/host": {
+    "device-06": {
+      "mac": "02:00:00:54:00:06"
+    },
+    "device-09": {
+      "mac": "02:00:00:54:00:09"
+    },
+    "device-16": {
+      "mac": "02:00:00:54:00:10"
+    },
+    "device-02": {
+      "mac": "02:00:00:54:00:02"
+    },
+    "device-18": {
+      "mac": "02:00:00:54:00:12"
+    },
+    "device-08": {
+      "mac": "02:00:00:54:00:08"
+    },
+    "device-05": {
+      "mac": "02:00:00:54:00:05"
+    },
+    "device-14": {
+      "mac": "02:00:00:54:00:0e"
+    },
+    "device-03": {
+      "mac": "02:00:00:54:00:03"
+    },
+    "device-01": {
+      "mac": "02:00:00:54:00:01"
+    },
+    "device-10": {
+      "mac": "02:00:00:54:00:0a"
+    },
+    "device-04": {
+      "mac": "02:00:00:54:00:04"
+    },
+    "device-15": {
+      "mac": "02:00:00:54:00:0f"
+    },
+    "device-12": {
+      "mac": "02:00:00:54:00:0c"
+    },
+    "device-17": {
+      "mac": "02:00:00:54:00:11"
+    },
+    "device-07": {
+      "mac": "02:00:00:54:00:07"
+    },
+    "device-11": {
+      "mac": "02:00:00:54:00:0b"
+    },
+    "device-13": {
+      "mac": "02:00:00:54:00:0d"
+    },
+    "device-19": {
+      "mac": "02:00:00:54:00:13"
+    }
+  },
+  "show/ip/hotspot": {
+    "host": [
+      {
+        "mac": "02:00:00:54:00:0e",
+        "ip": "192.0.2.20",
+        "ip6": [
+          "2001:db8:54::1"
+        ],
+        "hostname": "device-14",
+        "name": "device-14",
+        "interface": {
+          "id": "Bridge0",
+          "name": "fixture-interface",
+          "description": "fixture-interface"
+        },
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy10",
+        "priority": 6,
+        "active": true,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:05",
+        "ip": "192.0.2.21",
+        "ip6": [
+          "2001:db8:54::2"
+        ],
+        "hostname": "device-05",
+        "name": "device-05",
+        "interface": {
+          "id": "Bridge0",
+          "name": "fixture-interface",
+          "description": "fixture-interface"
+        },
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy10",
+        "priority": 6,
+        "active": true,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:0b",
+        "ip": "192.0.2.22",
+        "ip6": [
+          "2001:db8:54::3"
+        ],
+        "hostname": "device-11",
+        "name": "device-11",
+        "interface": {
+          "id": "Bridge0",
+          "name": "fixture-interface",
+          "description": "fixture-interface"
+        },
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy30",
+        "priority": 2,
+        "active": true,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:04",
+        "ip": "192.0.2.23",
+        "ip6": [],
+        "hostname": "device-04",
+        "name": "device-04",
+        "interface": {
+          "id": "Bridge0",
+          "name": "fixture-interface",
+          "description": "fixture-interface"
+        },
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy10",
+        "priority": 6,
+        "active": true,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:0f",
+        "ip": "192.0.2.24",
+        "ip6": [],
+        "hostname": "device-15",
+        "name": "device-15",
+        "interface": {
+          "id": "Bridge0",
+          "name": "fixture-interface",
+          "description": "fixture-interface"
+        },
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy10",
+        "priority": 6,
+        "active": true,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:0c",
+        "ip": "192.0.2.25",
+        "ip6": [
+          "2001:db8:54::4"
+        ],
+        "hostname": "device-12",
+        "name": "device-12",
+        "interface": {
+          "id": "Bridge0",
+          "name": "fixture-interface",
+          "description": "fixture-interface"
+        },
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy10",
+        "priority": 6,
+        "active": true,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:08",
+        "ip": "192.0.2.26",
+        "ip6": [
+          "2001:db8:54::5",
+          "2001:db8:54::6"
+        ],
+        "hostname": "device-08",
+        "name": "device-08",
+        "interface": {
+          "id": "Bridge0",
+          "name": "fixture-interface",
+          "description": "fixture-interface"
+        },
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "",
+        "priority": 6,
+        "active": true,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:13",
+        "ip": "192.0.2.27",
+        "ip6": [
+          "2001:db8:54::7",
+          "2001:db8:54::8"
+        ],
+        "hostname": "device-19",
+        "name": "device-19",
+        "interface": {
+          "id": "Bridge0",
+          "name": "fixture-interface",
+          "description": "fixture-interface"
+        },
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy30",
+        "priority": 1,
+        "active": true,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:02",
+        "ip": "192.0.2.28",
+        "ip6": [],
+        "hostname": "device-02",
+        "name": "device-02",
+        "interface": {
+          "id": "Bridge0",
+          "name": "fixture-interface",
+          "description": "fixture-interface"
+        },
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy10",
+        "priority": 6,
+        "active": true,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:0d",
+        "ip": "192.0.2.29",
+        "ip6": [
+          "2001:db8:54::9",
+          "2001:db8:54::a",
+          "2001:db8:54::b",
+          "2001:db8:54::c"
+        ],
+        "hostname": "device-13",
+        "name": "device-13",
+        "interface": {
+          "id": "Bridge0",
+          "name": "fixture-interface",
+          "description": "fixture-interface"
+        },
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy10",
+        "priority": 3,
+        "active": true,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:01",
+        "ip": "192.0.2.30",
+        "ip6": [],
+        "hostname": "device-01",
+        "name": "device-01",
+        "interface": {
+          "id": "Bridge0",
+          "name": "fixture-interface",
+          "description": "fixture-interface"
+        },
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy10",
+        "priority": 6,
+        "active": true,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:12",
+        "ip": "192.0.2.31",
+        "ip6": [
+          "2001:db8:54::d",
+          "2001:db8:54::e"
+        ],
+        "hostname": "device-18",
+        "name": "device-18",
+        "interface": {
+          "id": "Bridge0",
+          "name": "fixture-interface",
+          "description": "fixture-interface"
+        },
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy10",
+        "priority": 2,
+        "active": true,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:06",
+        "ip": "0.0.0.0",
+        "ip6": [],
+        "hostname": "",
+        "name": "device-06",
+        "registered": true,
+        "access": "deny",
+        "schedule": "",
+        "policy": "",
+        "priority": 6,
+        "active": false,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:09",
+        "ip": "0.0.0.0",
+        "ip6": [],
+        "hostname": "",
+        "name": "device-09",
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy30",
+        "priority": 1,
+        "active": false,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:10",
+        "ip": "0.0.0.0",
+        "ip6": [],
+        "hostname": "",
+        "name": "device-16",
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy30",
+        "priority": 6,
+        "active": false,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:03",
+        "ip": "0.0.0.0",
+        "ip6": [],
+        "hostname": "",
+        "name": "device-03",
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy10",
+        "priority": 6,
+        "active": false,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:0a",
+        "ip": "0.0.0.0",
+        "ip6": [],
+        "hostname": "",
+        "name": "device-10",
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy10",
+        "priority": 6,
+        "active": false,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:11",
+        "ip": "0.0.0.0",
+        "ip6": [],
+        "hostname": "",
+        "name": "device-17",
+        "interface": {
+          "id": "Bridge0",
+          "name": "fixture-interface",
+          "description": "fixture-interface"
+        },
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy30",
+        "priority": 6,
+        "active": false,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      },
+      {
+        "mac": "02:00:00:54:00:07",
+        "ip": "0.0.0.0",
+        "ip6": [],
+        "hostname": "",
+        "name": "device-07",
+        "registered": true,
+        "access": "permit",
+        "schedule": "",
+        "policy": "Policy10",
+        "priority": 6,
+        "active": false,
+        "traffic-shape": {
+          "rx": 0,
+          "tx": 0,
+          "mode": "mac",
+          "schedule": ""
+        }
+      }
+    ]
+  },
+  "dns-proxy": {
+    "rebind-protect": {
+      "auto": true
+    },
+    "intercept": {
+      "enable": true
+    },
+    "https": {
+      "upstream": [
+        {
+          "url": "https://dns-1.example/dns-query",
+          "format": "dnsm"
+        },
+        {
+          "url": "https://dns-2.example/dns-query",
+          "format": "dnsm"
+        }
+      ]
+    },
+    "filter": {
+      "assign": {
+        "interface": {
+          "preset": [
+            {
+              "interface": "Bridge0",
+              "preset": "yandex-base"
+            },
+            {
+              "interface": "Bridge1",
+              "preset": "yandex-base"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "ip/name-server": [],
+  "ipv6": {
+    "subnet": {
+      "Default": {
+        "bind": "Bridge0",
+        "mode": {
+          "slaac": true
+        },
+        "prefix": {
+          "length": 64
+        },
+        "number": "0"
+      }
+    }
+  },
+  "opkg": {
+    "disk": {
+      "disk": "00000000-0000-4000-8000-000000000054:/"
+    },
+    "initrc": {
+      "path": "/opt/etc/init.d/rc.unslung"
+    }
+  }
+}

@@ -56,6 +56,9 @@ def parse_trojan_uri(uri: str) -> TrojanConnection:
     if _BAD_ESCAPE.search(uri):
         raise TrojanURIError(TrojanURIErrorCode.INVALID_URI)
     try:
+        # unquote() не проверяет Unicode в частях строки без escape-последовательностей.
+        # До разбора отклоняем суррогатные кодовые точки, не представимые в UTF-8.
+        uri.encode("utf-8", errors="strict")
         return _parse(uri)
     except TrojanURIError:
         raise

@@ -23,6 +23,7 @@ from keenvpn.adapters.trojan_uri import (
     MAX_URI_LENGTH,
     TrojanURIError,
     TrojanURIErrorCode,
+    TrojanURIErrorReason,
     parse_trojan_uri,
 )
 from keenvpn.domain.connection import TrojanConnection
@@ -121,6 +122,122 @@ class TrojanURIParsingTests(unittest.TestCase):
         ):
             with self.assertRaises(TrojanURIError):
                 parse_trojan_uri(uri)
+
+
+class TrojanURIValidationTests(unittest.TestCase):
+    def assert_rejected(self, uri, code):
+        with self.assertRaises(TrojanURIError) as raised:
+            parse_trojan_uri(uri)
+        self.assertEqual(raised.exception.code, code)
+        return raised.exception
+
+    def test_port_boundaries_and_leading_zeroes_are_accepted(self):
+        for server in ("vpn.example.test", "192.0.2.10", "[2001:db8::1]"):
+            for port, expected in (("1", 1), ("65535", 65535), ("00001", 1), ("00443", 443)):
+                with self.subTest(server=server, port=port):
+                    uri = f"trojan://TEST_ONLY_PASSWORD@{server}:{port}?security=tls&type=ws"
+                    connection = parse_trojan_uri(uri)
+                    self.assertEqual(connection.port, expected)
+                    self.assertEqual(connection.path, "/")
+
+    def test_invalid_port_syntax_and_range_are_rejected(self):
+        for port in (
+            "", "0", "00000", "65536", "99999", "000443", "9" * 100,
+            "-1", "+443", "443.0", "1e3", "0x1bb", "4_43", "443:80",
+            "%34%34%33", "٤٤٣", "４４３",
+        ):
+            with self.subTest(port=port):
+                self.assert_rejected(URI.replace(":443?", f":{port}?"), TrojanURIErrorCode.INVALID_URI)
+
+    def test_required_authority_parts_are_not_inferred(self):
+        for endpoint in (
+            "vpn.example.test:443", "@vpn.example.test:443", "TEST_ONLY_PASSWORD@:443",
+            "TEST_ONLY_PASSWORD@vpn.example.test", "TEST_ONLY_PASSWORD@",
+            "TEST_ONLY_PASSWORD@vpn.example.test@other.example.test:443",
+            "TEST_ONLY_PASSWORD@2001:db8::1:443", "TEST_ONLY_PASSWORD@[invalid]:443",
+        ):
+            with self.subTest(endpoint=endpoint):
+                self.assert_rejected(f"trojan://{endpoint}?security=tls&type=ws", TrojanURIErrorCode.INVALID_URI)
+
+    def test_required_security_and_transport_must_be_present_and_nonempty(self):
+        for query in (None, "", "security=tls", "type=ws", "security=&type=ws", "security=tls&type="):
+            with self.subTest(query=query):
+                uri = "trojan://TEST_ONLY_PASSWORD@vpn.example.test:443"
+                if query is not None:
+                    uri += "?" + query
+                self.assert_rejected(uri, TrojanURIErrorCode.INVALID_URI)
+
+    def test_required_modes_are_compared_after_single_decoding(self):
+        uri = "trojan://TEST_ONLY_PASSWORD@vpn.example.test:443?%73ecurity=%74%6C%73&%74ype=%77%73"
+        connection = parse_trojan_uri(uri)
+        self.assertEqual((connection.security, connection.transport), ("tls", "ws"))
+        for value in (uri.replace("%74%6C%73", "%2574ls"), uri.replace("%77%73", "%2577s")):
+            self.assert_rejected(value, TrojanURIErrorCode.UNSUPPORTED_URI)
+
+    def test_duplicate_parameters_are_rejected_even_if_values_agree(self):
+        for key, value in (
+            ("security", "tls"), ("type", "ws"), ("sni", "tls.example.test"),
+            ("host", "ws.example.test"), ("path", "%2Fsocket"), ("fp", "firefox"),
+        ):
+            encoded_key = f"%{ord(key[0]):02X}" + key[1:]
+            for duplicate_key in (key, encoded_key):
+                for duplicate_value in (value, "", "other"):
+                    for reverse in (False, True):
+                        with self.subTest(key=key, duplicate_key=duplicate_key, value=duplicate_value, reverse=reverse):
+                            pairs = [f"{key}={value}", f"{duplicate_key}={duplicate_value}"]
+                            if reverse:
+                                pairs.reverse()
+                            uri = URI.replace(f"{key}={value}", "&".join(pairs))
+                            self.assert_rejected(uri, TrojanURIErrorCode.INVALID_URI)
+
+    def test_unknown_modes_and_parameters_are_not_ignored(self):
+        cases = [URI.replace("trojan://", f"{scheme}://") for scheme in ("vless", "vmess", "http", "https")]
+        cases += [URI.replace("security=tls", f"security={security}") for security in ("none", "reality", "TLS")]
+        cases += [URI.replace("type=ws", f"type={transport}") for transport in ("tcp", "grpc", "xhttp", "h2", "WS")]
+        cases += [URI.replace("#Example", f"&{parameter}#Example") for parameter in (
+            "allowInsecure=1", "alpn=h2", "flow=other", "unknown=", "%75nknown=value",
+        )]
+        for uri in cases:
+            with self.subTest(uri=uri):
+                self.assert_rejected(uri, TrojanURIErrorCode.UNSUPPORTED_URI)
+
+    def test_malformed_query_pairs_are_rejected(self):
+        for query in (
+            "security=tls&type=ws&", "&security=tls&type=ws", "security=tls&&type=ws",
+            "security=tls&type=ws&path", "security=tls&type", "security=tls&type=ws&=value",
+        ):
+            with self.subTest(query=query):
+                uri = "trojan://TEST_ONLY_PASSWORD@vpn.example.test:443?" + query
+                self.assert_rejected(uri, TrojanURIErrorCode.INVALID_URI)
+
+    def test_validation_reasons_are_structured_and_do_not_echo_values(self):
+        invalid = TrojanURIErrorCode.INVALID_URI
+        unsupported = TrojanURIErrorCode.UNSUPPORTED_URI
+        marker = "TEST_VALIDATION_MARKER"
+        uri = URI.replace("TEST_ONLY_PASSWORD", marker)
+        cases = (
+            (uri.replace("vpn.example.test", f"[{marker}]"), invalid, TrojanURIErrorReason.INVALID_ENDPOINT),
+            (uri.replace(":443?", f":{marker}?"), invalid, TrojanURIErrorReason.INVALID_PORT),
+            (uri.replace(marker + "@", "@"), invalid, TrojanURIErrorReason.MISSING_PASSWORD),
+            (uri.replace("security=tls&", ""), invalid, TrojanURIErrorReason.MISSING_SECURITY),
+            (uri.replace("type=ws&", ""), invalid, TrojanURIErrorReason.MISSING_TRANSPORT),
+            (uri.replace("#Example", f"&{marker}#Example"), invalid, TrojanURIErrorReason.INVALID_QUERY),
+            (uri.replace("type=ws", f"type=ws&type={marker}"), invalid, TrojanURIErrorReason.DUPLICATE_PARAMETER),
+            (uri.replace("trojan://", f"{marker}://"), unsupported, TrojanURIErrorReason.UNSUPPORTED_SCHEME),
+            (uri.replace("security=tls", f"security={marker}"), unsupported, TrojanURIErrorReason.UNSUPPORTED_SECURITY),
+            (uri.replace("type=ws", f"type={marker}"), unsupported, TrojanURIErrorReason.UNSUPPORTED_TRANSPORT),
+            (uri.replace("#Example", f"&{marker}=1#Example"), unsupported, TrojanURIErrorReason.UNSUPPORTED_PARAMETER),
+        )
+        for value, code, reason in cases:
+            with self.subTest(reason=reason):
+                error = self.assert_rejected(value, code)
+                self.assertEqual(error.reason, reason)
+                rendered = str(error) + repr(error) + repr(vars(error)) + "".join(traceback.format_exception(error))
+                self.assertNotIn(marker, rendered)
+                self.assertNotIn(value, rendered)
+
+        error = self.assert_rejected(None, invalid)
+        self.assertIsNone(error.reason)
 
 
 class TrojanURIDecodingTests(unittest.TestCase):

@@ -63,6 +63,13 @@ class TrojanURIError(ValueError):
         }
         super().__init__(messages[code] if reason is None else reasons[reason])
 
+    def to_diagnostic(self) -> dict[str, str | None]:
+        """Вернуть только коды отказа, без traceback, контекста и заметок."""
+        return {
+            "code": self.code.value,
+            "reason": self.reason.value if self.reason is not None else None,
+        }
+
 
 def _decode(value: str) -> str:
     """Снять один уровень URI-кодирования, не интерпретируя текст как код."""
@@ -77,28 +84,38 @@ def _decode(value: str) -> str:
 def parse_trojan_uri(uri: str) -> TrojanConnection:
     """Разобрать одну ссылку в модель, не применяя и не проверяя соединение.
 
-    Ошибки не содержат исходную ссылку или значения её полей. Нельзя печатать
-    входную строку, reveal() или локальные переменные traceback при диагностике.
+    Ожидаемые ошибки выходят без внутреннего контекста и кадров разбора.
+    Вход, reveal() и кадры вызывающего кода не предназначены для диагностики.
     """
+    try:
+        return _parse(uri)
+    except TrojanURIError as error:
+        code, reason = error.code, error.reason
+    except ValueError:
+        code, reason = TrojanURIErrorCode.INVALID_URI, None
+
+    # Новый экземпляр вне обработчика не сохраняет decoder/IPv6-исключение
+    # и его кадры. Удаляем вход и из собственного кадра публичной функции.
+    del uri
+    try:
+        raise TrojanURIError(code, reason=reason) from None
+    except TrojanURIError as error:
+        # Вызов мог произойти внутри чужого except: from None скрывает контекст
+        # только при печати, поэтому разрываем и саму ссылку на него.
+        error.__context__ = None
+        raise
+
+
+def _parse(uri: str) -> TrojanConnection:
     if type(uri) is not str or not uri or len(uri) > MAX_URI_LENGTH:
         raise TrojanURIError(TrojanURIErrorCode.INVALID_URI)
     if any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in uri):
         raise TrojanURIError(TrojanURIErrorCode.INVALID_URI)
     if _BAD_ESCAPE.search(uri):
         raise TrojanURIError(TrojanURIErrorCode.INVALID_URI)
-    try:
-        # unquote() не проверяет Unicode в частях строки без escape-последовательностей.
-        # До разбора отклоняем суррогатные кодовые точки, не представимые в UTF-8.
-        uri.encode("utf-8", errors="strict")
-        return _parse(uri)
-    except TrojanURIError:
-        raise
-    except ValueError:
-        # Исключения декодера/IPv6 могут включать фрагмент входа: наружу только код.
-        raise TrojanURIError(TrojanURIErrorCode.INVALID_URI) from None
-
-
-def _parse(uri: str) -> TrojanConnection:
+    # unquote() не проверяет Unicode в частях строки без escape-последовательностей.
+    # До разбора отклоняем суррогатные кодовые точки, не представимые в UTF-8.
+    uri.encode("utf-8", errors="strict")
     scheme, separator, remainder = uri.partition("://")
     if not separator or scheme.lower() != "trojan":
         raise TrojanURIError(TrojanURIErrorCode.UNSUPPORTED_URI, reason=TrojanURIErrorReason.UNSUPPORTED_SCHEME)

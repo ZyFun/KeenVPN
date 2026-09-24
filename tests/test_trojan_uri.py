@@ -15,6 +15,7 @@ import traceback
 import unittest
 from unittest.mock import patch
 import urllib.request
+from urllib.parse import quote
 
 
 # Изолированный запуск unittest не добавляет корень исходников в sys.path.
@@ -363,7 +364,53 @@ class TrojanURIDecodingTests(unittest.TestCase):
 
 
 class TrojanURIPrivacyTests(unittest.TestCase):
-    def test_secret_is_masked_in_model_logs_and_generic_conversion(self):
+    def private_connection(self):
+        """Поместить искусственный секрет во все произвольные поля ссылки."""
+        marker = "TEST_PRIVATE_данные"
+        encoded = quote(marker, safe="")
+        uri = (
+            f"trojan://{encoded}%2B%2F@{marker}.example.test:54321"
+            f"?security=tls&type=ws&sni={encoded}&host={encoded}"
+            f"&path=%2F{encoded}&fp={encoded}#trojan%3A%2F%2F{encoded}"
+        )
+        return parse_trojan_uri(uri), uri, marker
+
+    def test_errors_do_not_retain_low_level_exception_context(self):
+        marker = "TEST_PRIVATE_MARKER"
+        for uri in (
+            URI.replace("vpn.example.test", f"[{marker}]"),
+            URI.replace("%2Fsocket", "%FF" + marker),
+            URI.replace("Example", marker + "\ud800"),
+        ):
+            with self.subTest(uri=ascii(uri)):
+                with self.assertRaises(TrojanURIError) as raised:
+                    parse_trojan_uri(uri)
+                self.assertIsNone(raised.exception.__context__)
+                self.assertIsNone(raised.exception.__cause__)
+
+    def test_parser_traceback_frames_do_not_retain_input(self):
+        marker = "TEST_TRACEBACK_MARKER"
+        for uri in (
+            marker, URI.replace("%2Fsocket", "%FF" + marker),
+            URI.replace("TEST_ONLY_PASSWORD", marker).replace("type=ws", "type=grpc"),
+            URI.replace("TEST_ONLY_PASSWORD", marker) + "\n",
+            URI.replace("TEST_ONLY_PASSWORD", marker).replace("%2Fsocket", "%GG"),
+        ):
+            with self.subTest(uri=uri):
+                try:
+                    parse_trojan_uri(uri)
+                except TrojanURIError as error:
+                    parser_frames = [
+                        frame for frame, _ in traceback.walk_tb(error.__traceback__)
+                        if frame.f_globals.get("__name__") == "keenvpn.adapters.trojan_uri"
+                    ]
+                    self.assertTrue(parser_frames)
+                    for frame in parser_frames:
+                        self.assertNotIn(marker, repr(frame.f_locals))
+                else:
+                    self.fail("Ожидалась ошибка разбора")
+
+    def test_password_is_masked_in_model_logs_and_generic_conversion(self):
         connection = parse_trojan_uri(URI)
         output = io.StringIO()
         logger = logging.Logger("trojan-uri-test")
@@ -374,7 +421,99 @@ class TrojanURIPrivacyTests(unittest.TestCase):
         self.assertNotIn(URI, rendered)
         self.assertIn("скрыто", str(connection.password))
 
+    def test_connection_diagnostic_contains_only_safe_metadata(self):
+        connection, uri, marker = self.private_connection()
+        report = connection.to_diagnostic()
+        self.assertEqual(report, {
+            "protocol": "trojan", "security": "tls", "transport": "ws", "parameters": "<скрыто>",
+            "has_sni": True, "has_host": True, "has_fingerprint": True, "has_name": True,
+        })
+        for rendered in (repr(report), json.dumps(report), json.dumps(report, ensure_ascii=False)):
+            self.assertNotIn(marker, rendered)
+            self.assertNotIn(quote(marker, safe=""), rendered)
+            self.assertNotIn(uri, rendered)
+            self.assertNotIn("54321", rendered)
+        # Диагностика не редактирует приватную модель и не подменяет её экспорт.
+        self.assertEqual(connection.password.reveal(), marker + "+/")
+        self.assertEqual(connection.path, "/" + marker)
+        self.assertEqual(connection.name, "trojan://" + marker)
+
+    def test_diagnostic_presence_distinguishes_absent_from_empty_fields(self):
+        minimal = "trojan://TEST_ONLY_PASSWORD@vpn.example.test:443?security=tls&type=ws"
+        for suffix, expected in (("", False), ("&sni=&host=&fp=#", True)):
+            report = parse_trojan_uri(minimal + suffix).to_diagnostic()
+            for name in ("has_sni", "has_host", "has_fingerprint", "has_name"):
+                self.assertIs(report[name], expected)
+
+    def test_error_diagnostic_ignores_notes_args_and_extra_attributes(self):
+        marker = "TEST_ERROR_METADATA_MARKER"
+        try:
+            parse_trojan_uri(URI.replace("type=ws", "type=grpc"))
+        except TrojanURIError as error:
+            error.add_note(marker)
+            error.args = (marker,)
+            error.private_details = {"uri": URI}
+            report = error.to_diagnostic()
+            self.assertEqual(report, {"code": "unsupported_uri", "reason": "unsupported_transport"})
+            rendered = json.dumps(report)
+            self.assertNotIn(marker, rendered)
+            self.assertNotIn("TEST_ONLY_PASSWORD", rendered)
+        else:
+            self.fail("Ожидалась ошибка неподдерживаемого транспорта")
+
+        with self.assertRaises(TrojanURIError) as raised:
+            parse_trojan_uri(None)
+        self.assertEqual(raised.exception.to_diagnostic(), {"code": "invalid_uri", "reason": None})
+
+    def test_repr_and_standard_logs_do_not_echo_arbitrary_connection_fields(self):
+        connection, uri, marker = self.private_connection()
+        output = io.StringIO()
+        logger = logging.Logger("trojan-private-fields-test")
+        logger.addHandler(logging.StreamHandler(output))
+        logger.warning("%s %r %s %r", connection, [connection], connection.password, connection.to_diagnostic())
+        rendered = " ".join((str(connection), repr(connection), ascii(connection), repr({"connection": connection}), output.getvalue()))
+        self.assertNotIn(marker, rendered)
+        self.assertNotIn(quote(marker, safe=""), rendered)
+        self.assertNotIn(uri, rendered)
+        self.assertNotIn("54321", rendered)
+
+    def test_call_inside_except_does_not_attach_external_exception(self):
+        try:
+            raise ValueError("TEST_CALLER_SECRET")
+        except ValueError as outer:
+            try:
+                parse_trojan_uri(URI.replace("type=ws", "type=grpc"))
+            except TrojanURIError as error:
+                self.assertIsNone(error.__context__)
+                self.assertIsNone(error.__cause__)
+                self.assertNotIn("TEST_CALLER_SECRET", "".join(traceback.format_exception(error)))
+            else:
+                self.fail("Ожидалась ошибка неподдерживаемого транспорта")
+            self.assertEqual(outer.args, ("TEST_CALLER_SECRET",))
+
+    def test_wrong_input_type_is_rejected_without_formatting_it(self):
+        class PrivateInput:
+            def __repr__(self):
+                raise AssertionError("Не следует форматировать входной объект")
+
+            __str__ = __repr__
+
+        try:
+            parse_trojan_uri(PrivateInput())
+        except TrojanURIError as error:
+            self.assertEqual(error.code, TrojanURIErrorCode.INVALID_URI)
+            # Снимок только кадров парсера: кадры вызывающего кода остаются приватными.
+            snapshot = traceback.TracebackException.from_exception(error, capture_locals=True)
+            for frame in snapshot.stack:
+                if frame.filename.endswith("/keenvpn/adapters/trojan_uri.py"):
+                    self.assertNotIn("uri", frame.locals)
+        else:
+            self.fail("Ожидался отказ без форматирования входа")
+
     def test_errors_do_not_echo_input_or_low_level_exception(self):
+        output = io.StringIO()
+        logger = logging.Logger("trojan-errors-test")
+        logger.addHandler(logging.StreamHandler(output))
         for uri in (
             URI.replace("vpn.example.test", "[TEST_ONLY_PASSWORD]"),
             URI.replace("%2Fsocket", "%FFTEST_ONLY_PASSWORD"),
@@ -383,12 +522,25 @@ class TrojanURIPrivacyTests(unittest.TestCase):
             try:
                 parse_trojan_uri(uri)
             except TrojanURIError as error:
+                logger.exception("Ошибка импорта: %s; диагностика: %r", error, error.to_diagnostic())
                 rendered = str(error) + repr(error) + "".join(traceback.format_exception(error))
                 self.assertNotIn("TEST_ONLY_PASSWORD", rendered)
                 self.assertNotIn(uri, rendered)
                 self.assertNotIn("IPv6Address", rendered)
             else:
                 self.fail("Ожидалась безопасная ошибка")
+        self.assertNotIn("TEST_ONLY_PASSWORD", output.getvalue())
+        self.assertNotIn("UnicodeDecodeError", output.getvalue())
+        self.assertNotIn("AddressValueError", output.getvalue())
+
+    def test_rejected_input_does_not_write_to_output_or_log(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with patch.object(logging.Logger, "_log", side_effect=AssertionError("Парсер не должен писать в лог")):
+                for uri in (None, URI.replace("path=%2Fsocket", "path=%FF"), URI.replace("type=ws", "type=grpc")):
+                    with self.assertRaises(TrojanURIError):
+                        parse_trojan_uri(uri)
+        self.assertEqual(output.getvalue(), "")
 
 
 if __name__ == "__main__":

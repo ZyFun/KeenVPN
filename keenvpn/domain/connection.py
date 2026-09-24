@@ -29,7 +29,11 @@ class SecretValue:
 
 @dataclass(frozen=True, slots=True, repr=False)
 class TrojanConnection:
-    """Разобранные данные; наличие модели не подтверждает работу сервера."""
+    """Приватные данные; для отчёта используется только to_diagnostic().
+
+    Наличие модели не подтверждает работу сервера. asdict() не является
+    безопасным отчётом: произвольные поля тоже могут содержать секрет.
+    """
 
     server: str
     port: int
@@ -46,3 +50,16 @@ class TrojanConnection:
     def __repr__(self) -> str:
         # Произвольные поля ссылки тоже могут содержать секрет или управляющий текст.
         return "TrojanConnection(<скрытые параметры>)"
+
+    def to_diagnostic(self) -> dict[str, str | bool]:
+        """Вернуть описание формата и наличие полей без их значений."""
+        return {
+            "protocol": self.protocol,
+            "security": self.security,
+            "transport": self.transport,
+            "parameters": "<скрыто>",
+            "has_sni": self.sni is not None,
+            "has_host": self.host is not None,
+            "has_fingerprint": self.fingerprint is not None,
+            "has_name": self.name is not None,
+        }

@@ -159,8 +159,13 @@ class RoutingPolicy:
             try:
                 result = matcher(rule.condition)
             except Exception:
-                # Текст ошибки источника может содержать приватное условие.
-                raise RoutingValidationError(RoutingErrorCode.MATCHER) from None
+                try:
+                    raise RoutingValidationError(RoutingErrorCode.MATCHER) from None
+                except RoutingValidationError as error:
+                    # from None скрывает вывод, но сохраняет исходную цепочку.
+                    # Очистить её после raise и передать ошибку без нового связывания.
+                    error.__context__ = None
+                    raise
             if not isinstance(result, MatchResult):
                 raise RoutingValidationError(RoutingErrorCode.MATCH_RESULT) from None
             if result is MatchResult.UNKNOWN:

@@ -3,6 +3,7 @@
 import builtins
 import contextlib
 from dataclasses import FrozenInstanceError
+import gc
 import io
 import itertools
 import json
@@ -15,6 +16,7 @@ import sys
 import traceback
 import unittest
 from unittest.mock import Mock, patch
+import weakref
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -269,6 +271,63 @@ class RoutingPolicyTests(unittest.TestCase):
                 with self.assertRaises(RoutingValidationError) as raised:
                     function(*args)
                 self.assertNotIn(marker, "".join(traceback.format_exception(raised.exception)))
+
+    def test_matcher_error_does_not_expose_source_exception_chain(self):
+        marker = "SYNTHETIC_" + "MATCHER_CHAIN"
+
+        def matcher(condition):
+            try:
+                raise ValueError(marker)
+            except ValueError as cause:
+                error = RuntimeError(marker)
+                error.add_note(marker)
+                raise error from cause
+
+        error = self.assert_invalid(RoutingErrorCode.MATCHER, self.policy.select_first, matcher)
+        self.assertIsNone(error.__context__)
+        self.assertIsNone(error.__cause__)
+        self.assertFalse(hasattr(error, "__notes__"))
+        self.assertNotIn(marker, str(error))
+
+    def test_matcher_error_detaches_context_even_inside_external_handler(self):
+        marker = "SYNTHETIC_" + "EXTERNAL_MATCHER"
+        try:
+            raise ValueError(marker)
+        except ValueError:
+            for matcher in (Mock(side_effect=RuntimeError(marker)), self._reraise_active_exception):
+                error = self.assert_invalid(RoutingErrorCode.MATCHER, self.policy.select_first, matcher)
+                self.assertIsNone(error.__context__)
+                self.assertIsNone(error.__cause__)
+
+    @staticmethod
+    def _reraise_active_exception(condition):
+        # Источник может повторно выбросить исключение внешнего обработчика.
+        raise
+
+    def test_matcher_traceback_locals_are_not_retained_by_replacement(self):
+        class PrivatePayload:
+            pass
+
+        references = []
+        errors = []
+
+        def matcher(condition):
+            payload = PrivatePayload()
+            payload.value = "SYNTHETIC_" + "LOCAL_VALUE"
+            references.append(weakref.ref(payload))
+            raise ValueError(payload.value)
+
+        try:
+            self.policy.select_first(matcher)
+        except RoutingValidationError as error:
+            # Сохранить настоящий traceback обёртки: assertRaises очищает его.
+            errors.append(error)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0].code, RoutingErrorCode.MATCHER)
+        self.assertIsNotNone(errors[0].__traceback__)
+        self.assertEqual(len(references), 1)
+        gc.collect()
+        self.assertIsNone(references[0]())
 
     def test_operations_with_pure_matcher_have_no_io_or_terminal_output(self):
         calls = (

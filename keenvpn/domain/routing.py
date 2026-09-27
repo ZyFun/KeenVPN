@@ -48,6 +48,13 @@ class RoutingErrorCode(str, Enum):
     REFERENCE = "invalid_imported_reference"
     CONDITION = "invalid_condition"
     ACTION = "invalid_action"
+    RULES = "invalid_rules"
+    FINAL_RULE = "invalid_final_rule"
+    POSITION = "invalid_rule_position"
+    READ_ONLY = "read_only_routing_policy"
+    MATCH_RESULT = "invalid_match_result"
+    MATCH_UNKNOWN = "unknown_rule_match"
+    MATCHER = "rule_matcher_failed"
 
 
 class RoutingValidationError(ValueError):

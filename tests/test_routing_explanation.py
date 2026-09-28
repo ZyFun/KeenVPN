@@ -84,6 +84,11 @@ class RoutingExplanationTests(unittest.TestCase):
             ("2001:db8::1", ("2001:db8::1",), True),
             ("0.0.0.0/0", ("192.0.2.10",), True),
             ("::/0", ("2001:db8::1",), True),
+            # Xray сопоставляет IPv4-mapped IPv6 с IPv4-сетями.
+            ("192.0.2.0/24", ("::ffff:192.0.2.10",), True),
+            ("192.0.2.10", ("::FFFF:192.0.2.10",), True),
+            ("0.0.0.0/0", ("::ffff:198.51.100.1",), True),
+            ("198.51.100.0/24", ("::ffff:192.0.2.10",), False),
         )
         for value, ips, matches in cases:
             with self.subTest(value=value, ips=ips):
@@ -183,6 +188,12 @@ class RoutingExplanationTests(unittest.TestCase):
             self.assertIs(report.steps[0].database, rule.condition.database)
             self.assertEqual(len(report.steps), 1)
 
+    def test_mapped_address_is_passed_to_geo_source_as_normalized_input(self):
+        context = replace(self.context, ips=("::FFFF:192.0.2.10",))
+        source = Mock(return_value=GeoMatch(MatchResult.NO_MATCH, self.ip_database))
+        explain_route(self.policy(self.geoip), context, geo_matcher=source)
+        source.assert_called_once_with(self.geoip.condition, ("::ffff:192.0.2.10",))
+
     def test_provider_receives_complete_normalized_input_and_set(self):
         ips = ["198.51.100.1", "2001:DB8::1"]
         context = replace(self.context, ips=ips)
@@ -248,6 +259,13 @@ class RoutingExplanationTests(unittest.TestCase):
         report = explain_route(policy, self.context)
         self.assertEqual(len(report.steps), 1)
         self.assertIs(report.selection.rule, protected)
+        diagnostic = report.to_diagnostic()["steps"][0]
+        self.assertEqual((diagnostic["enabled"], diagnostic["protected"]), (True, True))
+        report = explain_route(policy, context)
+        flags = [(step["enabled"], step["protected"]) for step in report.to_diagnostic()["steps"]]
+        self.assertEqual(flags, [(True, True), (False, False), (True, False)])
+        final = explain_route(self.policy(), self.context).to_diagnostic()["steps"][0]
+        self.assertEqual((final["enabled"], final["protected"]), (None, None))
 
     def test_unknown_import_stops_only_if_reached_and_is_never_sent_to_source(self):
         unknown = RoutingRule(UnknownCondition(ConditionFamily.IP, "ext:fixture:unknown"), RoutingAction.VPN)
@@ -282,6 +300,11 @@ class RoutingExplanationTests(unittest.TestCase):
             {"ips": ("192.0.2.0/24",), "ip_source": IPSource.DNS},
             {"ips": (True,), "ip_source": IPSource.DNS},
             {"ips": iter(("192.0.2.1",)), "ip_source": IPSource.DNS},
+            # Назначение соединения не может быть одновременно именем и IP.
+            {
+                "domain": "example.test", "domain_source": DomainSource.DESTINATION,
+                "ips": ("192.0.2.1",), "ip_source": IPSource.DESTINATION,
+            },
         )
         for values in cases:
             self.assert_invalid(RoutingErrorCode.CONTEXT, RoutingContext, **values)
@@ -324,6 +347,22 @@ class RoutingExplanationTests(unittest.TestCase):
         for interrupt in (KeyboardInterrupt, SystemExit):
             with self.assertRaises(interrupt):
                 explain_route(self.policy(self.geoip), self.context, geo_matcher=Mock(side_effect=interrupt))
+
+    def test_invalid_model_built_by_provider_is_reported_as_invalid_result(self):
+        marker = "SYNTHETIC_" + "PRIVATE_RESULT"
+
+        def source(condition, values):
+            try:
+                raise ValueError(marker)
+            except ValueError:
+                return GeoMatch(marker, self.ip_database)
+
+        error = self.assert_invalid(RoutingErrorCode.GEODATA_RESULT, explain_route, self.policy(self.geoip), self.context, geo_matcher=source)
+        self.assertIsNone(error.__context__)
+        self.assertIsNone(error.__cause__)
+        self.assertNotIn(marker, "".join(traceback.format_exception(error)))
+        database = Mock(side_effect=lambda c, v: GeoMatch(MatchResult.MATCH, GeoDatabase(GeoDatabaseKind.GEOIP, "")))
+        self.assert_invalid(RoutingErrorCode.GEODATA_RESULT, explain_route, self.policy(self.geoip), self.context, geo_matcher=database)
 
     def test_provider_traceback_payload_is_not_retained_by_new_error(self):
         class Payload:

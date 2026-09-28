@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import ipaddress
 import re
+from typing import NoReturn
 import unicodedata
 
 
@@ -60,7 +61,7 @@ class RoutingErrorCode(str, Enum):
     PROTECTED_ORDER = "invalid_protected_rule_order"
     CONTEXT = "invalid_routing_context"
     GEODATA_RESULT = "invalid_geodata_result"
-    GEODATA_MISMATCH = "geodata_version_mismatch"
+    GEODATA_MISMATCH = "geodata_database_mismatch"
     EXPLANATION = "invalid_route_explanation"
 
 
@@ -90,6 +91,19 @@ class _PrivateRepresentation:
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(<скрытые параметры>)"
+
+
+def _raise_detached(code: RoutingErrorCode) -> NoReturn:
+    """Сообщить об отказе внешнего источника без его исключения и кадров.
+
+    from None скрывает вывод, но сохраняет исходную цепочку. Её нужно очистить
+    после raise и передать ошибку дальше без нового связывания.
+    """
+    try:
+        raise RoutingValidationError(code) from None
+    except RoutingValidationError as error:
+        error.__context__ = None
+        raise
 
 
 def _normalize_domain(value: object) -> str | None:

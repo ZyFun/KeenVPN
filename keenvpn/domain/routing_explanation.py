@@ -4,11 +4,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 import ipaddress
+from typing import TypeAlias
 
 from keenvpn.domain.routing import (
     DomainCondition, DomainMatch, GeoDatabase, GeoIPCondition, GeoSiteCondition,
     IPCondition, RoutingCondition, RoutingErrorCode, RoutingRule,
-    RoutingValidationError, UnknownCondition,
+    RoutingValidationError, UnknownCondition, _PrivateRepresentation,
+    _raise_detached,
 )
 from keenvpn.domain.routing_policy import (
     FinalRoutingRule, MatchResult, RoutingPolicy, RoutingSelection,
@@ -50,21 +52,14 @@ class ExplanationReason(str, Enum):
     FINAL = "Все включённые условия проверены и не совпали; выбрано финальное правило."
 
 
-class _PrivateRepresentation:
-    """Полные поля доступны вызывающему коду, но не обычному выводу."""
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}(<скрытые параметры>)"
-
-
 @dataclass(frozen=True, slots=True, repr=False, kw_only=True)
 class RoutingContext(_PrivateRepresentation):
     """Один фиксированный снимок доступных имени и адресов.
 
     UNKNOWN означает недостаток сведений, UNAVAILABLE — явное предположение
     об отсутствии. Для DNS передаётся полный непустой набор результатов.
+    Назначение соединения — либо имя, либо IP, поэтому оба источника
+    DESTINATION одновременно недопустимы.
     Здесь не моделируются этапы domainStrategy, DNS или работа sniffing.
     """
 
@@ -75,6 +70,8 @@ class RoutingContext(_PrivateRepresentation):
 
     def __post_init__(self) -> None:
         if not isinstance(self.domain_source, DomainSource) or not isinstance(self.ip_source, IPSource):
+            raise RoutingValidationError(RoutingErrorCode.CONTEXT) from None
+        if self.domain_source is DomainSource.DESTINATION and self.ip_source is IPSource.DESTINATION:
             raise RoutingValidationError(RoutingErrorCode.CONTEXT) from None
         visible = self.domain_source in (DomainSource.DESTINATION, DomainSource.SNIFFING)
         if visible:
@@ -125,6 +122,7 @@ class GeoMatch(_PrivateRepresentation):
             raise RoutingValidationError(RoutingErrorCode.GEODATA_RESULT) from None
 
 
+IPAddress: TypeAlias = ipaddress.IPv4Address | ipaddress.IPv6Address
 GeoMatcher = Callable[[GeoIPCondition | GeoSiteCondition, tuple[str, ...]], GeoMatch]
 
 
@@ -150,9 +148,12 @@ class ExplanationStep(_PrivateRepresentation):
 
     def to_diagnostic(self) -> dict[str, object]:
         """Не включать значения условий, ссылки, источники и версии геобаз."""
+        final = isinstance(self.rule, FinalRoutingRule)
         return {
             "index": self.index,
-            "condition_type": None if isinstance(self.rule, FinalRoutingRule) else type(self.rule.condition).__name__,
+            "condition_type": None if final else type(self.rule.condition).__name__,
+            "enabled": None if final else self.rule.enabled,
+            "protected": None if final else self.rule.protected,
             "action": self.rule.action.value,
             "result": None if self.result is None else self.result.value,
             "reason": self.reason.value,
@@ -223,13 +224,11 @@ def _match_geodata(
         return MatchResult.UNKNOWN, ExplanationReason.GEODATA_MISSING, None
     try:
         evidence = matcher(condition, values)
+    except RoutingValidationError:
+        # Источник не смог построить корректный ответ модели, например GeoMatch.
+        _raise_detached(RoutingErrorCode.GEODATA_RESULT)
     except Exception:
-        try:
-            raise RoutingValidationError(RoutingErrorCode.MATCHER) from None
-        except RoutingValidationError as error:
-            # Не удерживать секреты и кадры источника через цепочку исключений.
-            error.__context__ = None
-            raise
+        _raise_detached(RoutingErrorCode.MATCHER)
     if not isinstance(evidence, GeoMatch):
         raise RoutingValidationError(RoutingErrorCode.GEODATA_RESULT) from None
     expected = condition.database
@@ -244,8 +243,18 @@ def _match_geodata(
     return evidence.result, reason, actual
 
 
+def _routable_address(value: str) -> IPAddress:
+    """Сопоставлять IPv4-mapped IPv6 с IPv4-сетями, как это делает Xray."""
+    address = ipaddress.ip_address(value)
+    mapped = getattr(address, "ipv4_mapped", None)
+    return address if mapped is None else mapped
+
+
 def _match_condition(
-    condition: RoutingCondition, context: RoutingContext, matcher: GeoMatcher | None,
+    condition: RoutingCondition,
+    context: RoutingContext,
+    addresses: tuple[IPAddress, ...] | None,
+    matcher: GeoMatcher | None,
 ) -> tuple[MatchResult, ExplanationReason, GeoDatabase | None]:
     if isinstance(condition, UnknownCondition):
         return MatchResult.UNKNOWN, ExplanationReason.UNSUPPORTED, None
@@ -267,7 +276,7 @@ def _match_condition(
     if isinstance(condition, GeoIPCondition):
         return _match_geodata(condition, context.ips, matcher)
     network = ipaddress.ip_network(condition.value)
-    matches = any(ipaddress.ip_address(value) in network for value in context.ips)
+    matches = any(address in network for address in addresses)
     return (MatchResult.MATCH if matches else MatchResult.NO_MATCH), ExplanationReason.IP, None
 
 
@@ -286,17 +295,18 @@ def explain_route(
         raise RoutingValidationError(RoutingErrorCode.CONTEXT) from None
     if geo_matcher is not None and not callable(geo_matcher):
         raise RoutingValidationError(RoutingErrorCode.MATCHER) from None
+    addresses = None if context.ips is None else tuple(_routable_address(value) for value in context.ips)
     steps = []
-    for index, rule in enumerate(policy.rules):
-        if not rule.enabled:
-            steps.append(ExplanationStep(index, rule, None, ExplanationReason.DISABLED))
-            continue
-        result, reason, database = _match_condition(rule.condition, context, geo_matcher)
+
+    def skip(index: int, rule: RoutingRule) -> None:
+        steps.append(ExplanationStep(index, rule, None, ExplanationReason.DISABLED))
+
+    def evaluate(index: int, rule: RoutingRule) -> MatchResult:
+        result, reason, database = _match_condition(rule.condition, context, addresses, geo_matcher)
         steps.append(ExplanationStep(index, rule, result, reason, database))
-        if result is MatchResult.UNKNOWN:
-            return RouteExplanation(context, tuple(steps), None)
-        if result is MatchResult.MATCH:
-            return RouteExplanation(context, tuple(steps), RoutingSelection(index, rule))
-    index = len(policy.rules)
-    steps.append(ExplanationStep(index, policy.final_rule, MatchResult.MATCH, ExplanationReason.FINAL))
-    return RouteExplanation(context, tuple(steps), RoutingSelection(index, policy.final_rule))
+        return result
+
+    selection = policy.walk_first_match(evaluate, skip)
+    if selection is not None and selection.is_final:
+        steps.append(ExplanationStep(selection.index, selection.rule, MatchResult.MATCH, ExplanationReason.FINAL))
+    return RouteExplanation(context, tuple(steps), selection)

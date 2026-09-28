@@ -236,6 +236,12 @@ assert policy.rules[1].enabled is True  # Исходная модель не м�
 источника для этого условия. Неизвестное правило после уже найденного
 совпадения на результат не влияет.
 
+Тот же порядок обхода доступен как `walk_first_match(evaluate, skip=None)`:
+`evaluate(index, rule)` вызывается для включённых правил и возвращает
+`MatchResult`, `skip(index, rule)` — для отключённых. Метод возвращает
+`RoutingSelection` либо `None` при первом `UNKNOWN`, без ошибки. На нём построены
+`select_first` и [статическое объяснение](routing-explanation.md).
+
 ```python
 from keenvpn.domain.routing import (
     DomainCondition, GeoDatabase, GeoDatabaseKind, GeoIPCondition,

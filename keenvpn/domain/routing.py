@@ -58,6 +58,10 @@ class RoutingErrorCode(str, Enum):
     RULE_STATE = "invalid_rule_state"
     PROTECTED_RULE = "protected_rule"
     PROTECTED_ORDER = "invalid_protected_rule_order"
+    CONTEXT = "invalid_routing_context"
+    GEODATA_RESULT = "invalid_geodata_result"
+    GEODATA_MISMATCH = "geodata_version_mismatch"
+    EXPLANATION = "invalid_route_explanation"
 
 
 class RoutingValidationError(ValueError):

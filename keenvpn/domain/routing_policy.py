@@ -11,6 +11,7 @@ from keenvpn.domain.routing import (
     RoutingRule,
     RoutingValidationError,
     UnknownCondition,
+    _raise_detached,
 )
 
 
@@ -187,6 +188,31 @@ class RoutingPolicy:
         self._require_editable()
         return RoutingPolicy(self.rules, FinalRoutingRule(action))
 
+    def walk_first_match(
+        self,
+        evaluate: Callable[[int, RoutingRule], MatchResult],
+        skip: Callable[[int, RoutingRule], None] | None = None,
+    ) -> RoutingSelection | None:
+        """Обойти сохранённый порядок до первого совпадения или неизвестности.
+
+        evaluate получает только включённые правила, skip — отключённые.
+        None означает остановку на первом UNKNOWN; финальное правило
+        выбирается, только если все включённые условия заведомо не совпали.
+        """
+        for index, rule in enumerate(self.rules):
+            if not rule.enabled:
+                if skip is not None:
+                    skip(index, rule)
+                continue
+            result = evaluate(index, rule)
+            if not isinstance(result, MatchResult):
+                raise RoutingValidationError(RoutingErrorCode.MATCH_RESULT) from None
+            if result is MatchResult.UNKNOWN:
+                return None
+            if result is MatchResult.MATCH:
+                return RoutingSelection(index, rule)
+        return RoutingSelection(len(self.rules), self.final_rule)
+
     def select_first(
         self, matcher: Callable[[RoutingCondition], MatchResult]
     ) -> RoutingSelection:
@@ -198,25 +224,16 @@ class RoutingPolicy:
         """
         if not callable(matcher):
             raise RoutingValidationError(RoutingErrorCode.MATCHER) from None
-        for index, rule in enumerate(self.rules):
-            if not rule.enabled:
-                continue
+
+        def evaluate(index: int, rule: RoutingRule) -> MatchResult:
             if isinstance(rule.condition, UnknownCondition):
                 raise RoutingValidationError(RoutingErrorCode.MATCH_UNKNOWN) from None
             try:
-                result = matcher(rule.condition)
+                return matcher(rule.condition)
             except Exception:
-                try:
-                    raise RoutingValidationError(RoutingErrorCode.MATCHER) from None
-                except RoutingValidationError as error:
-                    # from None скрывает вывод, но сохраняет исходную цепочку.
-                    # Очистить её после raise и передать ошибку без нового связывания.
-                    error.__context__ = None
-                    raise
-            if not isinstance(result, MatchResult):
-                raise RoutingValidationError(RoutingErrorCode.MATCH_RESULT) from None
-            if result is MatchResult.UNKNOWN:
-                raise RoutingValidationError(RoutingErrorCode.MATCH_UNKNOWN) from None
-            if result is MatchResult.MATCH:
-                return RoutingSelection(index, rule)
-        return RoutingSelection(len(self.rules), self.final_rule)
+                _raise_detached(RoutingErrorCode.MATCHER)
+
+        selection = self.walk_first_match(evaluate)
+        if selection is None:
+            raise RoutingValidationError(RoutingErrorCode.MATCH_UNKNOWN) from None
+        return selection

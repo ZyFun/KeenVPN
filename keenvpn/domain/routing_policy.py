@@ -1,7 +1,7 @@
 """Порядок правил и выбор первого совпадения по переданным результатам."""
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 from keenvpn.domain.routing import (
@@ -83,6 +83,12 @@ class RoutingPolicy:
             raise RoutingValidationError(RoutingErrorCode.RULES) from None
         if not isinstance(self.final_rule, FinalRoutingRule):
             raise RoutingValidationError(RoutingErrorCode.FINAL_RULE) from None
+        user_rule_seen = False
+        for rule in rules:
+            if rule.protected and user_rule_seen:
+                raise RoutingValidationError(RoutingErrorCode.PROTECTED_ORDER) from None
+            if not rule.protected:
+                user_rule_seen = True
         object.__setattr__(self, "rules", rules)
 
     def __repr__(self) -> str:
@@ -90,8 +96,22 @@ class RoutingPolicy:
 
     @property
     def ordered_rules(self) -> tuple[RoutingRule | FinalRoutingRule, ...]:
-        """Вернуть полный порядок; финальное правило всегда последнее."""
+        """Вернуть сохранённый порядок, включая отключённые; финальное последнее."""
         return (*self.rules, self.final_rule)
+
+    @property
+    def active_rules(self) -> tuple[RoutingRule | FinalRoutingRule, ...]:
+        """Исключить отключённые из активного списка, сохранив порядок и финальное.
+
+        Это доменные объекты в памяти, не Xray JSON и не разрешение на применение.
+        Неизвестные включённые условия сохраняются без подмены.
+        """
+        return (*tuple(rule for rule in self.rules if rule.enabled), self.final_rule)
+
+    @property
+    def protected_rule_count(self) -> int:
+        """Получить длину закреплённого служебного блока в начале списка."""
+        return sum(rule.protected for rule in self.rules)
 
     @property
     def read_only(self) -> bool:
@@ -102,6 +122,8 @@ class RoutingPolicy:
         """Вернуть только число правил, финальное действие и ограничение редактирования."""
         return {
             "rule_count": len(self.rules),
+            "active_rule_count": sum(rule.enabled for rule in self.rules),
+            "protected_rule_count": self.protected_rule_count,
             "final_action": self.final_rule.action.value,
             "read_only": self.read_only,
         }
@@ -116,9 +138,15 @@ class RoutingPolicy:
             raise RoutingValidationError(RoutingErrorCode.POSITION) from None
 
     def insert(self, index: int, rule: RoutingRule) -> "RoutingPolicy":
-        """Вставить правило перед индексом; len(rules) означает перед финальным."""
+        """Вставить пользовательское правило после служебного блока и до финального."""
         self._require_editable()
         self._validate_index(index, insertion=True)
+        if not isinstance(rule, RoutingRule):
+            raise RoutingValidationError(RoutingErrorCode.RULES) from None
+        if rule.protected:
+            raise RoutingValidationError(RoutingErrorCode.PROTECTED_RULE) from None
+        if index < self.protected_rule_count:
+            raise RoutingValidationError(RoutingErrorCode.PROTECTED_ORDER) from None
         return RoutingPolicy(self.rules[:index] + (rule,) + self.rules[index:], self.final_rule)
 
     def move(self, source_index: int, target_index: int) -> "RoutingPolicy":
@@ -126,6 +154,10 @@ class RoutingPolicy:
         self._require_editable()
         self._validate_index(source_index)
         self._validate_index(target_index)
+        if self.rules[source_index].protected:
+            raise RoutingValidationError(RoutingErrorCode.PROTECTED_RULE) from None
+        if target_index < self.protected_rule_count:
+            raise RoutingValidationError(RoutingErrorCode.PROTECTED_ORDER) from None
         rules = list(self.rules)
         rule = rules.pop(source_index)
         rules.insert(target_index, rule)
@@ -135,7 +167,20 @@ class RoutingPolicy:
         """Удалить обычное правило; индекс финального недопустим."""
         self._require_editable()
         self._validate_index(index)
+        if self.rules[index].protected:
+            raise RoutingValidationError(RoutingErrorCode.PROTECTED_RULE) from None
         return RoutingPolicy(self.rules[:index] + self.rules[index + 1:], self.final_rule)
+
+    def with_enabled(self, index: int, enabled: bool) -> "RoutingPolicy":
+        """Явно переключить пользовательское правило в его сохранённой позиции."""
+        self._require_editable()
+        self._validate_index(index)
+        if type(enabled) is not bool:
+            raise RoutingValidationError(RoutingErrorCode.RULE_STATE) from None
+        if self.rules[index].protected:
+            raise RoutingValidationError(RoutingErrorCode.PROTECTED_RULE) from None
+        changed = replace(self.rules[index], enabled=enabled)
+        return RoutingPolicy(self.rules[:index] + (changed,) + self.rules[index + 1:], self.final_rule)
 
     def with_final_action(self, action: RoutingAction) -> "RoutingPolicy":
         """Явно сменить финальное действие без изменения порядка условий."""
@@ -154,6 +199,8 @@ class RoutingPolicy:
         if not callable(matcher):
             raise RoutingValidationError(RoutingErrorCode.MATCHER) from None
         for index, rule in enumerate(self.rules):
+            if not rule.enabled:
+                continue
             if isinstance(rule.condition, UnknownCondition):
                 raise RoutingValidationError(RoutingErrorCode.MATCH_UNKNOWN) from None
             try:

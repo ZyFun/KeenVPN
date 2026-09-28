@@ -1,6 +1,6 @@
 """Условия и действия маршрутизации в памяти, без чтения баз и конфигураций."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import ipaddress
 import re
@@ -55,6 +55,9 @@ class RoutingErrorCode(str, Enum):
     MATCH_RESULT = "invalid_match_result"
     MATCH_UNKNOWN = "unknown_rule_match"
     MATCHER = "rule_matcher_failed"
+    RULE_STATE = "invalid_rule_state"
+    PROTECTED_RULE = "protected_rule"
+    PROTECTED_ORDER = "invalid_protected_rule_order"
 
 
 class RoutingValidationError(ValueError):
@@ -62,7 +65,18 @@ class RoutingValidationError(ValueError):
 
     def __init__(self, code: RoutingErrorCode) -> None:
         self.code = code
-        super().__init__(f"Некорректные данные маршрутизации: {code.value}.")
+        messages = {
+            RoutingErrorCode.RULE_STATE: "Состояние и защита правила должны быть bool.",
+            RoutingErrorCode.PROTECTED_RULE: (
+                "Служебное правило должно быть включено; обычный редактор "
+                "не может добавлять, удалять, перемещать или переключать его."
+            ),
+            RoutingErrorCode.PROTECTED_ORDER: (
+                "Служебные правила должны оставаться непрерывным блоком "
+                "в начале списка; пользовательское правило нельзя поставить перед ними."
+            ),
+        }
+        super().__init__(messages.get(code, f"Некорректные данные маршрутизации: {code.value}."))
 
 
 class _PrivateRepresentation:
@@ -248,16 +262,22 @@ RoutingCondition = DomainCondition | IPCondition | GeoIPCondition | GeoSiteCondi
 
 @dataclass(frozen=True, slots=True, repr=False)
 class RoutingRule(_PrivateRepresentation):
-    """Одно условие и явное действие, без порядка и применения к трафику."""
+    """Условие, действие и метаданные состояния, без применения к трафику."""
 
     condition: RoutingCondition
     action: RoutingAction
+    enabled: bool = field(default=True, kw_only=True)
+    protected: bool = field(default=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.condition, RoutingCondition):
             raise RoutingValidationError(RoutingErrorCode.CONDITION) from None
         if not isinstance(self.action, RoutingAction):
             raise RoutingValidationError(RoutingErrorCode.ACTION) from None
+        if type(self.enabled) is not bool or type(self.protected) is not bool:
+            raise RoutingValidationError(RoutingErrorCode.RULE_STATE) from None
+        if self.protected and not self.enabled:
+            raise RoutingValidationError(RoutingErrorCode.PROTECTED_RULE) from None
 
     @property
     def read_only(self) -> bool:
@@ -270,5 +290,7 @@ class RoutingRule(_PrivateRepresentation):
             "condition_type": type(self.condition).__name__,
             "action": self.action.value,
             "read_only": self.read_only,
+            "enabled": self.enabled,
+            "protected": self.protected,
             "parameters": "<скрыто>",
         }

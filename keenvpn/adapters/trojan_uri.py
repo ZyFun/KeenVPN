@@ -5,6 +5,7 @@ from ipaddress import IPv6Address
 import re
 from urllib.parse import unquote
 
+from keenvpn.application.ports import ConnectionLinkRejected, LinkRejection
 from keenvpn.domain.connection import SecretValue, TrojanConnection
 
 
@@ -104,6 +105,32 @@ def parse_trojan_uri(uri: str) -> TrojanConnection:
         # только при печати, поэтому разрываем и саму ссылку на него.
         error.__context__ = None
         raise
+
+
+class TrojanLinkParser:
+    """Реализация порта ConnectionLinkParser прикладного слоя для Trojan."""
+
+    def parse(self, link: str) -> TrojanConnection:
+        """Разобрать ссылку; отказ сообщить кодами TrojanURIError."""
+        try:
+            return parse_trojan_uri(link)
+        except TrojanURIError as error:
+            rejection = (
+                LinkRejection.UNSUPPORTED if error.code is TrojanURIErrorCode.UNSUPPORTED_URI
+                else LinkRejection.INVALID
+            )
+            code = error.code.value
+            reason = None if error.reason is None else error.reason.value
+            message = str(error)
+
+        # Как и parse_trojan_uri: новый отказ создаётся вне обработчика
+        # и не хранит ссылку на исходную ошибку и кадры с входом.
+        del link
+        try:
+            raise ConnectionLinkRejected(rejection, code, message, reason=reason) from None
+        except ConnectionLinkRejected as rejected:
+            rejected.__context__ = None
+            raise
 
 
 def _parse(uri: str) -> TrojanConnection:

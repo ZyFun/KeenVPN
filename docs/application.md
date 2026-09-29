@@ -157,10 +157,109 @@ assert result.data.selection.action == "VPN"
 
 Текст и цепочка исключений источников в результат не попадают.
 
+## Тестовые адаптеры в памяти
+
+Модуль [`tests/support/in_memory.py`](../tests/support/in_memory.py) содержит
+управляемые реализации трёх используемых портов. Это средства тестов:
+application получает их через конструкторы обработчиков и не импортирует
+`tests`. Адаптеры не используют файлы, сеть, SSH или процессы.
+
+| Адаптер | Настройка и наблюдение |
+| --- | --- |
+| `InMemoryRoutingPolicySource` | `outcome` — ответ источника правил, `calls` — число обращений |
+| `InMemoryConnectionLinkParser` | `outcome` — ответ парсера, `calls` — число обращений; ссылка не сохраняется в полях адаптера и в его кадре |
+| `InMemoryGeoDataSource` | `set_response(condition, values, outcome)` — ответ точного запроса; `calls` — неизменяемый снимок истории `GeoDataCall` |
+
+Ответы повторяются до явной замены. `outcome` возвращается как есть, а экземпляр
+`BaseException` вызывается как отказ, включая `KeyboardInterrupt`/`SystemExit`.
+Для проверки защиты application можно намеренно вернуть неправильный тип,
+например `None`.
+
+Ошибка подготовки теста — `AdapterSetupError` — наследует `BaseException`.
+Поэтому сценарий не превращает её в `source_failed`, и тест прерывается:
+
+- незаданный ответ вызывает `UnconfiguredResponseError`;
+- класс исключения вместо экземпляра, например `OSError` без скобок, вызывает
+  `AdapterSetupError`.
+
+Так тест настроенного отказа не может пройти без самого отказа. Незаданный ответ
+не заменяется `NO_MATCH`, `UNKNOWN` или прямым маршрутом: эти состояния задаются
+явно через `GeoMatch`.
+
+Ключ геоответа включает тип условия, все метаданные базы, имя набора и полный
+tuple значений с учётом порядка. `set_response` приводит значения к той же форме,
+что и `RoutingContext`: домен — к нижнему регистру и IDNA без завершающей точки,
+IP — к стандартной записи. Значения, которые не являются tuple строк,
+отклоняются `TypeError`, некорректные домен или IP — `RoutingValidationError`.
+Адаптер не читает геобазы и не вычисляет членство в наборе.
+
+Настроенное исключение — один и тот же объект. Перед каждым вызовом адаптер
+сбрасывает его traceback и `__context__`, поэтому кадры прошлых вызовов
+не накапливаются. После отказа исключение удерживает кадры последнего вызова,
+включая команду обработчика, до следующего вызова или замены ответа: присваивания
+`outcome` или `set_response` для того же запроса. Замена сбрасывает traceback
+и `__context__` прежнего исключения, даже если тест хранит его в переменной.
+Не выводите его traceback с локальными переменными.
+
+Пример тестового модуля `tests/test_<имя>.py`, запускаемого через
+`unittest discover -s tests`:
+
+```python
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from keenvpn.application.routing import ExplainRoute, ExplainRouteHandler
+from keenvpn.domain.routing import GeoDatabase, GeoDatabaseKind, GeoIPCondition, RoutingAction, RoutingRule
+from keenvpn.domain.routing_explanation import GeoMatch, IPSource
+from keenvpn.domain.routing_policy import FinalRoutingRule, MatchResult, RoutingPolicy
+from tests.support.in_memory import InMemoryGeoDataSource, InMemoryRoutingPolicySource
+
+database = GeoDatabase(GeoDatabaseKind.GEOIP, "fixture-ip", version="test-v1")
+condition = GeoIPCondition(database, "test-set")
+policies = InMemoryRoutingPolicySource(RoutingPolicy(
+    (RoutingRule(condition, RoutingAction.VPN),), FinalRoutingRule(RoutingAction.DIRECT),
+))
+geodata = InMemoryGeoDataSource()
+addresses = ("192.0.2.10",)
+geodata.set_response(condition, addresses, GeoMatch(MatchResult.MATCH, database))
+handler = ExplainRouteHandler(policies, geodata)
+command = ExplainRoute(ips=addresses, ip_source=IPSource.DESTINATION)
+assert handler.execute(command).data.selection.action == "VPN"
+assert geodata.calls[0].values == addresses
+
+geodata.set_response(condition, addresses, OSError("Искусственный отказ источника."))
+result = handler.execute(command)
+assert result.error.code == "rule_matcher_failed"
+assert result.data is None
+assert policies.calls == 2
+```
+
+Пакет импортируется как `tests.support`, поэтому модуль также запускается
+напрямую: `python3 -I -S -B tests/test_<имя>.py`.
+
+`GeoDataCall.condition` и `.values` доступны тесту явно. `repr()` истории
+показывает только тип условия и число значений, а `repr()` адаптеров скрывает
+ответы. Используйте только искусственные данные, в том числе в исключениях.
+Прямой доступ к полям или дамп объектов не является безопасным отчётом.
+`InMemoryConnectionLinkParser` не проверяет переданную ссылку: тесты синтаксиса
+URI должны использовать `TrojanLinkParser`. Успех с настроенными ответами
+проверяет сценарий, а не работоспособность VPN.
+
+Общие проверки для тестов сценариев:
+
+- `tests.support.isolation.forbid_external_effects()` на время блока запрещает
+  терминал, файлы, сеть и запуск процессов. При выходе, в том числе по исключению
+  блока, он сообщает о запрещённом вызове, даже если сценарий перехватил его отказ.
+- `tests.support.privacy.reachable()` возвращает объекты, достижимые из результата.
+- `tests.support.privacy.frame_locals()` возвращает локальные переменные кадров
+  указанного модуля из traceback; отсутствие таких кадров считается ошибкой теста.
+
 ## Локальная проверка
 
 ```sh
 python3 -I -S -B -m unittest discover -s tests -p test_application.py -v
+python3 -I -S -B -m unittest discover -s tests -p test_in_memory_adapters.py -v
 ```
 
 Тесты используют искусственные ссылки, домены и документальные IP-адреса,

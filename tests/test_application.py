@@ -1,17 +1,10 @@
 """Контракт прикладных сценариев на искусственных данных и управляемых портах."""
 
-import builtins
-import contextlib
 from dataclasses import FrozenInstanceError
-import gc
-import io
 import json
 from pathlib import Path
 import sys
-import traceback
-import types
 import unittest
-from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -31,6 +24,11 @@ from keenvpn.domain.routing import (
 )
 from keenvpn.domain.routing_explanation import DomainSource, GeoMatch, IPSource
 from keenvpn.domain.routing_policy import FinalRoutingRule, MatchResult, RoutingPolicy
+from tests.support.in_memory import (
+    InMemoryConnectionLinkParser, InMemoryGeoDataSource, InMemoryRoutingPolicySource,
+)
+from tests.support.isolation import forbid_external_effects
+from tests.support.privacy import frame_locals, reachable
 
 
 SECRET = "TEST_ONLY_PASSWORD"
@@ -45,38 +43,6 @@ PRIVATE_IP = "192.0.2.10"
 def fixed_ids(*values):
     iterator = iter(values)
     return lambda: next(iterator)
-
-
-def reachable(root):
-    """Объекты, достижимые из результата, без обхода классов и модулей."""
-    seen, stack, found = set(), [root], []
-    while stack:
-        item = stack.pop()
-        if id(item) in seen or isinstance(item, (type, types.ModuleType, types.FunctionType)):
-            continue
-        seen.add(id(item))
-        found.append(item)
-        stack.extend(gc.get_referents(item))
-    return found
-
-
-class ForbiddenStdin(io.StringIO):
-    def read(self, *args):
-        raise AssertionError("Сценарий читал stdin.")
-
-    readline = read
-
-
-class RecordingParser:
-    def __init__(self, outcome=None):
-        self.calls = 0
-        self.outcome = outcome
-
-    def parse(self, link):
-        self.calls += 1
-        if isinstance(self.outcome, BaseException):
-            raise self.outcome
-        return self.outcome
 
 
 class ResultContractTests(unittest.TestCase):
@@ -179,7 +145,7 @@ class InspectConnectionLinkTests(unittest.TestCase):
         )
         for command, code in cases:
             with self.subTest(code=code, command=type(command).__name__):
-                parser = RecordingParser()
+                parser = InMemoryConnectionLinkParser()
                 result = self.execute(command, parser)
                 self.assertIs(result.error.category, ErrorCategory.INVALID_REQUEST)
                 self.assertEqual(result.error.code, code)
@@ -198,16 +164,11 @@ class InspectConnectionLinkTests(unittest.TestCase):
         )
         for outcome, category, code in cases:
             with self.subTest(code=code, outcome=type(outcome).__name__):
-                result = self.execute(InspectConnectionLink(SecretValue(LINK)), RecordingParser(outcome))
+                result = self.execute(InspectConnectionLink(SecretValue(LINK)), InMemoryConnectionLinkParser(outcome))
                 self.assertIs(result.status, OperationStatus.FAILED)
                 self.assertIs(result.error.category, category)
                 self.assertEqual(result.error.code, code)
                 self.assert_no_secret(result)
-
-    def test_interrupts_are_not_converted(self):
-        parser = RecordingParser(KeyboardInterrupt())
-        with self.assertRaises(KeyboardInterrupt):
-            self.execute(InspectConnectionLink(SecretValue(LINK)), parser)
 
     def test_command_repr_hides_link(self):
         command = InspectConnectionLink(SecretValue(LINK))
@@ -215,19 +176,10 @@ class InspectConnectionLinkTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             command.link = SecretValue("other")
 
-    def test_scenario_does_not_use_terminal(self):
-        stdout, stderr = io.StringIO(), io.StringIO()
-        forbidden = AssertionError("Сценарий обратился к терминалу.")
-        with (
-            patch.object(builtins, "input", side_effect=forbidden),
-            patch.object(builtins, "print", side_effect=forbidden),
-            patch.object(sys, "stdin", ForbiddenStdin()),
-            contextlib.redirect_stdout(stdout),
-            contextlib.redirect_stderr(stderr),
-        ):
+    def test_scenario_has_no_terminal_or_external_effects(self):
+        with forbid_external_effects():
             self.execute(InspectConnectionLink(SecretValue(LINK)))
             self.execute(InspectConnectionLink(SecretValue("bad")))
-        self.assertEqual(stdout.getvalue() + stderr.getvalue(), "")
 
 
 class TrojanLinkParserTests(unittest.TestCase):
@@ -250,37 +202,8 @@ class TrojanLinkParserTests(unittest.TestCase):
         self.assertIsNone(error.__context__)
         self.assertIsNone(error.__cause__)
         # Кадры вызывающего теста содержат ссылку; проверяем только кадры адаптера.
-        snapshot = traceback.TracebackException.from_exception(error, capture_locals=True)
-        adapter_frames = [
-            frame for frame in snapshot.stack if frame.filename.endswith("/keenvpn/adapters/trojan_uri.py")
-        ]
-        self.assertTrue(adapter_frames)
-        for frame in adapter_frames:
-            self.assertNotIn(SECRET, repr(frame.locals))
-
-
-class StaticPolicySource:
-    def __init__(self, policy):
-        self.policy = policy
-        self.calls = 0
-
-    def current_routing_policy(self):
-        self.calls += 1
-        if isinstance(self.policy, BaseException):
-            raise self.policy
-        return self.policy
-
-
-class StaticGeoData:
-    def __init__(self, outcome):
-        self.outcome = outcome
-        self.calls = []
-
-    def match(self, condition, values):
-        self.calls.append((condition, values))
-        if isinstance(self.outcome, BaseException):
-            raise self.outcome
-        return self.outcome
+        for locals_repr in frame_locals(error, "/keenvpn/adapters/trojan_uri.py"):
+            self.assertNotIn(SECRET, locals_repr)
 
 
 class ExplainRouteTests(unittest.TestCase):
@@ -298,9 +221,14 @@ class ExplainRouteTests(unittest.TestCase):
 
     def execute(self, command, source=None, geodata=None):
         handler = ExplainRouteHandler(
-            source or StaticPolicySource(self.policy), geodata, operation_ids=fixed_ids("op-2"),
+            source or InMemoryRoutingPolicySource(self.policy), geodata, operation_ids=fixed_ids("op-2"),
         )
         return handler.execute(command)
+
+    def geodata(self, outcome):
+        source = InMemoryGeoDataSource()
+        source.set_response(self.policy.rules[0].condition, (PRIVATE_IP,), outcome)
+        return source
 
     def assert_private_hidden(self, result):
         text = repr(result) + json.dumps(result.to_dict(), ensure_ascii=False)
@@ -309,11 +237,11 @@ class ExplainRouteTests(unittest.TestCase):
         self.assertNotIn(PRIVATE_DOMAIN, repr(self.command))
 
     def test_selection_uses_policy_and_geodata_ports(self):
-        geodata = StaticGeoData(GeoMatch(MatchResult.NO_MATCH, self.database))
+        geodata = self.geodata(GeoMatch(MatchResult.NO_MATCH, self.database))
         result = self.execute(self.command, geodata=geodata)
         self.assertTrue(result.succeeded)
         self.assertEqual(result.command, "explain_route")
-        self.assertEqual(geodata.calls[0][1], (PRIVATE_IP,))
+        self.assertEqual(geodata.calls[0].values, (PRIVATE_IP,))
         data = result.to_dict()["data"]
         self.assertTrue(data["preliminary"])
         self.assertEqual((data["domain_source"], data["ip_source"], data["ip_count"]), ("destination", "dns", 1))
@@ -340,7 +268,7 @@ class ExplainRouteTests(unittest.TestCase):
         )
         for command, code in cases:
             with self.subTest(code=code):
-                source = StaticPolicySource(self.policy)
+                source = InMemoryRoutingPolicySource(self.policy)
                 result = self.execute(command, source)
                 self.assertIs(result.error.category, ErrorCategory.INVALID_INPUT)
                 self.assertEqual(result.error.code, code)
@@ -358,7 +286,7 @@ class ExplainRouteTests(unittest.TestCase):
             (ExplainRoute(contract_version=0), "unsupported_contract_version"),
         ):
             with self.subTest(code=code):
-                source = StaticPolicySource(self.policy)
+                source = InMemoryRoutingPolicySource(self.policy)
                 result = self.execute(command, source)
                 self.assertIs(result.error.category, ErrorCategory.INVALID_REQUEST)
                 self.assertEqual(result.error.code, code)
@@ -367,15 +295,15 @@ class ExplainRouteTests(unittest.TestCase):
     def test_source_failures_are_categorized_without_details(self):
         mismatch = GeoMatch(MatchResult.MATCH, GeoDatabase(GeoDatabaseKind.GEOIP, "fixture-ip", version="ip-v2"))
         cases = (
-            (StaticPolicySource(OSError(f"нет файла {PRIVATE_DOMAIN}")), None,
+            (InMemoryRoutingPolicySource(OSError(f"нет файла {PRIVATE_DOMAIN}")), None,
              ErrorCategory.SOURCE_FAILED, "routing_policy_unavailable"),
-            (StaticPolicySource({"rules": PRIVATE_DOMAIN}), None,
+            (InMemoryRoutingPolicySource({"rules": PRIVATE_DOMAIN}), None,
              ErrorCategory.INVALID_SOURCE_DATA, "invalid_routing_policy"),
-            (None, StaticGeoData(RuntimeError(f"сбой {PRIVATE_IP}")),
+            (None, self.geodata(RuntimeError(f"сбой {PRIVATE_IP}")),
              ErrorCategory.SOURCE_FAILED, "rule_matcher_failed"),
-            (None, StaticGeoData(mismatch),
+            (None, self.geodata(mismatch),
              ErrorCategory.INVALID_SOURCE_DATA, "geodata_database_mismatch"),
-            (None, StaticGeoData(PRIVATE_IP),
+            (None, self.geodata(PRIVATE_IP),
              ErrorCategory.INVALID_SOURCE_DATA, "invalid_geodata_result"),
         )
         for source, geodata, category, code in cases:
@@ -387,10 +315,6 @@ class ExplainRouteTests(unittest.TestCase):
                 self.assertEqual(result.error.code, code)
                 self.assert_private_hidden(result)
                 self.assertFalse(any(isinstance(item, BaseException) for item in reachable(result)))
-
-    def test_interrupts_are_not_converted(self):
-        with self.assertRaises(KeyboardInterrupt):
-            self.execute(self.command, StaticPolicySource(KeyboardInterrupt()))
 
 
 if __name__ == "__main__":

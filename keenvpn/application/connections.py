@@ -68,7 +68,11 @@ class InspectConnectionLinkHandler:
         """Выполнить команду и вернуть результат, не вызывая исключений отказа."""
         operation_id = self._operation_ids()
         name = InspectConnectionLink.name
-        if type(command) is not InspectConnectionLink or not isinstance(command.link, SecretValue):
+        if (
+            type(command) is not InspectConnectionLink
+            or not isinstance(command.link, SecretValue)
+            or not isinstance(command.link.reveal(), str)
+        ):
             return failed(operation_id, name, invalid_command())
         error = check_contract_version(command.contract_version)
         if error is not None:

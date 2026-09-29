@@ -55,7 +55,9 @@
 
 ## Проверка ссылки подключения
 
-Ссылка передаётся как `SecretValue`, поэтому `repr()` команды её не показывает.
+Ссылка передаётся как `SecretValue` со строкой, поэтому `repr()` команды её
+не показывает. Другой тип ссылки или значения внутри — `invalid_request` /
+`invalid_command`.
 Обработчик получает парсер как параметр; для Trojan используется
 `keenvpn.adapters.trojan_uri.TrojanLinkParser`.
 
@@ -98,6 +100,12 @@ else:
 [`RoutingContext`](routing-explanation.md#входные-предположения): `domain`,
 `domain_source`, `ips`, `ip_source`. Значения считаются приватными,
 `repr()` команды их скрывает.
+
+Тип полей проверяется до разбора значений: `domain` — `str` или `None`,
+источники — только `DomainSource` и `IPSource`, `ips` — tuple строк или `None`.
+В отличие от `RoutingContext`, list не принимается. Нарушение типа —
+`invalid_request` / `invalid_command`; некорректное по смыслу значение
+правильного типа — `invalid_input`.
 
 Обработчику передаются источник правил и, при необходимости, источник геоданных:
 

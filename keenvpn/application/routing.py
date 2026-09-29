@@ -109,6 +109,23 @@ class RouteExplanationView:
         }
 
 
+def _well_typed(command: object) -> bool:
+    """Проверить типы полей: аннотации dataclass при создании не проверяются.
+
+    Смысл значений (формат домена и IP, сочетание источников) проверяет
+    RoutingContext, и его отказ относится к invalid_input.
+    """
+    return (
+        type(command) is ExplainRoute
+        and (command.domain is None or isinstance(command.domain, str))
+        and isinstance(command.domain_source, DomainSource)
+        and (command.ips is None or (
+            type(command.ips) is tuple and all(isinstance(value, str) for value in command.ips)
+        ))
+        and isinstance(command.ip_source, IPSource)
+    )
+
+
 class ExplainRouteHandler:
     """Объяснить маршрут по правилам источника без DNS, Xray и изменений.
 
@@ -130,7 +147,7 @@ class ExplainRouteHandler:
         """Выполнить команду и вернуть результат, не вызывая исключений отказа."""
         operation_id = self._operation_ids()
         name = ExplainRoute.name
-        if type(command) is not ExplainRoute:
+        if not _well_typed(command):
             return failed(operation_id, name, invalid_command())
         error = check_contract_version(command.contract_version)
         if error is not None:

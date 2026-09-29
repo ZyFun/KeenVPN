@@ -171,6 +171,7 @@ class InspectConnectionLinkTests(unittest.TestCase):
         cases = (
             (LINK, "invalid_command"),
             (InspectConnectionLink(LINK), "invalid_command"),
+            (InspectConnectionLink(SecretValue(b"trojan://")), "invalid_command"),
             (ExplainRoute(), "invalid_command"),
             (InspectConnectionLink(SecretValue(LINK), contract_version=CONTRACT_VERSION + 1),
              "unsupported_contract_version"),
@@ -335,7 +336,7 @@ class ExplainRouteTests(unittest.TestCase):
             (ExplainRoute(domain="http://bad/", domain_source=DomainSource.DESTINATION), "invalid_domain"),
             (ExplainRoute(ips=("192.0.2.0/24",), ip_source=IPSource.DNS), "invalid_routing_context"),
             (ExplainRoute(domain=PRIVATE_DOMAIN), "invalid_routing_context"),
-            (ExplainRoute(domain_source="destination"), "invalid_routing_context"),
+            (ExplainRoute(ips=(), ip_source=IPSource.DNS), "invalid_routing_context"),
         )
         for command, code in cases:
             with self.subTest(code=code):
@@ -346,8 +347,14 @@ class ExplainRouteTests(unittest.TestCase):
                 self.assertEqual(source.calls, 0)
 
     def test_malformed_command_is_rejected(self):
+        # Аннотации dataclass не проверяются при создании: тип полей проверяет сценарий.
         for command, code in (
             (InspectConnectionLink(SecretValue(LINK)), "invalid_command"),
+            (ExplainRoute(domain_source="destination"), "invalid_command"),
+            (ExplainRoute(ip_source="dns", ips=(PRIVATE_IP,)), "invalid_command"),
+            (ExplainRoute(ips=[PRIVATE_IP], ip_source=IPSource.DNS), "invalid_command"),
+            (ExplainRoute(ips=(PRIVATE_IP, 1), ip_source=IPSource.DNS), "invalid_command"),
+            (ExplainRoute(domain=b"example.test", domain_source=DomainSource.DESTINATION), "invalid_command"),
             (ExplainRoute(contract_version=0), "unsupported_contract_version"),
         ):
             with self.subTest(code=code):

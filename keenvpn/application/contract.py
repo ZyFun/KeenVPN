@@ -39,7 +39,11 @@ class ErrorCategory(StrEnum):
 
 
 class ErrorCode(StrEnum):
-    """Коды отказов, определённые самим прикладным слоем."""
+    """Общие коды отказов контракта, не зависящие от сценария.
+
+    Коды отказов источников задаёт модуль сценария, коды домена и парсера
+    передаются без изменения.
+    """
 
     INVALID_COMMAND = "invalid_command"
     UNSUPPORTED_CONTRACT_VERSION = "unsupported_contract_version"

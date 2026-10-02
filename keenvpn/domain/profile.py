@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from enum import StrEnum
 import re
-from typing import Protocol, runtime_checkable
+from typing import NoReturn, Protocol, runtime_checkable
 import unicodedata
 from uuid import UUID
 
@@ -37,10 +37,24 @@ class ProfileValidationError(ValueError):
         super().__init__("Некорректная структура профиля подключения.")
 
 
+def _raise_detached(code: ProfileErrorCode) -> NoReturn:
+    """Отделить отказ от активного исключения без изменения чужих кадров.
+
+    from None скрывает печать цепочки, но сохраняет __context__. Очистка
+    после первого raise и bare raise не связывают ошибку с ним повторно.
+    Собственный traceback и локальные переменные вызывающего кода остаются.
+    """
+    try:
+        raise ProfileValidationError(code) from None
+    except ProfileValidationError as error:
+        error.__context__ = None
+        raise
+
+
 def validate_profile_format_version(version: object) -> None:
     """Проверить общий заголовок до интерпретации полей конкретной версии."""
     if type(version) is not int or version < 1:
-        raise ProfileValidationError(ProfileErrorCode.VERSION)
+        _raise_detached(ProfileErrorCode.VERSION)
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -71,7 +85,7 @@ def validate_profile_identity(identity: ProfileIdentity) -> None:
     if identity.format_version != PROFILE_FORMAT_VERSION:
         return
     if type(identity.profile_id) is not UUID or identity.profile_id.int == 0:
-        raise ProfileValidationError(ProfileErrorCode.ID)
+        _raise_detached(ProfileErrorCode.ID)
     if identity.name is not None and (
         type(identity.name) is not str or not identity.name.strip() or len(identity.name) > 256
         or any(
@@ -79,9 +93,9 @@ def validate_profile_identity(identity: ProfileIdentity) -> None:
             for char in identity.name
         )
     ):
-        raise ProfileValidationError(ProfileErrorCode.NAME)
+        _raise_detached(ProfileErrorCode.NAME)
     if type(identity.protocol) is not str or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", identity.protocol):
-        raise ProfileValidationError(ProfileErrorCode.PROTOCOL)
+        _raise_detached(ProfileErrorCode.PROTOCOL)
 
 
 @runtime_checkable
@@ -132,7 +146,7 @@ class ConnectionProfile[ParametersT: ProfileParameters]:
 def validate_profile(profile: ConnectionProfile) -> None:
     """Проверить готовую модель без вызова хуков создания и изменения полей."""
     if type(profile.identity) is not ProfileIdentity:
-        raise ProfileValidationError(ProfileErrorCode.IDENTITY)
+        _raise_detached(ProfileErrorCode.IDENTITY)
     validate_profile_identity(profile.identity)
     if profile.identity.format_version != PROFILE_FORMAT_VERSION:
         # Формат параметров неизвестен: сохраняем объект без интерпретации.
@@ -151,4 +165,4 @@ def validate_profile(profile: ConnectionProfile) -> None:
         # Ошибка чужой модели может содержать секрет; её цепочка не нужна.
         code = ProfileErrorCode.PARAMETERS
     if code is not None:
-        raise ProfileValidationError(code)
+        _raise_detached(code)

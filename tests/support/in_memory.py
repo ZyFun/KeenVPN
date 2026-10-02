@@ -8,9 +8,13 @@
 
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
-from keenvpn.application.ports import ConnectionLinkParser, GeoDataSource, RoutingPolicySource
+from keenvpn.application.ports import (
+    ConnectionLinkParser, ConnectionProfileSource, GeoDataSource, RoutingPolicySource,
+)
 from keenvpn.domain.connection import TrojanConnection
+from keenvpn.domain.profile import ConnectionProfile
 from keenvpn.domain.routing import DomainCondition, GeoIPCondition, GeoSiteCondition
 from keenvpn.domain.routing_explanation import GeoMatch, IPSource, RoutingContext
 from keenvpn.domain.routing_policy import RoutingPolicy
@@ -100,6 +104,33 @@ class InMemoryConnectionLinkParser(_ScriptedPort, ConnectionLinkParser):
         """Учесть вызов; ссылка не остаётся в полях адаптера и в его кадре."""
         del link
         return self._respond()
+
+
+class InMemoryConnectionProfileSource(ConnectionProfileSource):
+    """Ответы по точному ID; отсутствие профиля задаётся явно через None."""
+
+    def __init__(self) -> None:
+        self._responses: dict[UUID, Any] = {}
+        self._calls: list[UUID] = []
+
+    @property
+    def calls(self) -> tuple[UUID, ...]:
+        """Неизменяемая история запрошенных идентификаторов."""
+        return tuple(self._calls)
+
+    def set_response(self, profile_id: UUID, outcome: Any) -> None:
+        """Настроить ответ точного запроса, освобождая кадры прежнего отказа."""
+        if type(profile_id) is not UUID or profile_id.int == 0:
+            raise AdapterSetupError("Ответ профиля требует непустой UUID.")
+        _release(self._responses.get(profile_id))
+        self._responses[profile_id] = outcome
+
+    def get_profile(self, profile_id: UUID) -> ConnectionProfile | None:
+        self._calls.append(profile_id)
+        return _resolve(self._responses.get(profile_id, _UNSET))
+
+    def __repr__(self) -> str:
+        return f"InMemoryConnectionProfileSource(calls={len(self._calls)}, responses={len(self._responses)})"
 
 
 @dataclass(frozen=True, slots=True, repr=False)

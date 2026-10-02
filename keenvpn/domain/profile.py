@@ -57,6 +57,11 @@ def validate_profile_format_version(version: object) -> None:
         _raise_detached(ProfileErrorCode.VERSION)
 
 
+def valid_protocol_id(value: object) -> bool:
+    """Проверить ID протокола формата v1 для профиля и реестра без преобразований."""
+    return type(value) is str and re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value) is not None
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class ProfileIdentity:
     """Стабильный ID, имя, протокол и версия общей оболочки.
@@ -94,7 +99,7 @@ def validate_profile_identity(identity: ProfileIdentity) -> None:
         )
     ):
         _raise_detached(ProfileErrorCode.NAME)
-    if type(identity.protocol) is not str or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", identity.protocol):
+    if not valid_protocol_id(identity.protocol):
         _raise_detached(ProfileErrorCode.PROTOCOL)
 
 

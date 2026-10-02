@@ -5,11 +5,12 @@
 не читают терминал и не запрашивают подтверждение: отображение результата
 и диалог с пользователем остаются на стороне вызывающего кода.
 
-Доступны два сценария только для чтения:
+Доступны три сценария только для чтения:
 
 | Команда | Обработчик | Что делает |
 | --- | --- | --- |
 | `InspectConnectionLink` | `InspectConnectionLinkHandler` | Разбирает ссылку подключения и показывает её формат без значений полей |
+| `InspectConnectionProfile` | `InspectConnectionProfileHandler` | Читает профиль по ID и показывает его общую структуру без имени и параметров подключения |
 | `ExplainRoute` | `ExplainRouteHandler` | Строит [статическое объяснение маршрута](routing-explanation.md) по правилам из источника |
 
 Сценарии работают в памяти. Они не устанавливают соединения, не выполняют DNS,
@@ -25,9 +26,9 @@
 `application.ports`; application импортирует доменные модели и собственные
 контракты, domain не зависит от application, адаптеров или интерфейса.
 
-`ConnectionLinkView`, `RouteExplanationView` и `ErrorDetail` содержат безопасные
-данные и пояснения. Заранее заданное сообщение ошибки и преобразование
-`to_dict()` относятся к контракту результата: они не добавляют ANSI-оформление,
+`ConnectionLinkView`, `ConnectionProfileView`, `RouteExplanationView` и
+`ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
+ошибки и преобразование `to_dict()` относятся к контракту результата: они не добавляют ANSI-оформление,
 заголовки меню или выравнивание для терминала. Отображение и сериализация одного
 результата не требуют повторного выполнения сценария или чтения его источников.
 Примеры с `getpass()` и `print()` ниже показывают именно вызывающий код.
@@ -41,7 +42,7 @@
 | --- | --- |
 | `contract_version` | Версия формата команд и результатов, сейчас `1` (`CONTRACT_VERSION`) |
 | `operation_id` | Идентификатор вызова; по умолчанию случайная hex-строка |
-| `command` | Имя команды: `inspect_connection_link` или `explain_route` |
+| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile` или `explain_route` |
 | `status` | `OperationStatus.SUCCEEDED` или `OperationStatus.FAILED` |
 | `data` | Безопасное представление при успехе, иначе `None` |
 | `error` | `ErrorDetail` при отказе, иначе `None` |
@@ -59,8 +60,8 @@
 | `ErrorCategory` | Когда возникает |
 | --- | --- |
 | `invalid_request` | Команда неверного типа или с полями неверных типов (`invalid_command`), либо другой версии контракта (`unsupported_contract_version`) |
-| `invalid_input` | Введённое значение некорректно: ссылка, домен, IP или сочетание источников |
-| `unsupported` | Значение корректно по форме, но не поддерживается: схема, режим безопасности, транспорт, параметр |
+| `invalid_input` | Введённое значение некорректно: ссылка, домен, IP, сочетание источников или идентификатор профиля; либо профиль с указанным ID отсутствует |
+| `unsupported` | Значение корректно по форме, но не поддерживается: схема, режим безопасности, транспорт, параметр или версия формата профиля |
 | `source_failed` | Источник данных не смог выполнить запрос |
 | `invalid_source_data` | Источник вернул данные, противоречащие контракту или модели |
 
@@ -173,10 +174,82 @@ assert result.data.selection.action == "VPN"
 
 Текст и цепочка исключений источников в результат не попадают.
 
+## Просмотр профиля по ID
+
+`InspectConnectionProfile` принимает `profile_id` типа `uuid.UUID`.
+Обработчик `InspectConnectionProfileHandler` получает порт
+`ConnectionProfileSource.get_profile(profile_id) -> ConnectionProfile | None`.
+Источник возвращает готовую [модель профиля](connection-profile.md), `None`
+при отсутствии или вызывает исключение при сбое. Источник не должен менять
+профиль или конфигурацию при чтении.
+
+После проверки команды и версии контракта обработчик отклоняет нулевой UUID,
+затем ровно один раз обращается к источнику. Сначала он проверяет тип оболочки
+и идентичности, затем номер версии: целое число не меньше 1, кроме `bool`.
+Неизвестная положительная версия сразу даёт `unsupported`, без проверки
+остальных полей по правилам v1 или сравнения ID. Только для версии `1`
+проверяются общие поля, соответствие протокола параметрам и совпадение
+полученного ID с запрошенным. Сам просмотр не определяет
+поддержку протокола движком и не валидирует его настройки.
+
+Повторная проверка использует явную доменную функцию `validate_profile`.
+Она не вызывает хуки создания моделей, не нормализует поля и не заменяет
+объекты источника.
+
+При успехе `ConnectionProfileView` содержит только `profile_id` (строка),
+`protocol`, `format_version` и `has_name`. Модель, имя и параметры подключения
+недостижимы из результата; диагностика параметров не вызывается. Исходный
+профиль не меняется, новый ID не создаётся. Представление одного результата
+в тексте и JSON не вызывает источник повторно.
+
+```python
+from uuid import UUID
+
+from keenvpn.application.profiles import InspectConnectionProfile, InspectConnectionProfileHandler
+from keenvpn.domain.connection import SecretValue, TrojanConnection
+from keenvpn.domain.profile import ConnectionProfile, ProfileIdentity
+
+profile_id = UUID("c0000000-0000-4000-8000-000000000001")
+profile = ConnectionProfile(
+    ProfileIdentity(profile_id, "Пример профиля", "trojan"),
+    TrojanConnection("vpn.example.test", 443, SecretValue("TEST_ONLY_PASSWORD"), "/"),
+)
+
+
+class FixedProfiles:
+    def get_profile(self, requested_id):
+        return profile if requested_id == profile.identity.profile_id else None
+
+
+result = InspectConnectionProfileHandler(FixedProfiles()).execute(InspectConnectionProfile(profile_id))
+assert result.data.profile_id == str(profile_id)
+assert result.data.protocol == "trojan"
+```
+
+| Ситуация | Категория и код |
+| --- | --- |
+| Неверный тип команды/ID | `invalid_request` / `invalid_command` |
+| Неверная версия команды | `invalid_request` / `unsupported_contract_version` |
+| Нулевой UUID | `invalid_input` / `invalid_profile_id` |
+| Профиль отсутствует | `invalid_input` / `profile_not_found` |
+| Исключение источника | `source_failed` / `profile_source_failed` |
+| Объект другого типа или подкласс `ConnectionProfile` | `invalid_source_data` / `invalid_profile_model`; `reason=None` |
+| Неверный тип `identity`, включая подкласс `ProfileIdentity` | `invalid_source_data` / `invalid_profile_model`; `reason=invalid_profile_identity` |
+| Ошибка доменной проверки структуры профиля | `invalid_source_data` / `invalid_profile_model`; доменная причина передаётся в `reason` |
+| Источник вернул другой ID | `invalid_source_data` / `profile_id_mismatch` |
+| Неизвестная положительная версия профиля | `unsupported` / `unsupported_profile_format_version` |
+
+Если повреждённая структура вызывает ошибку без доменной причины,
+обработчик возвращает `invalid_source_data` / `invalid_profile_model`
+с `reason=None`. Методы подклассов профиля при проверке не вызываются.
+Текст и цепочка внешних исключений в результат не попадают. `KeyboardInterrupt`
+и `SystemExit` проходят наружу. Ошибка источника, отсутствие и несовместимый
+формат не превращаются в успешный просмотр.
+
 ## Тестовые адаптеры в памяти
 
 Модуль [`tests/support/in_memory.py`](../tests/support/in_memory.py) содержит
-управляемые реализации трёх используемых портов. Это средства тестов:
+управляемые реализации четырёх используемых портов. Это средства тестов:
 application получает их через конструкторы обработчиков и не импортирует
 `tests`. Адаптеры не используют файлы, сеть, SSH или процессы.
 
@@ -184,6 +257,7 @@ application получает их через конструкторы обраб
 | --- | --- |
 | `InMemoryRoutingPolicySource` | `outcome` — ответ источника правил, `calls` — число обращений |
 | `InMemoryConnectionLinkParser` | `outcome` — ответ парсера, `calls` — число обращений; ссылка не сохраняется в полях адаптера и в его кадре |
+| `InMemoryConnectionProfileSource` | `set_response(profile_id, outcome)` — ответ по точному UUID; `calls` — tuple запрошенных ID; отсутствие профиля задаётся явно как `None` |
 | `InMemoryGeoDataSource` | `set_response(condition, values, outcome)` — ответ точного запроса; `calls` — неизменяемый снимок истории `GeoDataCall` |
 
 Ответы повторяются до явной замены. `outcome` возвращается как есть, а экземпляр
@@ -216,6 +290,11 @@ IP — к стандартной записи. Значения, которые 
 `outcome` или `set_response` для того же запроса. Замена сбрасывает traceback
 и `__context__` прежнего исключения, даже если тест хранит его в переменной.
 Не выводите его traceback с локальными переменными.
+
+`InMemoryConnectionProfileSource` следует тем же правилам отказов и очистки
+кадров. Незаданный UUID вызывает `UnconfiguredResponseError`, а ответ `None`
+означает отсутствие профиля. Неверный тип или нулевой UUID при настройке
+вызывает `AdapterSetupError`. `repr()` адаптера скрывает ответы.
 
 Пример тестового модуля `tests/test_<имя>.py`, запускаемого через
 `unittest discover -s tests`:
@@ -294,8 +373,12 @@ domain и adapters, включая относительные импорты и 
 `pkgutil` и `runpy`. Проверка исходников выявляет `input`/`print` и
 ANSI-последовательности в строках и байтах, а в application и domain — также
 прямой ввод-вывод через `open`, `os.read`, `os.write` и `os.open`; адаптерам
-чтение файлов разрешено. Она дополнена выполнением обоих сценариев с запрещённым
-терминалом и представлением результата вызывающим кодом в JSON и текст из
+чтение файлов разрешено. Она дополнена выполнением проверки ссылки и объяснения
+маршрута с запрещённым терминалом и представлением результата вызывающим кодом в JSON и текст из
 безопасных данных без повторных обращений к парсеру и источникам. Обычные
 сообщения и безопасные словари разрешены. Это проверка явных зависимостей и выполненных ветвей,
 а не доказательство отсутствия любых возможных динамических обращений.
+
+`test_application_profiles.py` отдельно проверяет просмотр профиля без внешних
+эффектов, ошибки источника, соответствие ID, версии и протокола, приватность
+результата и его представление без повторных запросов к источнику.

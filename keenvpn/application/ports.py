@@ -6,8 +6,10 @@
 
 from enum import StrEnum
 from typing import Protocol
+from uuid import UUID
 
 from keenvpn.domain.connection import TrojanConnection
+from keenvpn.domain.profile import ConnectionProfile
 from keenvpn.domain.routing import GeoIPCondition, GeoSiteCondition
 from keenvpn.domain.routing_explanation import GeoMatch
 from keenvpn.domain.routing_policy import RoutingPolicy
@@ -38,6 +40,14 @@ class ConnectionLinkParser(Protocol):
 
     def parse(self, link: str) -> TrojanConnection:
         """Вернуть модель или вызвать ConnectionLinkRejected."""
+        ...
+
+
+class ConnectionProfileSource(Protocol):
+    """Чтение профиля по стабильному ID без изменения профиля и конфигурации."""
+
+    def get_profile(self, profile_id: UUID) -> ConnectionProfile | None:
+        """Вернуть профиль или None при отсутствии; при сбое — вызвать исключение."""
         ...
 
 

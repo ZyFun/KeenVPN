@@ -197,7 +197,7 @@ class PolicyResolution:
         ):
             _raise_detached(KeeneticPolicyErrorCode.RESOLUTION)
         if self.outcome is PolicyResolutionOutcome.RESOLVED:
-            consistent = self.policy_id in self.candidates and (
+            consistent = valid_policy_id(self.policy_id) and self.policy_id in self.candidates and (
                 self.selected_by_user or len(self.candidates) == 1
             )
         elif self.outcome is PolicyResolutionOutcome.MISSING:

@@ -236,6 +236,15 @@ class ResolvePolicyTests(unittest.TestCase):
                 PolicyResolution(*arguments)
             self.assertIs(caught.exception.code, KeeneticPolicyErrorCode.RESOLUTION)
 
+    def test_resolution_rejects_object_equal_to_candidate_id(self):
+        class ForgedId:
+            def __eq__(self, other):
+                return other == "Policy1"
+
+        with self.assertRaises(KeeneticPolicyError) as caught:
+            PolicyResolution(PolicyResolutionOutcome.RESOLVED, ForgedId(), ("Policy1",), 1)
+        self.assertIs(caught.exception.code, KeeneticPolicyErrorCode.RESOLUTION)
+
 
 if __name__ == "__main__":
     unittest.main()

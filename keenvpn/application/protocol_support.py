@@ -113,7 +113,7 @@ class InspectProtocolSupportHandler:
                 engine_capability=None if binding is None else command.engine_capability.value,
             )
         except RegistryError as rejection:
-            error = _registry_error(rejection.code)
+            error = registry_error_detail(rejection.code)
         except Exception:
             error = ErrorDetail(
                 ErrorCategory.SOURCE_FAILED, "registry_failed",
@@ -124,7 +124,7 @@ class InspectProtocolSupportHandler:
         return failed(operation_id, name, error)
 
 
-def _registry_error(code: RegistryErrorCode) -> ErrorDetail:
+def registry_error_detail(code: RegistryErrorCode) -> ErrorDetail:
     """Не переносить текст исключения или произвольный код в результат."""
     messages = {
         RegistryErrorCode.INVALID_SELECTOR: "Некорректный идентификатор или схема ссылки.",

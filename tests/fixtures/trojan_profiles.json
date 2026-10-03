@@ -1,0 +1,27 @@
+[
+  {
+    "uri": "trojan://TEST_ONLY_P%2525%2B%40@VPN.example.test:443/?security=tls&type=ws&sni=TLS.example.test&host=WS.example.test&path=%2Fa%252Fb%3Fq%3Dx%2By&fp=firefox#Cafe%CC%81%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9",
+    "expected": {
+      "server": "VPN.example.test", "port": 443, "password": "TEST_ONLY_P%25+@",
+      "path": "/a%2Fb?q=x+y", "sni": "TLS.example.test", "host": "WS.example.test",
+      "fingerprint": "firefox", "name": "Café👨‍👩",
+      "protocol": "trojan", "security": "tls", "transport": "ws"
+    }
+  },
+  {
+    "uri": "trojan://TEST_ONLY_MINIMAL@192.0.2.10:8443?type=ws&security=tls",
+    "expected": {
+      "server": "192.0.2.10", "port": 8443, "password": "TEST_ONLY_MINIMAL", "path": "/",
+      "sni": null, "host": null, "fingerprint": null, "name": null,
+      "protocol": "trojan", "security": "tls", "transport": "ws"
+    }
+  },
+  {
+    "uri": "TROJAN://TEST_ONLY_IPV6@[2001:db8::1]:443/?type=ws&security=tls#%24%28id%29%3B%60id%60",
+    "expected": {
+      "server": "2001:db8::1", "port": 443, "password": "TEST_ONLY_IPV6", "path": "/",
+      "sni": null, "host": null, "fingerprint": null, "name": "$(id);`id`",
+      "protocol": "trojan", "security": "tls", "transport": "ws"
+    }
+  }
+]

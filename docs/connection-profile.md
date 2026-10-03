@@ -76,6 +76,77 @@ assert connection.name == "URI-name"
 и поведение. `TrojanConnection.name` — имя из URI; `ProfileIdentity.name` — имя
 профиля. При такой явной сборке они независимы, автоматически не синхронизируются.
 
+## Сборка через реестр
+
+`application.profile_preparation.ConnectionProfileFactory` собирает профиль
+в памяти через переданный доверенный реестр. ID, имя, протокол и версия
+передаются в готовой `ProfileIdentity`; фабрика не назначает новый ID.
+
+- `from_parameters(identity, parameters)` оборачивает существующую модель.
+  Для версии 1 проверяются идентичность, принадлежность параметров типу
+  зарегистрированного модуля и общая структура профиля. Подклассы модели
+  параметров допускаются, дополнительные поля сохраняются в исходном объекте.
+  Парсер и протокольный валидатор не вызываются: сборка не объявляет
+  произвольную существующую модель валидной URI или рабочим VPN.
+- `from_link(identity, link)` принимает URI как `SecretValue`, выбирает модуль
+  по `identity.protocol`, требует `parse_uri` и вызывает его парсер ровно один
+  раз. Принадлежность URI протоколу и параметры проверяет сам парсер.
+  Для Trojan `from_link` вызывает `TrojanLinkParser` из поставки: значения,
+  defaults, декодирование, сообщения и коды отказов совпадают с
+  [разбором Trojan URI](trojan-uri.md).
+
+Оба метода возвращают приватную `ConnectionProfile`, предназначенную для
+внутреннего кода. Интерфейс использует безопасный сценарий
+[`InspectProfileLink`](application.md#проверка-сборки-профиля-из-ссылки).
+Фабрика не пишет файлы, не импортирует Xray/XKeen-конфигурацию и не применяет
+изменения. Готовые параметры и секреты не копируются и не нормализуются.
+Имя из URI сохраняется в параметрах, а имя профиля задаётся отдельно.
+
+```python
+from uuid import UUID
+
+from keenvpn.adapters.protocols import bundled_protocols
+from keenvpn.adapters.trojan_uri import TrojanLinkParser
+from keenvpn.application.profile_preparation import ConnectionProfileFactory
+from keenvpn.domain.connection import SecretValue
+from keenvpn.domain.profile import ProfileIdentity
+
+identity = ProfileIdentity(UUID("c0000000-0000-4000-8000-000000000001"), None, "trojan")
+uri = "trojan://TEST_ONLY_PASSWORD@vpn.example.test:443?security=tls&type=ws#URI-name"
+original = TrojanLinkParser().parse(uri)
+factory = ConnectionProfileFactory(bundled_protocols())
+profile = factory.from_parameters(identity, original)
+assert profile.parameters is original
+assert profile.parameters.password is original.password
+assert profile.identity.name is None
+assert profile.parameters.name == "URI-name"
+parsed = factory.from_link(identity, SecretValue(uri))
+assert parsed.identity is identity
+assert parsed.parameters.name == original.name
+```
+
+Неизвестная положительная версия при `from_parameters` сохраняется вместе
+с идентичностью и параметрами без обращения к реестру и полям параметров.
+Просмотр по ID и `from_link` явно отклоняют её как неподдержанную.
+Неподдерживаемая модель не преобразуется автоматически: отказ оставляет
+исходный объект вызывающему коду. Сериализации и миграции файлов нет.
+
+При отказе фабрика вызывает `ProfilePreparationError` с безопасной `detail`
+типа `ErrorDetail`. Ошибки реестра и доверенного парсера сохраняют существующие
+коды. Неверная идентичность даёт `invalid_input / invalid_profile_identity`,
+ошибки её полей — `invalid_input / invalid_profile_model` с доменной `reason`.
+Неверный секретный ввод — `invalid_input / invalid_profile_link`, неверный
+тип или протокол параметров — `invalid_source_data / invalid_connection_model`.
+Непредвиденный отказ заменяется статическим
+`source_failed / profile_preparation_failed`. Неизвестная версия при разборе
+URI — `unsupported / unsupported_profile_format_version`.
+
+Новые отказы не удерживают исходные исключения или внутренние кадры разбора;
+приватные аргументы удаляются из собственных кадров отказа фабрики.
+`KeyboardInterrupt` и `SystemExit` распространяются. Объекты вызывающего кода,
+доверенных callbacks, прямой доступ к параметрам и дампы памяти безопасной
+диагностикой не являются.
+
 ## Диагностика и ошибки
 
 `repr()` идентичности и профиля скрывает содержимое. `to_diagnostic()` профиля
@@ -119,6 +190,7 @@ ID и идентификатор протокола — открытые слу�
 ```sh
 python3 -I -S -B -m unittest discover -s tests -p test_profile.py -v
 python3 -I -S -B -m unittest discover -s tests -p test_application_profiles.py -v
+python3 -I -S -B -m unittest discover -s tests -p test_profile_preparation.py -v
 ```
 
 Проверяются стабильность ID, независимость имени и параметров, ошибки структуры,

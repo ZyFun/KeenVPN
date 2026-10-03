@@ -80,7 +80,7 @@ class InspectConnectionLinkHandler:
         try:
             connection = self._parser.parse(command.link.reveal())
         except ConnectionLinkRejected as rejection:
-            error = _rejection_detail(rejection)
+            error = link_rejection_detail(rejection)
         except Exception:
             # Сырое исключение может содержать ссылку: заменяем его кодом.
             error = ErrorDetail(
@@ -97,7 +97,8 @@ class InspectConnectionLinkHandler:
         return failed(operation_id, name, error)
 
 
-def _rejection_detail(rejection: ConnectionLinkRejected) -> ErrorDetail:
+def link_rejection_detail(rejection: ConnectionLinkRejected) -> ErrorDetail:
+    """Преобразовать отказ доверенного парсера для сценариев ссылки и профиля."""
     category = _CATEGORIES.get(rejection.rejection) if isinstance(rejection.rejection, LinkRejection) else None
     try:
         if category is None:

@@ -5,12 +5,13 @@
 не читают терминал и не запрашивают подтверждение: отображение результата
 и диалог с пользователем остаются на стороне вызывающего кода.
 
-Доступны четыре сценария только для чтения:
+Доступны сценарии только для чтения:
 
 | Команда | Обработчик | Что делает |
 | --- | --- | --- |
 | `InspectConnectionLink` | `InspectConnectionLinkHandler` | Разбирает ссылку подключения и показывает её формат без значений полей |
 | `InspectConnectionProfile` | `InspectConnectionProfileHandler` | Читает профиль по ID и показывает его общую структуру без имени и параметров подключения |
+| `InspectProfileLink` | `InspectProfileLinkHandler` | Проверяет сборку общего профиля из URI в памяти через реестр, возвращает только общую структуру |
 | `InspectProtocolSupport` | `InspectProtocolSupportHandler` | Проверяет доступность модуля и операции по [явному реестру](protocol-registry.md), не выполняя операцию |
 | `ExplainRoute` | `ExplainRouteHandler` | Строит [статическое объяснение маршрута](routing-explanation.md) по правилам из источника |
 
@@ -44,7 +45,7 @@ application импортирует доменные модели и собств
 | --- | --- |
 | `contract_version` | Версия формата команд и результатов, сейчас `1` (`CONTRACT_VERSION`) |
 | `operation_id` | Идентификатор вызова; по умолчанию случайная hex-строка |
-| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_protocol_support` или `explain_route` |
+| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support` или `explain_route` |
 | `status` | `OperationStatus.SUCCEEDED` или `OperationStatus.FAILED` |
 | `data` | Безопасное представление при успехе, иначе `None` |
 | `error` | `ErrorDetail` при отказе, иначе `None` |
@@ -248,6 +249,50 @@ assert result.data.protocol == "trojan"
 и `SystemExit` проходят наружу. Ошибка источника, отсутствие и несовместимый
 формат не превращаются в успешный просмотр.
 
+## Проверка сборки профиля из ссылки
+
+`InspectProfileLink` принимает `identity: ProfileIdentity` и `link: SecretValue`.
+`InspectProfileLinkHandler` получает
+[`ConnectionProfileFactory`](connection-profile.md#сборка-через-реестр).
+Порядок: тип команды → версия контракта → типы полей → идентичность и версия
+профиля → зарегистрированный парсер → общая структура полученного профиля.
+Неверная команда возвращает `invalid_request / invalid_command`, другая версия
+контракта — `invalid_request / unsupported_contract_version`.
+Отказы фабрики возвращаются через её `ErrorDetail`; непредвиденный сбой —
+`source_failed / profile_preparation_failed`. Прерывания проходят наружу.
+
+Успех содержит тот же `ConnectionProfileView`, что и просмотр по ID:
+`profile_id`, `protocol`, `format_version`, `has_name`. Имя, URI и параметры
+в результат не попадают. Сценарий не сохраняет профиль и не вызывает
+источник профилей; ID и имя задаёт вызывающий код. Успех означает только
+сборку модели в памяти, без сетевой проверки VPN.
+
+```python
+from uuid import UUID
+
+from keenvpn.adapters.protocols import bundled_protocols
+from keenvpn.application.profile_preparation import ConnectionProfileFactory
+from keenvpn.application.profiles import InspectProfileLink, InspectProfileLinkHandler
+from keenvpn.domain.connection import SecretValue
+from keenvpn.domain.profile import ProfileIdentity
+
+identity = ProfileIdentity(UUID("c0000000-0000-4000-8000-000000000001"), "Пример", "trojan")
+handler = InspectProfileLinkHandler(ConnectionProfileFactory(bundled_protocols()))
+result = handler.execute(InspectProfileLink(identity, SecretValue(
+    "trojan://TEST_ONLY_PASSWORD@vpn.example.test:443?security=tls&type=ws#URI-name"
+)))
+assert result.succeeded
+assert result.data.profile_id == str(identity.profile_id)
+assert result.data.has_name is True
+```
+
+`InspectConnectionLink` возвращает подробности формата Trojan (`ConnectionLinkView`).
+В обоих сценариях поставляемый Trojan разбирает `TrojanLinkParser`.
+Фабрика преобразует отказ только точного типа `ConnectionLinkRejected`;
+подкласс заменяется `source_failed / profile_preparation_failed` без вызова
+его `__str__`. Контракт `InspectConnectionLink` допускает подклассы этого отказа.
+Общая сборка профиля не ветвится по имени протокола.
+
 ## Тестовые адаптеры в памяти
 
 Модуль [`tests/support/in_memory.py`](../tests/support/in_memory.py) содержит
@@ -361,6 +406,7 @@ URI должны использовать `TrojanLinkParser`. Успех с на
 
 ```sh
 python3 -I -S -B -m unittest discover -s tests -p 'test_application*.py' -v
+python3 -I -S -B -m unittest discover -s tests -p test_profile_preparation.py -v
 python3 -I -S -B -m unittest discover -s tests -p test_in_memory_adapters.py -v
 ```
 
@@ -384,3 +430,7 @@ ANSI-последовательности в строках и байтах, а 
 `test_application_profiles.py` отдельно проверяет просмотр профиля без внешних
 эффектов, ошибки источника, соответствие ID, версии и протокола, приватность
 результата и его представление без повторных запросов к источнику.
+
+`test_profile_preparation.py` проверяет сборку профиля из готовых параметров
+и URI через реестр, сценарий `InspectProfileLink`, сохранность полей,
+неподдерживаемые версии и протоколы, безопасные отказы и отсутствие внешних эффектов.

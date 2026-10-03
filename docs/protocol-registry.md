@@ -95,6 +95,15 @@ percent-decoding. Регистр схемы несущественен; иден
 валидатор отвечают за соответствие возвращаемой модели и проверку её
 параметров; регистрация не исполняет их для проверки.
 
+При использовании `parse_uri` через `ConnectionProfileFactory.from_link`
+ожидаемый отказ имеет ровно тип `ConnectionLinkRejected` из
+`application.ports`, вид `LinkRejection.INVALID` или `LinkRejection.UNSUPPORTED`,
+безопасные код, причину и заранее заданный текст. Фабрика передаёт этот отказ
+через `ProfilePreparationError.detail`. Подкласс `ConnectionLinkRejected`
+заменяется `source_failed / profile_preparation_failed` без вызова его
+`__str__`: переопределённый метод не участвует в построении сообщения.
+Выбор модуля самим реестром не вызывает парсер и не проверяет его отказы.
+
 `ProtocolRegistry((module, ...))` создаёт снимок состава. `by_protocol()` и
 `by_uri()` возвращают модуль для доверенного вызывающего кода, а
 `require(module, capability)` проверяет его принадлежность реестру и

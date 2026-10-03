@@ -1,4 +1,4 @@
-"""Просмотр общей структуры профиля по стабильному ID без изменения источника."""
+"""Просмотр профиля по ID и проверка сборки из ссылки без записи и изменения источника."""
 
 from dataclasses import KW_ONLY, dataclass
 from typing import ClassVar
@@ -9,8 +9,10 @@ from keenvpn.application.contract import (
     check_contract_version, failed, invalid_command, new_operation_id, succeeded,
 )
 from keenvpn.application.ports import ConnectionProfileSource
+from keenvpn.application.profile_preparation import ConnectionProfileFactory, ProfilePreparationError
+from keenvpn.domain.connection import SecretValue
 from keenvpn.domain.profile import (
-    PROFILE_FORMAT_VERSION, ConnectionProfile, ProfileValidationError, validate_profile,
+    PROFILE_FORMAT_VERSION, ConnectionProfile, ProfileIdentity, ProfileValidationError, validate_profile,
 )
 
 
@@ -40,6 +42,61 @@ class ConnectionProfileView:
     def to_dict(self) -> dict[str, object]:
         """Вернуть JSON-совместимое представление без исходной модели."""
         return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class InspectProfileLink:
+    """Подготовить профиль в памяти и показать только общую структуру."""
+
+    name: ClassVar[str] = "inspect_profile_link"
+    identity: ProfileIdentity
+    link: SecretValue
+    _: KW_ONLY
+    contract_version: int = CONTRACT_VERSION
+
+    def __repr__(self) -> str:
+        return "InspectProfileLink(<скрыто>)"
+
+
+class InspectProfileLinkHandler:
+    """Проверить сборку профиля без записи и сетевой проверки VPN."""
+
+    def __init__(
+        self, factory: ConnectionProfileFactory, *, operation_ids: OperationIdFactory = new_operation_id,
+    ) -> None:
+        self._factory = factory
+        self._operation_ids = operation_ids
+
+    def execute(self, command: InspectProfileLink) -> Result[ConnectionProfileView]:
+        """Вернуть ту же безопасную структуру, что и просмотр профиля по ID."""
+        operation_id = self._operation_ids()
+        name = InspectProfileLink.name
+        if type(command) is not InspectProfileLink:
+            return failed(operation_id, name, invalid_command())
+        error = check_contract_version(command.contract_version)
+        if error is not None:
+            return failed(operation_id, name, error)
+        if (
+            type(command.identity) is not ProfileIdentity or type(command.link) is not SecretValue
+            or type(command.link.reveal()) is not str
+        ):
+            return failed(operation_id, name, invalid_command())
+        try:
+            profile = self._factory.from_link(command.identity, command.link)
+            error = _check_profile(profile, command.identity.profile_id)
+            if error is not None:
+                return failed(operation_id, name, error)
+            view = ConnectionProfileView(**profile.to_diagnostic())
+        except ProfilePreparationError as rejection:
+            error = rejection.detail
+        except Exception:
+            error = ErrorDetail(
+                ErrorCategory.SOURCE_FAILED, "profile_preparation_failed",
+                "Не удалось подготовить профиль подключения.",
+            )
+        else:
+            return succeeded(operation_id, name, view)
+        return failed(operation_id, name, error)
 
 
 class InspectConnectionProfileHandler:

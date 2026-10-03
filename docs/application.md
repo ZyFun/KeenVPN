@@ -14,6 +14,7 @@
 | `InspectProfileLink` | `InspectProfileLinkHandler` | Проверяет сборку общего профиля из URI в памяти через реестр, возвращает только общую структуру |
 | `InspectProtocolSupport` | `InspectProtocolSupportHandler` | Проверяет доступность модуля и операции по [явному реестру](protocol-registry.md), не выполняя операцию |
 | `ExplainRoute` | `ExplainRouteHandler` | Строит [статическое объяснение маршрута](routing-explanation.md) по правилам из источника |
+| `ResolveKeeneticPolicy` | `ResolveKeeneticPolicyHandler` | Находит ID [политики Keenetic](keenetic-policies.md) по описанию в текущем списке источника; неоднозначность не разрешает сам |
 
 Сценарии работают в памяти. Они не устанавливают соединения, не выполняют DNS,
 не запускают Xray, не записывают файлы и не меняют конфигурацию роутера.
@@ -29,8 +30,8 @@
 application импортирует доменные модели и собственные
 контракты, domain не зависит от application, адаптеров или интерфейса.
 
-`ConnectionLinkView`, `ConnectionProfileView`, `ProtocolSupportView`, `RouteExplanationView` и
-`ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
+`ConnectionLinkView`, `ConnectionProfileView`, `ProtocolSupportView`, `RouteExplanationView`,
+`KeeneticPolicyResolutionView` и `ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
 ошибки и преобразование `to_dict()` относятся к контракту результата: они не добавляют ANSI-оформление,
 заголовки меню или выравнивание для терминала. Отображение и сериализация одного
 результата не требуют повторного выполнения сценария или чтения его источников.
@@ -45,7 +46,7 @@ application импортирует доменные модели и собств
 | --- | --- |
 | `contract_version` | Версия формата команд и результатов, сейчас `1` (`CONTRACT_VERSION`) |
 | `operation_id` | Идентификатор вызова; по умолчанию случайная hex-строка |
-| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support` или `explain_route` |
+| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route` или `resolve_keenetic_policy` |
 | `status` | `OperationStatus.SUCCEEDED` или `OperationStatus.FAILED` |
 | `data` | Безопасное представление при успехе, иначе `None` |
 | `error` | `ErrorDetail` при отказе, иначе `None` |
@@ -63,7 +64,7 @@ application импортирует доменные модели и собств
 | `ErrorCategory` | Когда возникает |
 | --- | --- |
 | `invalid_request` | Команда неверного типа или с полями неверных типов (`invalid_command`), либо другой версии контракта (`unsupported_contract_version`) |
-| `invalid_input` | Введённое значение некорректно: ссылка, селектор протокола (`invalid_protocol_selector`) или движка (`invalid_engine_selector`), домен, IP, сочетание источников или идентификатор профиля; либо профиль с указанным ID отсутствует |
+| `invalid_input` | Введённое значение некорректно: ссылка, селектор протокола (`invalid_protocol_selector`) или движка (`invalid_engine_selector`), домен, IP, сочетание источников, идентификатор профиля, описание или выбранный ID политики; либо профиль с указанным ID отсутствует, либо выбранная политика не входит в текущие совпадения |
 | `unsupported` | Значение корректно по форме, но не поддерживается: протокол, схема, режим безопасности, транспорт, параметр, версия формата профиля, движок или операция |
 | `source_failed` | Источник данных не смог выполнить запрос |
 | `invalid_source_data` | Источник вернул данные, противоречащие контракту или модели |
@@ -293,10 +294,71 @@ assert result.data.has_name is True
 его `__str__`. Контракт `InspectConnectionLink` допускает подклассы этого отказа.
 Общая сборка профиля не ветвится по имени протокола.
 
+## Определение политики Keenetic
+
+`ResolveKeeneticPolicy` принимает `description` — описание политики, которое
+видит пользователь роутера, например `xkeen`, — и необязательный
+`selected_policy_id`. Описание считается приватным значением, `repr()` команды
+его скрывает. Обработчик `ResolveKeeneticPolicyHandler` получает порт
+`KeeneticPolicySource.current_policies() -> KeeneticPolicySet` и обращается
+к нему ровно один раз для корректной команды. Источник не должен менять
+политики при чтении.
+
+Порядок: тип команды и полей → версия контракта → формат описания
+и выбранного ID → чтение источника → проверка списка → сопоставление
+по правилам [модели политик](keenetic-policies.md). Описание и выбранный ID
+проверяются до обращения к источнику.
+
+При успехе `data` — `KeeneticPolicyResolutionView` с полями `outcome`,
+`policy_id`, `candidates`, `policy_count` и `selected_by_user`. Исходы
+`missing` и `ambiguous` — успешные результаты с `policy_id = None`: это
+состояние роутера, а не отказ сценария. Сценарий не подставляет первую
+политику и не создаёт отсутствующую. Чтобы завершить выбор при `ambiguous`,
+вызывающий код показывает `candidates`, получает решение пользователя
+и повторяет команду с `selected_policy_id`; сценарий заново читает источник
+и принимает только ID из текущих совпадений. Описания политик в результат
+не входят.
+
+```python
+from keenvpn.application.keenetic_policies import ResolveKeeneticPolicy, ResolveKeeneticPolicyHandler
+from keenvpn.domain.keenetic_policy import KeeneticPolicy, KeeneticPolicySet
+
+
+class FixedPolicies:
+    def current_policies(self):
+        return KeeneticPolicySet((
+            KeeneticPolicy("Policy0", "NoVPN"), KeeneticPolicy("Policy2", "xkeen"),
+        ))
+
+
+handler = ResolveKeeneticPolicyHandler(FixedPolicies())
+result = handler.execute(ResolveKeeneticPolicy("xkeen"))
+assert result.succeeded
+assert result.data.outcome == "resolved"
+assert result.data.policy_id == "Policy2"
+assert handler.execute(ResolveKeeneticPolicy("VPN")).data.outcome == "missing"
+```
+
+| Ситуация | Категория и код |
+| --- | --- |
+| Неверный тип команды, описания или выбранного ID | `invalid_request` / `invalid_command` |
+| Неверная версия команды | `invalid_request` / `unsupported_contract_version` |
+| Недопустимое описание для поиска | `invalid_input` / `invalid_policy_description` |
+| Выбранный ID недопустимого формата | `invalid_input` / `invalid_policy_id` |
+| Выбранный ID не входит в текущие совпадения | `invalid_input` / `policy_selection_mismatch` |
+| Источник вызвал исключение | `source_failed` / `keenetic_policies_unavailable` |
+| Источник вернул не `KeeneticPolicySet`, включая подкласс | `invalid_source_data` / `invalid_keenetic_policies`; `reason=None` |
+| Список повреждён после создания | `invalid_source_data` / `invalid_keenetic_policies`; доменная причина в `reason` |
+
+Текст и цепочка исключений источника в результат не попадают, `KeyboardInterrupt`
+и `SystemExit` проходят наружу. Успешное определение ID подтверждает только
+совпадение описания в прочитанном списке, а не разрешённые подключения
+политики, назначения устройств или работу VPN.
+
 ## Тестовые адаптеры в памяти
 
 Модуль [`tests/support/in_memory.py`](../tests/support/in_memory.py) содержит
-управляемые реализации четырёх используемых портов. Это средства тестов:
+управляемые реализации пяти используемых портов. Это средства тестов:
 application получает их через конструкторы обработчиков и не импортирует
 `tests`. Адаптеры не используют файлы, сеть, SSH или процессы.
 
@@ -305,6 +367,7 @@ application получает их через конструкторы обраб
 | `InMemoryRoutingPolicySource` | `outcome` — ответ источника правил, `calls` — число обращений |
 | `InMemoryConnectionLinkParser` | `outcome` — ответ парсера, `calls` — число обращений; ссылка не сохраняется в полях адаптера и в его кадре |
 | `InMemoryConnectionProfileSource` | `set_response(profile_id, outcome)` — ответ по точному UUID; `calls` — tuple запрошенных ID; отсутствие профиля задаётся явно как `None` |
+| `InMemoryKeeneticPolicySource` | `outcome` — ответ источника политик Keenetic, `calls` — число обращений; роутер и RCI не читаются |
 | `InMemoryGeoDataSource` | `set_response(condition, values, outcome)` — ответ точного запроса; `calls` — неизменяемый снимок истории `GeoDataCall` |
 
 Ответы повторяются до явной замены. `outcome` возвращается как есть, а экземпляр

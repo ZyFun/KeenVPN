@@ -11,9 +11,10 @@ from typing import Any
 from uuid import UUID
 
 from keenvpn.application.ports import (
-    ConnectionLinkParser, ConnectionProfileSource, GeoDataSource, RoutingPolicySource,
+    ConnectionLinkParser, ConnectionProfileSource, GeoDataSource, KeeneticPolicySource, RoutingPolicySource,
 )
 from keenvpn.domain.connection import TrojanConnection
+from keenvpn.domain.keenetic_policy import KeeneticPolicySet
 from keenvpn.domain.profile import ConnectionProfile
 from keenvpn.domain.routing import DomainCondition, GeoIPCondition, GeoSiteCondition
 from keenvpn.domain.routing_explanation import GeoMatch, IPSource, RoutingContext
@@ -91,6 +92,13 @@ class InMemoryRoutingPolicySource(_ScriptedPort, RoutingPolicySource):
     """Заданный ответ источника правил маршрутизации."""
 
     def current_routing_policy(self) -> RoutingPolicy:
+        return self._respond()
+
+
+class InMemoryKeeneticPolicySource(_ScriptedPort, KeeneticPolicySource):
+    """Заданный список политик Keenetic; роутер и RCI не читаются."""
+
+    def current_policies(self) -> KeeneticPolicySet:
         return self._respond()
 
 

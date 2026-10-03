@@ -9,6 +9,7 @@ from typing import Protocol
 from uuid import UUID
 
 from keenvpn.domain.connection import TrojanConnection
+from keenvpn.domain.keenetic_policy import KeeneticPolicySet
 from keenvpn.domain.profile import ConnectionProfile
 from keenvpn.domain.routing import GeoIPCondition, GeoSiteCondition
 from keenvpn.domain.routing_explanation import GeoMatch
@@ -56,6 +57,14 @@ class RoutingPolicySource(Protocol):
 
     def current_routing_policy(self) -> RoutingPolicy:
         """Вернуть правила; при невозможности чтения — вызвать исключение."""
+        ...
+
+
+class KeeneticPolicySource(Protocol):
+    """Чтение действующего списка политик Keenetic без его изменения."""
+
+    def current_policies(self) -> KeeneticPolicySet:
+        """Вернуть политики; при невозможности чтения — вызвать исключение."""
         ...
 
 

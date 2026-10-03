@@ -16,12 +16,16 @@ sys.path.insert(0, str(ROOT))
 from keenvpn.adapters.trojan_uri import TrojanLinkParser
 from keenvpn.application.connections import InspectConnectionLink, InspectConnectionLinkHandler
 from keenvpn.application.contract import CONTRACT_VERSION, OperationStatus, Result
+from keenvpn.application.keenetic_policies import ResolveKeeneticPolicy, ResolveKeeneticPolicyHandler
 from keenvpn.application.routing import ExplainRoute, ExplainRouteHandler
 from keenvpn.domain.connection import SecretValue
+from keenvpn.domain.keenetic_policy import KeeneticPolicy, KeeneticPolicySet
 from keenvpn.domain.routing import GeoDatabase, GeoDatabaseKind, GeoIPCondition, RoutingAction, RoutingRule
 from keenvpn.domain.routing_explanation import GeoMatch, IPSource
 from keenvpn.domain.routing_policy import FinalRoutingRule, MatchResult, RoutingPolicy
-from tests.support.in_memory import InMemoryGeoDataSource, InMemoryRoutingPolicySource
+from tests.support.in_memory import (
+    InMemoryGeoDataSource, InMemoryKeeneticPolicySource, InMemoryRoutingPolicySource,
+)
 from tests.support.isolation import forbid_external_effects
 
 
@@ -260,6 +264,29 @@ class ApplicationPresentationTests(unittest.TestCase):
                     self.assertEqual(result.error.code, "rule_matcher_failed")
                     self.assertIsNone(result.data)
             self.assert_presentable(result, lambda: (policies.calls, geodata.calls))
+
+    def test_policy_resolution_outcomes_and_failure_need_no_terminal(self):
+        description = "vpn.example.test"
+        source = InMemoryKeeneticPolicySource()
+        handler = ResolveKeeneticPolicyHandler(source)
+        command = ResolveKeeneticPolicy(description)
+        for outcome, status, expected in (
+            (KeeneticPolicySet((KeeneticPolicy("Policy2", description),)), OperationStatus.SUCCEEDED, "resolved"),
+            (KeeneticPolicySet(()), OperationStatus.SUCCEEDED, "missing"),
+            (KeeneticPolicySet((KeeneticPolicy("Policy2", description), KeeneticPolicy("Policy5", description))),
+             OperationStatus.SUCCEEDED, "ambiguous"),
+            (OSError("Отказ для " + description), OperationStatus.FAILED, "keenetic_policies_unavailable"),
+        ):
+            source.outcome = outcome
+            with self.subTest(expected=expected), forbid_external_effects():
+                result = handler.execute(command)
+                self.assertIs(result.status, status)
+                if result.succeeded:
+                    self.assertEqual(result.data.outcome, expected)
+                else:
+                    self.assertEqual(result.error.code, expected)
+                    self.assertIsNone(result.data)
+            self.assert_presentable(result, lambda: source.calls)
 
 
 class TerminalIsolationTests(unittest.TestCase):

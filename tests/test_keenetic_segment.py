@@ -383,6 +383,24 @@ class KeeneticSegmentTests(unittest.TestCase):
             with self.subTest(fields=tuple(fields)):
                 self.assert_error(KeeneticSegmentError, KeeneticSegmentErrorCode.PREVIEW, replace, result, **fields)
 
+    def test_preview_rejects_missing_or_wrong_explicit_override(self):
+        for mode, field, target in (
+            (SegmentSelectionMode.SELECTED_ONLY, "selected", "Policy17"),
+            (SegmentSelectionMode.EXCEPT_SELECTED, "excluded", "Policy42"),
+        ):
+            source = segment(device(FIRST))
+            result = preview(source, mode, **{field: (FIRST,)})
+            for assignment in (None, {"conform": True}, {"policy": "Policy93"}):
+                with self.subTest(mode=mode, assignment=assignment):
+                    record = device(FIRST, assignment=assignment)
+                    after = replace(result.after, devices=KeeneticDeviceInventory((record,)))
+                    changed = () if record == source.devices.devices[0] else (DeviceIdentity(FIRST),)
+                    self.assert_error(KeeneticSegmentError, KeeneticSegmentErrorCode.PREVIEW,
+                                      replace, result, after=after, changed_devices=changed)
+            repeated = preview(segment(device(FIRST, assignment={"policy": target})), mode, **{field: (FIRST,)})
+            self.assertEqual(repeated.changed_devices, ())
+            self.assertEqual(replace(repeated), repeated)
+
     def test_preview_validation_rejects_foreign_hooks_and_detaches_errors(self):
         class ForeignStr(str):
             def __eq__(self, other):
@@ -394,6 +412,8 @@ class KeeneticSegmentTests(unittest.TestCase):
 
         result = preview(segment(), SegmentSelectionMode.WHOLE_SEGMENT)
         for fields in ({"default_policy_id": ForeignStr("Policy17")},
+                       {"vpn_policy_id": ForeignStr("Policy17")},
+                       {"direct_policy_id": ForeignStr("Policy42")},
                        {"policy_ids": ForeignTuple(result.policy_ids)},
                        {"changed_devices": ForeignTuple()},
                        {"selection": replace(result.selection, segment_id="fixture-private-segment")}):
@@ -402,6 +422,18 @@ class KeeneticSegmentTests(unittest.TestCase):
             except ValueError:
                 error = self.assert_error(KeeneticSegmentError, KeeneticSegmentErrorCode.PREVIEW, replace, result, **fields)
             self.assertNotIn("fixture-private", repr(error))
+
+    def test_preview_rejects_invalid_roles_and_default_for_mode(self):
+        for mode in SegmentSelectionMode:
+            result = preview(segment(), mode)
+            for fields in (
+                {"vpn_policy_id": None}, {"direct_policy_id": "PolicyGone"},
+                {"vpn_policy_id": "Policy42"}, {"direct_policy_id": "Policy17"},
+                {"vpn_policy_id": "Policy42", "direct_policy_id": "Policy17"},
+            ):
+                with self.subTest(mode=mode, fields=fields):
+                    self.assert_error(KeeneticSegmentError, KeeneticSegmentErrorCode.PREVIEW,
+                                      replace, result, **fields)
 
     def test_foreign_types_do_not_call_custom_hooks(self):
         class ForeignStr(str):

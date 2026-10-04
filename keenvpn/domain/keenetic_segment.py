@@ -140,6 +140,8 @@ class SegmentSelectionPreview:
     default_policy_id: str
     policy_ids: tuple[str, ...]
     changed_devices: tuple[DeviceIdentity, ...]
+    vpn_policy_id: str
+    direct_policy_id: str
 
     def __post_init__(self) -> None:
         valid = False
@@ -241,6 +243,7 @@ def _preview_is_consistent(preview: SegmentSelectionPreview) -> bool:
         or type(preview.before) is not KeeneticSegment or type(preview.after) is not KeeneticSegment
         or type(preview.policy_ids) is not tuple or not all(valid_policy_id(item) for item in preview.policy_ids)
         or not valid_policy_id(preview.default_policy_id)
+        or not valid_policy_id(preview.vpn_policy_id) or not valid_policy_id(preview.direct_policy_id)
         or type(preview.changed_devices) is not tuple
         or any(type(item) is not DeviceIdentity for item in preview.changed_devices)
     ):
@@ -257,7 +260,12 @@ def _preview_is_consistent(preview: SegmentSelectionPreview) -> bool:
         len(set(preview.policy_ids)) != len(preview.policy_ids)
         or preview.default_policy_id not in preview.policy_ids
         or preview.after.policy_id != preview.default_policy_id
+        or preview.vpn_policy_id == preview.direct_policy_id
+        or preview.vpn_policy_id not in preview.policy_ids or preview.direct_policy_id not in preview.policy_ids
     ):
+        return False
+    selected_only = selection.mode is SegmentSelectionMode.SELECTED_ONLY
+    if preview.default_policy_id != (preview.direct_policy_id if selected_only else preview.vpn_policy_id):
         return False
     before = preview.before.devices.devices
     after = preview.after.devices.devices
@@ -268,6 +276,12 @@ def _preview_is_consistent(preview: SegmentSelectionPreview) -> bool:
         if DeviceIdentity(item.mac) != item:
             return False
     choices = set(selection.selected_devices + selection.excluded_devices)
+    target = DevicePolicyAssignment(
+        DevicePolicyMode.EXPLICIT, preview.vpn_policy_id if selected_only else preview.direct_policy_id,
+    )
+    for device in after:
+        if device.identity in choices and (device.read_only or device.assignment != target):
+            return False
     actual_changes = tuple(original.identity for original, updated in zip(before, after) if original != updated)
     return (
         choices.issubset(identities)
@@ -341,5 +355,5 @@ def preview_segment_selection(
     )
     return SegmentSelectionPreview(
         selection, segment, KeeneticSegment(segment.segment_id, KeeneticDeviceInventory(records), default_policy_id),
-        default_policy_id, policies.policy_ids, changed,
+        default_policy_id, policies.policy_ids, changed, vpn_policy_id, direct_policy_id,
     )

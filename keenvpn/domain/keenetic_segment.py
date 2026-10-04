@@ -8,7 +8,7 @@ from typing import NoReturn
 from keenvpn.domain.keenetic_device import (
     DeviceIdentity, DevicePolicyAssignment, DevicePolicyMode, KeeneticDevice, KeeneticDeviceError, KeeneticDeviceInventory,
 )
-from keenvpn.domain.keenetic_policy import KeeneticPolicySet, validate_policy_set, valid_policy_id
+from keenvpn.domain.keenetic_policy import KeeneticPolicy, KeeneticPolicySet, validate_policy_set, valid_policy_id
 
 
 class SegmentSelectionMode(StrEnum):
@@ -279,8 +279,11 @@ def _preview_is_consistent(preview: SegmentSelectionPreview) -> bool:
     target = DevicePolicyAssignment(
         DevicePolicyMode.EXPLICIT, preview.vpn_policy_id if selected_only else preview.direct_policy_id,
     )
-    for device in after:
-        if device.identity in choices and (device.read_only or device.assignment != target):
+    # Наличие целевого ID в полном списке проверено выше. Для повторного
+    # применения достаточно одной политики, без обхода каталога для каждой записи.
+    target_policies = KeeneticPolicySet((KeeneticPolicy(target.policy_id),))
+    for original, updated in zip(before, after):
+        if original.identity in choices and updated != original.with_assignment(target, policies=target_policies):
             return False
     actual_changes = tuple(original.identity for original, updated in zip(before, after) if original != updated)
     return (

@@ -423,6 +423,22 @@ class KeeneticSegmentTests(unittest.TestCase):
                 error = self.assert_error(KeeneticSegmentError, KeeneticSegmentErrorCode.PREVIEW, replace, result, **fields)
             self.assertNotIn("fixture-private", repr(error))
 
+    def test_preview_rejects_unrelated_changes_to_selected_record(self):
+        for mode, field in ((SegmentSelectionMode.SELECTED_ONLY, "selected"),
+                            (SegmentSelectionMode.EXCEPT_SELECTED, "excluded")):
+            result = preview(segment(device(FIRST)), mode, **{field: (FIRST,)})
+            for section, key, value in (
+                ("settings", "access", "permit"), ("settings", "name", "fixture-changed"),
+                ("settings", "extension", {}), ("details", "observation", {}),
+            ):
+                with self.subTest(mode=mode, section=section, key=key):
+                    data = result.after.devices.devices[0].export()
+                    data[section][key] = value
+                    changed = KeeneticDevice(data["settings"], details=data["details"])
+                    after = replace(result.after, devices=KeeneticDeviceInventory((changed,)))
+                    self.assert_error(KeeneticSegmentError, KeeneticSegmentErrorCode.PREVIEW,
+                                      replace, result, after=after)
+
     def test_preview_rejects_invalid_roles_and_default_for_mode(self):
         for mode in SegmentSelectionMode:
             result = preview(segment(), mode)

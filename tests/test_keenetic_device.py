@@ -231,7 +231,10 @@ class KeeneticDeviceTests(unittest.TestCase):
         settings = {**record(), "name": "fixture-private-name", "unknown-private-key": "fixture-private-secret"}
         device = KeeneticDevice(settings, details={"private": "fixture-private-detail"})
         diagnostic = device.to_diagnostic()
-        self.assertEqual(diagnostic, {"assignment": "unassigned", "read_only": False, "access_denied": True})
+        self.assertEqual(diagnostic, {
+            "assignment": "unassigned", "read_only": False, "access_denied": True,
+            "observation_mismatch": False,
+        })
         reachable_result = reachable(diagnostic)
         for value in (MAC, "192.0.2.17", "fixture-private-name", "fixture-private-secret", "fixture-private-detail"):
             self.assertNotIn(value, repr(device))

@@ -395,28 +395,33 @@ def _derive(
 
     Записи `ip/hotspot.host` задают состав устройств. Регистрации одного MAC
     попадают в `details["registration"]` по именам, единственное наблюдение —
-    в `details["observation"]`. Несколько наблюдений одного MAC не выбираются
-    по первому: запись остаётся без наблюдения и отмечается как неоднозначная.
-    Каждый источник разбирается один раз; стоимость линейна по числу записей.
+    в `details["observation"]`. Наблюдение привязывается, только когда и запись
+    настроек, и наблюдение этого MAC единственны: при повторе MAC в любом из
+    двух источников записи остаются без наблюдения, а MAC отмечается как
+    неоднозначный. Каждый источник разбирается один раз; стоимость линейна.
     """
     registration_index = _index_registrations(registrations)
     runtime_index = _index_runtime(runtime)
+    host_settings = hotspot.host_settings
+    host_counts: dict[DeviceIdentity, int] = {}
+    for settings in host_settings:
+        identity = DeviceIdentity(settings["mac"])
+        host_counts[identity] = host_counts.get(identity, 0) + 1
     records = []
     ambiguous = []
-    known: set[DeviceIdentity] = set()
-    for settings in hotspot.host_settings:
+    for settings in host_settings:
         identity = DeviceIdentity(settings["mac"])
-        known.add(identity)
         details: dict[str, object] = {}
         registration = registration_index.get(identity)
         if registration:
             details["registration"] = registration
         observations = runtime_index.get(identity, [])
-        if len(observations) == 1:
+        if len(observations) == 1 and host_counts[identity] == 1:
             details["observation"] = observations[0]
         elif observations:
             ambiguous.append(identity)
         records.append(KeeneticDevice(settings, details=details))
+    known = set(host_counts)
     unmatched_registrations = tuple(identity for identity in registration_index if identity not in known)
     unmatched_runtime = tuple(identity for identity in runtime_index if identity not in known)
     return tuple(records), unmatched_registrations, unmatched_runtime, _unique(tuple(ambiguous))

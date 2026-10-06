@@ -382,6 +382,25 @@ class AssemblyTests(unittest.TestCase):
             self.assertNotIn(marker, text)
         self.assertFalse(any(isinstance(item, (KeeneticDevice, DeviceIdentity)) for item in reachable(diagnostic)))
 
+    def test_duplicate_host_mac_keeps_single_observation_ambiguous(self):
+        # Одно наблюдение не приписывается двум записям одного MAC.
+        hosts = hotspot({"mac": MAC_A}, {"mac": MAC_A.lower(), "priority": 2}, {"mac": MAC_B})
+        with forbid_external_effects():
+            state = assemble_keenetic_state(POLICIES, hosts, registrations(), runtime(observation(MAC_A), observation(MAC_B)))
+        first, second, third = state.devices.devices
+        self.assertEqual(first.export()["details"], {})
+        self.assertEqual(second.export()["details"], {})
+        self.assertIs(first.presence, DevicePresence.UNKNOWN)
+        self.assertEqual(third.export()["details"]["observation"], observation(MAC_B))
+        self.assertEqual(state.ambiguous_observations, (DeviceIdentity(MAC_A),))
+        self.assertEqual(state.runtime_without_device, ())
+        devices = state.to_diagnostic()["devices"]
+        self.assertEqual(
+            (devices["record_count"], devices["distinct_mac_count"], devices["online_count"], devices["unknown_count"]),
+            (3, 2, 1, 2),
+        )
+        self.assertEqual((devices["with_observation_count"], devices["ambiguous_observation_count"]), (1, 1))
+
     def test_single_observation_and_unassigned_policy_keep_existing_semantics(self):
         hosts = hotspot({"mac": MAC_A}, {"mac": MAC_B, "conform": True})
         state = assemble_keenetic_state(POLICIES, hosts, registrations(), runtime(observation(MAC_A.lower())))

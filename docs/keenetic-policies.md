@@ -113,4 +113,5 @@ python3 -I -S -B -m unittest discover -s tests -p test_application_keenetic_poli
 
 Тесты используют искусственные описания и
 [обезличенный снимок](../tests/fixtures/router_snapshot/README.md), из которого
-`tests/support/snapshot.py` собирает список политик. Роутер и сеть не требуются.
+`tests/support/snapshot.py` собирает список политик функцией `policies_from_rci`
+адаптера `keenvpn.adapters.keenetic_rci`. Роутер и сеть не требуются.

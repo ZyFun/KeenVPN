@@ -9,6 +9,7 @@ from typing import Protocol
 from uuid import UUID
 
 from keenvpn.domain.connection import TrojanConnection
+from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
 from keenvpn.domain.keenetic_policy import KeeneticPolicySet
 from keenvpn.domain.profile import ConnectionProfile
 from keenvpn.domain.routing import GeoIPCondition, GeoSiteCondition
@@ -65,6 +66,30 @@ class KeeneticPolicySource(Protocol):
 
     def current_policies(self) -> KeeneticPolicySet:
         """Вернуть политики; при невозможности чтения — вызвать исключение."""
+        ...
+
+
+class KeeneticHotspotSettingsSource(Protocol):
+    """Чтение сохранённых настроек `ip/hotspot` отдельно от регистрации и runtime."""
+
+    def current_hotspot_settings(self) -> KeeneticHotspotSettings:
+        """Вернуть записи устройств и назначения сегментов; при сбое — вызвать исключение."""
+        ...
+
+
+class KeeneticRegistrationSource(Protocol):
+    """Чтение реестра регистраций `known/host` без его изменения."""
+
+    def current_registrations(self) -> KeeneticRegistrations:
+        """Вернуть регистрации; при сбое — вызвать исключение."""
+        ...
+
+
+class KeeneticHotspotRuntimeSource(Protocol):
+    """Чтение наблюдаемого состояния клиентов `show/ip/hotspot` на момент вызова."""
+
+    def current_hotspot_runtime(self) -> KeeneticHotspotRuntime:
+        """Вернуть наблюдения; при сбое — вызвать исключение."""
         ...
 
 

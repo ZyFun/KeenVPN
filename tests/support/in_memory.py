@@ -11,9 +11,11 @@ from typing import Any
 from uuid import UUID
 
 from keenvpn.application.ports import (
-    ConnectionLinkParser, ConnectionProfileSource, GeoDataSource, KeeneticPolicySource, RoutingPolicySource,
+    ConnectionLinkParser, ConnectionProfileSource, GeoDataSource, KeeneticHotspotRuntimeSource,
+    KeeneticHotspotSettingsSource, KeeneticPolicySource, KeeneticRegistrationSource, RoutingPolicySource,
 )
 from keenvpn.domain.connection import TrojanConnection
+from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
 from keenvpn.domain.keenetic_policy import KeeneticPolicySet
 from keenvpn.domain.profile import ConnectionProfile
 from keenvpn.domain.routing import DomainCondition, GeoIPCondition, GeoSiteCondition
@@ -99,6 +101,27 @@ class InMemoryKeeneticPolicySource(_ScriptedPort, KeeneticPolicySource):
     """Заданный список политик Keenetic; роутер и RCI не читаются."""
 
     def current_policies(self) -> KeeneticPolicySet:
+        return self._respond()
+
+
+class InMemoryKeeneticHotspotSettingsSource(_ScriptedPort, KeeneticHotspotSettingsSource):
+    """Заданные настройки hotspot Keenetic; читаются отдельно от регистрации и runtime."""
+
+    def current_hotspot_settings(self) -> KeeneticHotspotSettings:
+        return self._respond()
+
+
+class InMemoryKeeneticRegistrationSource(_ScriptedPort, KeeneticRegistrationSource):
+    """Заданный реестр регистраций Keenetic."""
+
+    def current_registrations(self) -> KeeneticRegistrations:
+        return self._respond()
+
+
+class InMemoryKeeneticHotspotRuntimeSource(_ScriptedPort, KeeneticHotspotRuntimeSource):
+    """Заданное наблюдаемое состояние клиентов Keenetic."""
+
+    def current_hotspot_runtime(self) -> KeeneticHotspotRuntime:
         return self._respond()
 
 

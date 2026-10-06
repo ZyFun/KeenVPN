@@ -15,6 +15,7 @@
 | `InspectProtocolSupport` | `InspectProtocolSupportHandler` | Проверяет доступность модуля и операции по [явному реестру](protocol-registry.md), не выполняя операцию |
 | `ExplainRoute` | `ExplainRouteHandler` | Строит [статическое объяснение маршрута](routing-explanation.md) по правилам из источника |
 | `ResolveKeeneticPolicy` | `ResolveKeeneticPolicyHandler` | Находит ID [политики Keenetic](keenetic-policies.md) по описанию в текущем списке источника; неоднозначность не разрешает сам |
+| `InspectKeeneticState` | `InspectKeeneticStateHandler` | Читает [состояние Keenetic](keenetic-state.md) из четырёх раздельных источников и возвращает счётчики и технические идентификаторы без MAC, имён и адресов |
 
 Сценарии работают в памяти. Они не устанавливают соединения, не выполняют DNS,
 не запускают Xray, не записывают файлы и не меняют конфигурацию роутера.
@@ -31,7 +32,7 @@ application импортирует доменные модели и собств
 контракты, domain не зависит от application, адаптеров или интерфейса.
 
 `ConnectionLinkView`, `ConnectionProfileView`, `ProtocolSupportView`, `RouteExplanationView`,
-`KeeneticPolicyResolutionView` и `ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
+`KeeneticPolicyResolutionView`, `KeeneticStateView` и `ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
 ошибки и преобразование `to_dict()` относятся к контракту результата: они не добавляют ANSI-оформление,
 заголовки меню или выравнивание для терминала. Отображение и сериализация одного
 результата не требуют повторного выполнения сценария или чтения его источников.
@@ -46,7 +47,7 @@ application импортирует доменные модели и собств
 | --- | --- |
 | `contract_version` | Версия формата команд и результатов, сейчас `1` (`CONTRACT_VERSION`) |
 | `operation_id` | Идентификатор вызова; по умолчанию случайная hex-строка |
-| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route` или `resolve_keenetic_policy` |
+| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy` или `inspect_keenetic_state` |
 | `status` | `OperationStatus.SUCCEEDED` или `OperationStatus.FAILED` |
 | `data` | Безопасное представление при успехе, иначе `None` |
 | `error` | `ErrorDetail` при отказе, иначе `None` |
@@ -355,10 +356,32 @@ assert handler.execute(ResolveKeeneticPolicy("VPN")).data.outcome == "missing"
 совпадение описания в прочитанном списке, а не разрешённые подключения
 политики, назначения устройств или работу VPN.
 
+## Чтение состояния Keenetic
+
+`InspectKeeneticState` читает политики, настройки hotspot, реестр регистраций
+и наблюдаемое состояние клиентов через четыре раздельных порта и собирает
+[состояние Keenetic](keenetic-state.md). Источники вызываются по одному разу
+в фиксированном порядке; отказ или некорректный ответ любого из них завершает
+сценарий отдельным кодом без частичного результата. `KeeneticStateView`
+содержит технические ID политик и интерфейсов сегментов, назначения сегментов
+с запретом доступа и счётчики записей, регистраций и наблюдений. Записи разных
+источников сопоставляются только по MAC и не объединяются по имени, IP или
+наблюдаемому интерфейсу; записи без пары видны в счётчиках `without_device_count`.
+
+| Ситуация | Категория и код |
+| --- | --- |
+| Неверный тип команды или версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
+| Источник вызвал исключение | `source_failed` / `keenetic_policies_unavailable`, `keenetic_hotspot_unavailable`, `keenetic_registrations_unavailable`, `keenetic_runtime_unavailable` |
+| Источник вернул объект другого типа или повреждённую модель | `invalid_source_data` / `invalid_keenetic_policies`, `invalid_keenetic_hotspot`, `invalid_keenetic_registrations`, `invalid_keenetic_runtime` |
+| Источники не удалось согласовать | `invalid_source_data` / `keenetic_state_inconsistent` |
+
+Поля представления, правила сопоставления и пример с искусственными источниками
+описаны в [чтении состояния Keenetic](keenetic-state.md#прикладной-сценарий).
+
 ## Тестовые адаптеры в памяти
 
 Модуль [`tests/support/in_memory.py`](../tests/support/in_memory.py) содержит
-управляемые реализации пяти используемых портов. Это средства тестов:
+управляемые реализации восьми используемых портов. Это средства тестов:
 application получает их через конструкторы обработчиков и не импортирует
 `tests`. Адаптеры не используют файлы, сеть, SSH или процессы.
 
@@ -368,6 +391,9 @@ application получает их через конструкторы обраб
 | `InMemoryConnectionLinkParser` | `outcome` — ответ парсера, `calls` — число обращений; ссылка не сохраняется в полях адаптера и в его кадре |
 | `InMemoryConnectionProfileSource` | `set_response(profile_id, outcome)` — ответ по точному UUID; `calls` — tuple запрошенных ID; отсутствие профиля задаётся явно как `None` |
 | `InMemoryKeeneticPolicySource` | `outcome` — ответ источника политик Keenetic, `calls` — число обращений; роутер и RCI не читаются |
+| `InMemoryKeeneticHotspotSettingsSource` | `outcome` — ответ источника настроек hotspot, `calls` — число обращений |
+| `InMemoryKeeneticRegistrationSource` | `outcome` — ответ реестра регистраций, `calls` — число обращений |
+| `InMemoryKeeneticHotspotRuntimeSource` | `outcome` — ответ наблюдаемого состояния клиентов, `calls` — число обращений |
 | `InMemoryGeoDataSource` | `set_response(condition, values, outcome)` — ответ точного запроса; `calls` — неизменяемый снимок истории `GeoDataCall` |
 
 Ответы повторяются до явной замены. `outcome` возвращается как есть, а экземпляр
@@ -442,6 +468,11 @@ assert policies.calls == 2
 
 Пакет импортируется как `tests.support`, поэтому модуль также запускается
 напрямую: `python3 -I -S -B tests/test_<имя>.py`.
+
+`tests/support/snapshot.py` собирает модели политик, настроек hotspot, регистраций
+и наблюдений из [обезличенного снимка](../tests/fixtures/router_snapshot/README.md)
+функциями адаптера `keenvpn.adapters.keenetic_rci`, а `snapshot_keenetic_sources()`
+возвращает четыре заполненных источника в памяти с общим снимком счётчиков `calls`.
 
 `GeoDataCall.condition` и `.values` доступны тесту явно. `repr()` истории
 показывает только тип условия и число значений, а `repr()` адаптеров скрывает

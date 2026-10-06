@@ -80,8 +80,8 @@ def _well_typed(command: object) -> bool:
     )
 
 
-def _check_policies(policies: object) -> ErrorDetail | None:
-    """Проверить ответ источника до сопоставления описаний."""
+def check_policies(policies: object) -> ErrorDetail | None:
+    """Проверить ответ источника политик до его использования любым сценарием."""
     if type(policies) is not KeeneticPolicySet:
         return ErrorDetail(
             ErrorCategory.INVALID_SOURCE_DATA, "invalid_keenetic_policies",
@@ -140,7 +140,7 @@ class ResolveKeeneticPolicyHandler:
                 ErrorCategory.SOURCE_FAILED, "keenetic_policies_unavailable",
                 "Не удалось прочитать политики Keenetic.",
             ))
-        error = _check_policies(policies)
+        error = check_policies(policies)
         if error is not None:
             return failed(operation_id, name, error)
 

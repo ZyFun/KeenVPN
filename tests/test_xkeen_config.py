@@ -111,6 +111,26 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings({"xkeen": []}).settings_keys, ())
         validate_xkeen_settings(model)
 
+    def test_settings_require_expected_document_name(self):
+        for name in ("other.json", "XKEEN.JSON", "xkeen.json.bak"):
+            with self.subTest(name=name):
+                with self.assertRaises(XKeenConfigError) as caught:
+                    XKeenSettings(ConfigDocument(name, b"{}"))
+                self.assertIs(caught.exception.code, XKeenConfigErrorCode.SETTINGS)
+                self.assertNotIn(name, str(caught.exception))
+
+    def test_revalidation_rejects_replaced_or_renamed_settings_document(self):
+        for replace_document in (False, True):
+            with self.subTest(replace_document=replace_document):
+                model = snapshot_xkeen_settings()
+                if replace_document:
+                    object.__setattr__(model, "document", ConfigDocument("other.json", b"{}"))
+                else:
+                    object.__setattr__(model.document, "name", "other.json")
+                with self.assertRaises(XKeenConfigError) as caught:
+                    validate_xkeen_settings(model)
+                self.assertIs(caught.exception.code, XKeenConfigErrorCode.SETTINGS)
+
     def test_snapshot_settings_and_rejections(self):
         model = snapshot_xkeen_settings()
         self.assertEqual(model.killswitch, XKeenFlag(XKeenFlagStatus.PRESENT, "on"))

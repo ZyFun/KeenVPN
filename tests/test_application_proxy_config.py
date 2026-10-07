@@ -267,6 +267,20 @@ class InspectProxyConfigTests(unittest.TestCase):
                 self.assert_failed(result, ErrorCategory.INVALID_SOURCE_DATA, INVALID_CODES[name], reason)
                 self.assertEqual(sources.calls, calls_after_failure(SOURCES.index(name)))
 
+    def test_settings_with_wrong_document_name_returns_source_error(self):
+        for replace_document in (False, True):
+            with self.subTest(replace_document=replace_document):
+                sources = snapshot_proxy_sources()
+                model = sources.settings.outcome
+                if replace_document:
+                    object.__setattr__(model, "document", ConfigDocument("other.json", b"{}"))
+                else:
+                    object.__setattr__(model.document, "name", "other.json")
+                result = handler_for(sources).execute(InspectProxyConfig())
+                self.assert_failed(result, ErrorCategory.INVALID_SOURCE_DATA, "invalid_xkeen_settings", "invalid_xkeen_settings")
+                self.assertEqual(sources.calls, calls_after_failure(SOURCES.index("settings")))
+                self.assertNotIn("other.json", repr(result))
+
     def test_corrupted_nested_init_assignment_returns_source_error(self):
         for name, value in (
             ("raw", None), ("raw", '"on"\n'), ("name", None), ("name", "bad name"),

@@ -46,7 +46,7 @@
 
 ## Настройки XKeen
 
-`XKeenSettings(document)` хранит `xkeen.json` целиком. `settings_keys` возвращает имена полей объекта `xkeen`, `killswitch` — флаг `XKeenFlag`:
+`XKeenSettings(document)` хранит `xkeen.json` целиком и принимает только документ с этим точным именем (`XKEEN_SETTINGS_NAME`). `validate_xkeen_settings(settings)` повторно проверяет имя и целостность документа: другой файл или подмена документа после создания модели отклоняются до построения сводки. `settings_keys` возвращает имена полей объекта `xkeen`, `killswitch` — флаг `XKeenFlag`:
 
 | `status` (`XKeenFlagStatus`) | Основание |
 |---|---|
@@ -97,7 +97,7 @@ XKeen считает включённым только строковое `"on"`
 
 | Код `XKeenConfigErrorCode` | Причина |
 |---|---|
-| `invalid_xkeen_settings` | Настройки не `ConfigDocument`/`XKeenSettings` или повреждены |
+| `invalid_xkeen_settings` | Настройки не `ConfigDocument`/`XKeenSettings`, имя документа не `xkeen.json` или модель повреждена |
 | `invalid_xkeen_init` | Init не байты UTF-8, присваивания неверного типа или с несогласованными номерами строк, недопустимое имя параметра, некорректные извлечённые флаги |
 | `invalid_xkeen_list` | Имя не `XKeenListName`, содержимое не байты UTF-8 или модель повреждена |
 | `invalid_xkeen_config` | Несогласованный флаг или факты, список с другим именем, собранные настройки другого типа |

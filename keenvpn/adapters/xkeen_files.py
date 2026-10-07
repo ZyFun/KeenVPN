@@ -13,8 +13,8 @@ from typing import NoReturn
 
 from keenvpn.domain.config_document import ConfigDocument
 from keenvpn.domain.xkeen_config import (
-    XKeenConfigError, XKeenConfigErrorCode, XKeenInitAssignment, XKeenInitParameters, XKeenList, XKeenListName,
-    XKeenSettings, parse_xkeen_init,
+    XKEEN_SETTINGS_NAME, XKeenConfigError, XKeenConfigErrorCode, XKeenInitAssignment, XKeenInitParameters,
+    XKeenList, XKeenListName, XKeenSettings, parse_xkeen_init,
 )
 
 
@@ -24,8 +24,6 @@ XKEEN_INIT_PATH = "/opt/etc/init.d/S05xkeen"
 """Стартовый сценарий с параметрами; читается только как текст."""
 XKEEN_LIST_DIRECTORY = "/opt/etc/xkeen"
 """Каталог трёх списков: имена файлов заданы `XKeenListName`."""
-XKEEN_SETTINGS_NAME = "xkeen.json"
-
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SAFE_VALUE = re.compile(r'[^"$`\\\n]*')
 

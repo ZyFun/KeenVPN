@@ -21,6 +21,8 @@ from keenvpn.domain.config_document import ConfigDocument, validate_config_docum
 
 DNS_PORT = 53
 """TCP/UDP-порт DNS, исключение которого выбирает пользователь."""
+XKEEN_SETTINGS_NAME = "xkeen.json"
+"""Имя документа общих настроек XKeen."""
 KNOWN_INIT_FLAGS = ("start_auto", "proxy_dns", "proxy_router", "ipv6_support")
 """Флаги `on`/`off`, состояние которых показывает сводка."""
 
@@ -40,7 +42,7 @@ class XKeenConfigErrorCode(StrEnum):
 
 
 _MESSAGES = {
-    XKeenConfigErrorCode.SETTINGS: "Настройки XKeen должны быть документом конфигурации.",
+    XKeenConfigErrorCode.SETTINGS: "Настройки XKeen должны быть документом xkeen.json.",
     XKeenConfigErrorCode.INIT: "Параметры init XKeen должны быть текстом UTF-8 в байтах либо кортежем присваиваний.",
     XKeenConfigErrorCode.LIST: "Список XKeen должен иметь известное имя и текст UTF-8 в байтах.",
     XKeenConfigErrorCode.CONFIG: "Собранные настройки XKeen не согласованы или имеют неверный тип.",
@@ -113,7 +115,11 @@ class XKeenSettings:
     document: ConfigDocument
 
     def __post_init__(self) -> None:
-        if type(self.document) is not ConfigDocument:
+        if (
+            type(self.document) is not ConfigDocument
+            or type(self.document.name) is not str
+            or self.document.name != XKEEN_SETTINGS_NAME
+        ):
             _raise_detached(XKeenConfigErrorCode.SETTINGS)
 
     def __repr__(self) -> str:
@@ -156,9 +162,10 @@ class XKeenSettings:
 
 
 def validate_xkeen_settings(settings: XKeenSettings) -> None:
-    """Проверить готовую модель заново по байтам документа."""
+    """Проверить готовую модель заново по имени и байтам документа."""
     if type(settings) is not XKeenSettings:
         _raise_detached(XKeenConfigErrorCode.SETTINGS)
+    XKeenSettings(settings.document)
     validate_config_document(settings.document)
 
 

@@ -13,6 +13,7 @@ from uuid import UUID
 from keenvpn.application.ports import (
     ConnectionLinkParser, ConnectionProfileSource, GeoDataSource, KeeneticHotspotRuntimeSource,
     KeeneticHotspotSettingsSource, KeeneticPolicySource, KeeneticRegistrationSource, RoutingPolicySource,
+    XKeenInitSource, XKeenListSource, XKeenSettingsSource, XrayConfigSource,
 )
 from keenvpn.domain.connection import TrojanConnection
 from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
@@ -21,6 +22,8 @@ from keenvpn.domain.profile import ConnectionProfile
 from keenvpn.domain.routing import DomainCondition, GeoIPCondition, GeoSiteCondition
 from keenvpn.domain.routing_explanation import GeoMatch, IPSource, RoutingContext
 from keenvpn.domain.routing_policy import RoutingPolicy
+from keenvpn.domain.xkeen_config import XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings
+from keenvpn.domain.xray_config import XrayConfigSet
 
 
 _UNSET = object()
@@ -123,6 +126,54 @@ class InMemoryKeeneticHotspotRuntimeSource(_ScriptedPort, KeeneticHotspotRuntime
 
     def current_hotspot_runtime(self) -> KeeneticHotspotRuntime:
         return self._respond()
+
+
+class InMemoryXrayConfigSource(_ScriptedPort, XrayConfigSource):
+    """Заданный набор частей конфигурации Xray; файлы и Xray не читаются."""
+
+    def current_xray_config(self) -> XrayConfigSet:
+        return self._respond()
+
+
+class InMemoryXKeenSettingsSource(_ScriptedPort, XKeenSettingsSource):
+    """Заданные настройки `xkeen.json`."""
+
+    def current_xkeen_settings(self) -> XKeenSettings:
+        return self._respond()
+
+
+class InMemoryXKeenInitSource(_ScriptedPort, XKeenInitSource):
+    """Заданные параметры init XKeen; текст init не исполняется и не читается."""
+
+    def current_xkeen_init(self) -> XKeenInitParameters:
+        return self._respond()
+
+
+class InMemoryXKeenListSource(XKeenListSource):
+    """Ответы по точному имени списка; незаданное имя — ошибка подготовки теста."""
+
+    def __init__(self) -> None:
+        self._responses: dict[XKeenListName, Any] = {}
+        self._calls: list[XKeenListName] = []
+
+    @property
+    def calls(self) -> tuple[XKeenListName, ...]:
+        """Неизменяемая история запрошенных имён списков."""
+        return tuple(self._calls)
+
+    def set_response(self, name: XKeenListName, outcome: Any) -> None:
+        """Настроить ответ одного списка, освобождая кадры прежнего отказа."""
+        if type(name) is not XKeenListName:
+            raise AdapterSetupError("Ответ списка требует имя XKeenListName.")
+        _release(self._responses.get(name))
+        self._responses[name] = outcome
+
+    def current_xkeen_list(self, name: XKeenListName) -> XKeenList:
+        self._calls.append(name)
+        return _resolve(self._responses.get(name, _UNSET))
+
+    def __repr__(self) -> str:
+        return f"InMemoryXKeenListSource(calls={len(self._calls)}, responses={len(self._responses)})"
 
 
 class InMemoryConnectionLinkParser(_ScriptedPort, ConnectionLinkParser):

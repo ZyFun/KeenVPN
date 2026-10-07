@@ -23,9 +23,11 @@ from keenvpn.domain.routing import (
 )
 from keenvpn.domain.routing_explanation import DomainSource, GeoMatch, IPSource
 from keenvpn.domain.routing_policy import FinalRoutingRule, MatchResult, RoutingPolicy
+from keenvpn.domain.xkeen_config import XKeenList, XKeenListName
 from tests.support.in_memory import (
     AdapterSetupError, GeoDataCall, InMemoryConnectionLinkParser, InMemoryGeoDataSource,
-    InMemoryRoutingPolicySource, UnconfiguredResponseError,
+    InMemoryRoutingPolicySource, InMemoryXKeenInitSource, InMemoryXKeenListSource, InMemoryXKeenSettingsSource,
+    InMemoryXrayConfigSource, UnconfiguredResponseError,
 )
 from tests.support.isolation import forbid_external_effects
 from tests.support.privacy import frame_locals, reachable
@@ -369,6 +371,72 @@ class InMemoryScenarioTests(unittest.TestCase):
             self.assertFalse(handler.execute(command).succeeded)
             self.geodata.set_response(self.ip_condition, IPS, OSError("Искусственный отказ."))
             self.assertFalse(self.handler.execute(self.command).succeeded)
+
+
+class ProxyConfigSourceTests(unittest.TestCase):
+    def test_list_source_answers_by_exact_name_and_records_calls(self):
+        source = InMemoryXKeenListSource()
+        exclude = XKeenList(XKeenListName.PORT_EXCLUDE, b"53\n")
+        source.set_response(XKeenListName.PORT_EXCLUDE, exclude)
+        self.assertIs(source.current_xkeen_list(XKeenListName.PORT_EXCLUDE), exclude)
+        with self.assertRaises(UnconfiguredResponseError):
+            source.current_xkeen_list(XKeenListName.PORT_PROXYING)
+        self.assertEqual(source.calls, (XKeenListName.PORT_EXCLUDE, XKeenListName.PORT_PROXYING))
+        previous = source.calls
+        source.current_xkeen_list(XKeenListName.PORT_EXCLUDE)
+        self.assertEqual(len(previous), 2)
+        self.assertEqual(len(source.calls), 3)
+        for name in ("port_exclude.lst", None):
+            with self.subTest(name=name), self.assertRaises(AdapterSetupError):
+                source.set_response(name, exclude)
+        source.set_response(XKeenListName.IP_EXCLUDE, OSError)
+        with self.assertRaises(AdapterSetupError):
+            source.current_xkeen_list(XKeenListName.IP_EXCLUDE)
+        self.assertNotIn("53", repr(source))
+        self.assertEqual(repr(source), "InMemoryXKeenListSource(calls=4, responses=2)")
+
+    def test_scalar_sources_start_without_calls_and_release_replaced_failures(self):
+        for source_type, method in (
+            (InMemoryXrayConfigSource, "current_xray_config"),
+            (InMemoryXKeenSettingsSource, "current_xkeen_settings"),
+            (InMemoryXKeenInitSource, "current_xkeen_init"),
+        ):
+            with self.subTest(source=source_type.__name__):
+                source = source_type()
+                self.assertEqual(source.calls, 0)
+                with self.assertRaises(UnconfiguredResponseError):
+                    getattr(source, method)()
+                failure = OSError("Искусственный отказ.")
+                source.outcome = failure
+                # assertRaises очищает traceback пойманного исключения: ловим его вручную.
+                try:
+                    raise KeyError("Искусственное исключение вызывающего кода.")
+                except KeyError:
+                    try:
+                        getattr(source, method)()
+                    except OSError as caught:
+                        self.assertIs(caught, failure)
+                    else:
+                        self.fail("Ожидался настроенный отказ источника.")
+                self.assertIsNotNone(failure.__traceback__)
+                self.assertIsNotNone(failure.__context__)
+                source.outcome = None
+                self.assertIsNone(failure.__traceback__)
+                self.assertIsNone(failure.__context__)
+                self.assertFalse(any(isinstance(item, types.FrameType) for item in reachable(failure)))
+                self.assertEqual(source.calls, 2)
+        lists = InMemoryXKeenListSource()
+        failure = OSError("Искусственный отказ списка.")
+        lists.set_response(XKeenListName.PORT_EXCLUDE, failure)
+        try:
+            lists.current_xkeen_list(XKeenListName.PORT_EXCLUDE)
+        except OSError as caught:
+            self.assertIs(caught, failure)
+        else:
+            self.fail("Ожидался настроенный отказ списка.")
+        self.assertIsNotNone(failure.__traceback__)
+        lists.set_response(XKeenListName.PORT_EXCLUDE, XKeenList(XKeenListName.PORT_EXCLUDE, b""))
+        self.assertIsNone(failure.__traceback__)
 
 
 class ForbidExternalEffectsTests(unittest.TestCase):

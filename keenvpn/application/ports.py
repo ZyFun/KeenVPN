@@ -15,6 +15,8 @@ from keenvpn.domain.profile import ConnectionProfile
 from keenvpn.domain.routing import GeoIPCondition, GeoSiteCondition
 from keenvpn.domain.routing_explanation import GeoMatch
 from keenvpn.domain.routing_policy import RoutingPolicy
+from keenvpn.domain.xkeen_config import XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings
+from keenvpn.domain.xray_config import XrayConfigSet
 
 
 class LinkRejection(StrEnum):
@@ -90,6 +92,38 @@ class KeeneticHotspotRuntimeSource(Protocol):
 
     def current_hotspot_runtime(self) -> KeeneticHotspotRuntime:
         """Вернуть наблюдения; при сбое — вызвать исключение."""
+        ...
+
+
+class XrayConfigSource(Protocol):
+    """Чтение частей конфигурации Xray без их изменения и без запуска Xray."""
+
+    def current_xray_config(self) -> XrayConfigSet:
+        """Вернуть части в порядке загрузки; при сбое — вызвать исключение."""
+        ...
+
+
+class XKeenSettingsSource(Protocol):
+    """Чтение `xkeen.json` целиком без вызова команд XKeen."""
+
+    def current_xkeen_settings(self) -> XKeenSettings:
+        """Вернуть настройки; при сбое — вызвать исключение."""
+        ...
+
+
+class XKeenInitSource(Protocol):
+    """Чтение параметров init XKeen как данных, без исполнения и `source`."""
+
+    def current_xkeen_init(self) -> XKeenInitParameters:
+        """Вернуть присваивания; при сбое — вызвать исключение."""
+        ...
+
+
+class XKeenListSource(Protocol):
+    """Чтение одного из трёх списков XKeen по имени с сохранением текста."""
+
+    def current_xkeen_list(self, name: XKeenListName) -> XKeenList:
+        """Вернуть список с этим именем; при сбое — вызвать исключение."""
         ...
 
 

@@ -259,6 +259,20 @@ class InitTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             good.raw = '"off"'
 
+    def test_revalidation_rejects_corrupted_nested_assignments(self):
+        for name, value in (
+            ("raw", None), ("raw", '"on"\n'), ("name", None), ("name", "bad name"),
+            ("line_number", 0), ("line_number", True), ("line_number", "3"), ("indented", None),
+        ):
+            assignment = XKeenInitAssignment("start_auto", '"on"', 3, False)
+            init = XKeenInitParameters((assignment,))
+            object.__setattr__(assignment, name, value)
+            for validate in (validate_xkeen_init, lambda item: XKeenInitParameters(item.assignments)):
+                with self.subTest(field=name, value=value):
+                    with self.assertRaises(XKeenConfigError) as caught:
+                        validate(init)
+                    self.assertIs(caught.exception.code, XKeenConfigErrorCode.INIT)
+
     def test_snapshot_flags_have_no_line_numbers(self):
         init = snapshot_xkeen_init()
         self.assertEqual([item.line_number for item in init.assignments], [None] * 4)

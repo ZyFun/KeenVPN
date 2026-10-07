@@ -31,9 +31,25 @@ class StrictJsonTests(unittest.TestCase):
             "a": "http://x/y", "b": "//не комментарий", "c": 'экранирование " // внутри', "d": 1,
         })
         self.assertEqual(strip_json_comments('"a/*b*/c"'), '"a/*b*/c"')
-        self.assertEqual(strip_json_comments("/* незакрытый"), "")
-        self.assertEqual(strip_json_comments("/* незакрытый\nхвост\n"), "\n\n")
-        self.assertEqual(strip_json_comments('{"a": 1 /* x\ny\n */}'), '{"a": 1 \n\n}')
+        self.assertEqual(strip_json_comments('{"a": 1 /* x\ny\n */}'), '{"a": 1  \n\n}')
+
+    def test_inline_block_comments_preserve_token_boundaries(self):
+        for text in ('{"a":1/*x*/2}', '{"a":tr/*x*/ue}', '{"a":nu/**/ll}'):
+            with self.subTest(text=text):
+                with self.assertRaises(ConfigDocumentError) as caught:
+                    parse_strict_json_object(text)
+                self.assertIs(caught.exception.code, ConfigDocumentErrorCode.JSON)
+        self.assertEqual(parse_strict_json_object('{/*x*/"a"/*x*/:/*x*/1/*x*/}'), {"a": 1})
+
+    def test_unterminated_block_comments_are_rejected(self):
+        for text in ('/* незакрытый', '/* незакрытый\nхвост\n', '{}/* незакрытый', '{"a":1}/*\nхвост'):
+            for parse in (strip_json_comments, parse_strict_json_object):
+                with self.subTest(text=text, parse=parse.__name__):
+                    with self.assertRaises(ConfigDocumentError) as caught:
+                        parse(text)
+                    self.assertIs(caught.exception.code, ConfigDocumentErrorCode.JSON)
+                    self.assertIsNone(caught.exception.__context__)
+                    self.assertIsNone(caught.exception.__cause__)
 
     def test_multiline_block_comment_does_not_join_tokens(self):
         # Построчный очиститель XKeen сохраняет переводы строк, и такие документы не проходят разбор.

@@ -241,8 +241,11 @@ class XKeenInitParameters:
         if (
             type(self.assignments) is not tuple
             or any(type(item) is not XKeenInitAssignment for item in self.assignments)
-            or not _line_numbers_consistent(self.assignments)
         ):
+            _raise_detached(XKeenConfigErrorCode.INIT)
+        for item in self.assignments:
+            XKeenInitAssignment(item.name, item.raw, item.line_number, item.indented)
+        if not _line_numbers_consistent(self.assignments):
             _raise_detached(XKeenConfigErrorCode.INIT)
 
     def __repr__(self) -> str:
@@ -327,7 +330,7 @@ def parse_xkeen_init(content: bytes) -> XKeenInitParameters:
 
 
 def validate_xkeen_init(init: XKeenInitParameters) -> None:
-    """Проверить готовую модель заново по её присваиваниям."""
+    """Проверить готовую модель и поля каждого вложенного присваивания заново."""
     if type(init) is not XKeenInitParameters:
         _raise_detached(XKeenConfigErrorCode.INIT)
     XKeenInitParameters(init.assignments)

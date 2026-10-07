@@ -267,6 +267,18 @@ class InspectProxyConfigTests(unittest.TestCase):
                 self.assert_failed(result, ErrorCategory.INVALID_SOURCE_DATA, INVALID_CODES[name], reason)
                 self.assertEqual(sources.calls, calls_after_failure(SOURCES.index(name)))
 
+    def test_corrupted_nested_init_assignment_returns_source_error(self):
+        for name, value in (
+            ("raw", None), ("raw", '"on"\n'), ("name", None), ("name", "bad name"),
+            ("line_number", 0), ("line_number", True), ("line_number", "3"), ("indented", None),
+        ):
+            with self.subTest(field=name, value=value):
+                sources = snapshot_proxy_sources()
+                object.__setattr__(sources.init.outcome.assignments[0], name, value)
+                result = handler_for(sources).execute(InspectProxyConfig())
+                self.assert_failed(result, ErrorCategory.INVALID_SOURCE_DATA, "invalid_xkeen_init", "invalid_xkeen_init")
+                self.assertEqual(sources.calls, calls_after_failure(SOURCES.index("init")))
+
     def test_assembly_failure_is_reported_without_partial_result(self):
         def broken(*_args):
             raise XKeenConfigError(XKeenConfigErrorCode.CONFIG)

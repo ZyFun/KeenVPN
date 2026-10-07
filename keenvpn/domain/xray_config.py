@@ -109,11 +109,15 @@ class _Summary:
             return None
         return value
 
-    def string_list(self, part: str, path: str, item: dict[str, object], key: str) -> list[str]:
-        """Список строк либо пустой список; иной тип или элемент отмечается как неподдержанный."""
+    def string_list(
+        self, part: str, path: str, item: dict[str, object], key: str, *, allow_string: bool = False,
+    ) -> list[str]:
+        """Массив строк; для StringList допустима строка с запятыми без удаления пробелов и пустых элементов."""
         if key not in item:
             return []
         value = item[key]
+        if allow_string and type(value) is str:
+            return value.split(",")
         if type(value) is not list:
             self.unsupported_path(part, f"{path}.{key}")
             return []
@@ -181,7 +185,7 @@ class _Summary:
                 entry = {
                     "part": name,
                     "tag": self.string_field(name, path, balancer, "tag"),
-                    "selector": self.string_list(name, path, balancer, "selector"),
+                    "selector": self.string_list(name, path, balancer, "selector", allow_string=True),
                     "fallback_tag": self.string_field(name, path, balancer, "fallbackTag"),
                     "strategy": None,
                 }
@@ -211,7 +215,7 @@ class _Summary:
             "part": name,
             "index": index,
             "type": self.string_field(name, path, rule, "type"),
-            "inbound_tags": self.string_list(name, path, rule, "inboundTag"),
+            "inbound_tags": self.string_list(name, path, rule, "inboundTag", allow_string=True),
             "target_kind": kind,
             "target_tag": target,
             "has_rule_tag": "ruleTag" in rule,

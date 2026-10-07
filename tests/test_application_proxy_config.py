@@ -206,6 +206,32 @@ class InspectProxyConfigTests(unittest.TestCase):
                 self.assert_failed(self.handler.execute(command), ErrorCategory.INVALID_REQUEST, code)
         self.assertEqual(self.sources.calls, (0, 0, 0, ()))
 
+    def test_scalar_stringlist_keeps_references_and_selector_matches_in_view(self):
+        document = {
+            "inbounds": [{"tag": "lan"}], "outbounds": [{"tag": "proxy-one"}, {"tag": "direct"}],
+            "routing": {
+                "rules": [
+                    {"type": "field", "inboundTag": "lan", "outboundTag": "direct"},
+                    {"type": "field", "inboundTag": "lan,missing-in", "outboundTag": "direct"},
+                ],
+                "balancers": [{"tag": "pool", "selector": "proxy"}],
+            },
+        }
+        self.sources.xray.outcome = XrayConfigSet((ConfigDocument("01_routing.json", json.dumps(document).encode()),))
+        with forbid_external_effects():
+            result = self.execute()
+        self.assertTrue(result.succeeded)
+        view = result.to_dict()["data"]["xray"]
+        self.assertEqual(view["rules"][0]["inbound_tags"], ["lan"])
+        self.assertTrue(view["rules"][0]["inbound_tags_resolved"])
+        self.assertEqual(view["rules"][1]["inbound_tags"], ["lan", "missing-in"])
+        self.assertFalse(view["rules"][1]["inbound_tags_resolved"])
+        self.assertEqual(view["balancers"][0]["selector"], ["proxy"])
+        self.assertEqual(view["balancers"][0]["selector_match_count"], 1)
+        self.assertEqual(view["unsupported_paths"], [])
+        self.assertEqual(self.sources.calls, (1, 1, 1, LIST_NAMES))
+        self.assert_private(result)
+
     def test_each_source_failure_has_distinct_code_and_stops_reading(self):
         for index, name in enumerate(SOURCES):
             with self.subTest(source=name):

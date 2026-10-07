@@ -105,6 +105,54 @@ class SnapshotXrayConfigTests(unittest.TestCase):
 
 
 class SyntheticXrayConfigTests(unittest.TestCase):
+    def test_scalar_stringlist_resolves_routing_like_array_form(self):
+        cases = (
+            ("lan", ["lan"], True, "proxy", ["proxy"], 2),
+            ("lan,missing-in", ["lan", "missing-in"], False, "proxy,direct", ["proxy", "direct"], 3),
+            ("lan,, missing-in", ["lan", "", " missing-in"], False, "proxy,, direct", ["proxy", "", " direct"], 3),
+            ("", [""], False, "", [""], 3),
+        )
+        for scalar_inbound, inbound_tags, resolved, scalar_selector, selectors, matches in cases:
+            for inbound, selector in ((scalar_inbound, scalar_selector), (inbound_tags, selectors)):
+                with self.subTest(inbound=inbound, selector=selector), forbid_external_effects():
+                    config = XrayConfigSet((part("01_routing.json", {
+                        "inbounds": [{"tag": "lan"}],
+                        "outbounds": [{"tag": tag} for tag in ("proxy-one", "proxy-two", "direct")],
+                        "routing": {
+                            "rules": [{"type": "field", "inboundTag": inbound, "outboundTag": "direct"}],
+                            "balancers": [{"tag": "pool", "selector": selector}],
+                        },
+                    }),))
+                    before = config.parts[0].content
+                    diagnostic = config.to_diagnostic()
+                    self.assertEqual(diagnostic["rules"][0]["inbound_tags"], inbound_tags)
+                    self.assertEqual(diagnostic["rules"][0]["inbound_tags_resolved"], resolved)
+                    self.assertEqual(diagnostic["balancers"][0]["selector"], selectors)
+                    self.assertEqual(diagnostic["balancers"][0]["selector_match_count"], matches)
+                    self.assertEqual(diagnostic["unsupported_paths"], [])
+                    self.assertEqual(config.parts[0].content, before)
+
+    def test_plain_string_arrays_do_not_expand_scalar_stringlist_form(self):
+        config = XrayConfigSet((part("01_routing.json", {
+            "inbounds": [{"tag": "lan"}], "outbounds": [{"tag": "proxy-one"}, {"tag": "direct"}],
+            "routing": {
+                "rules": [{"type": "field", "inboundTag": ["lan,missing-in"], "outboundTag": "direct"}],
+                "balancers": [{"tag": "pool", "selector": ["proxy,direct"]}],
+            },
+            "observatory": {"subjectSelector": "proxy"}, "burstObservatory": {"subjectSelector": "proxy"},
+        }),))
+        with forbid_external_effects():
+            diagnostic = config.to_diagnostic()
+        self.assertEqual(diagnostic["rules"][0]["inbound_tags"], ["lan,missing-in"])
+        self.assertFalse(diagnostic["rules"][0]["inbound_tags_resolved"])
+        self.assertEqual(diagnostic["balancers"][0]["selector"], ["proxy,direct"])
+        self.assertEqual(diagnostic["balancers"][0]["selector_match_count"], 0)
+        self.assertEqual(diagnostic["observatory_subjects"], [])
+        self.assertEqual(diagnostic["unsupported_paths"], [
+            {"part": "01_routing.json", "path": "observatory.subjectSelector"},
+            {"part": "01_routing.json", "path": "burstObservatory.subjectSelector"},
+        ])
+
     def test_unresolved_references_duplicates_and_unsupported_structures_are_reported(self):
         parts = (
             part("01_a.json", {"inbounds": [
@@ -119,11 +167,11 @@ class SyntheticXrayConfigTests(unittest.TestCase):
                 {"type": "field", "outboundTag": "missing-out", "balancerTag": "group", "ruleTag": "fixture-private"},
                 {"type": "field", "balancerTag": "group", "network": "tcp", "port": "53"},
                 {"type": "field", "balancerTag": "missing-group", "ip": "fixture-private-ip"},
-                {"type": "field", "inboundTag": "in-a", "protocol": ["bittorrent"]},
+                {"type": "field", "inboundTag": 7, "protocol": ["bittorrent"]},
                 "fixture-private", {"type": 7, "ip": []},
             ], "balancers": [
                 {"tag": "group", "selector": ["out-", "none-"], "fallbackTag": "missing", "strategy": {"type": "random"}},
-                {"tag": "group", "selector": "out-a", "strategy": "leastPing"},
+                {"tag": "group", "selector": 7, "strategy": "leastPing"},
                 {"selector": []},
                 "fixture-private",
             ]}, "burstObservatory": {"subjectSelector": "out-a"}, "observatory": []}),

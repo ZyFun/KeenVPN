@@ -217,15 +217,26 @@ class InspectKeeneticStateHandler:
         error = check_contract_version(command.contract_version)
         if error is not None:
             return failed(operation_id, name, error)
+        state = self.read()
+        if isinstance(state, ErrorDetail):
+            return failed(operation_id, name, state)
+        return succeeded(operation_id, name, KeeneticStateView.from_state(state))
 
+    def read(self) -> KeeneticNativeState | ErrorDetail:
+        """Прочитать источники и собрать состояние для доверенного кода; отказ — ErrorDetail.
+
+        Общий сценарий чтения установки использует этот метод, чтобы не повторять
+        порядок чтения и коды отказов. Состояние содержит MAC и имена: наружу
+        передаётся только представление.
+        """
         try:
             policies = self._policies.current_policies()
         except Exception:
             # Текст и цепочка исключения адаптера могут содержать описания политик.
-            return failed(operation_id, name, _unavailable("policies"))
+            return _unavailable("policies")
         error = check_policies(policies)
         if error is not None:
-            return failed(operation_id, name, error)
+            return error
 
         models = {}
         for source, read in (
@@ -237,17 +248,16 @@ class InspectKeeneticStateHandler:
                 value = read()
             except Exception:
                 # Ответ и исключение источника могут содержать MAC, имена и адреса.
-                return failed(operation_id, name, _unavailable(source))
+                return _unavailable(source)
             error = _check_model(source, value)
             if error is not None:
-                return failed(operation_id, name, error)
+                return error
             models[source] = value
 
         try:
-            state = assemble_keenetic_state(policies, models["hotspot"], models["registrations"], models["runtime"])
+            return assemble_keenetic_state(policies, models["hotspot"], models["registrations"], models["runtime"])
         except _DOMAIN_ERRORS as error:
-            return failed(operation_id, name, ErrorDetail(
+            return ErrorDetail(
                 ErrorCategory.INVALID_SOURCE_DATA, "keenetic_state_inconsistent",
                 "Прочитанные источники Keenetic не удалось согласовать.", reason=error.code.value,
-            ))
-        return succeeded(operation_id, name, KeeneticStateView.from_state(state))
+            )

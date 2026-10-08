@@ -11,8 +11,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.domain.config_document import ConfigDocument, ConfigDocumentError, ConfigDocumentErrorCode
+from keenvpn.domain.routing import ConditionFamily
 from keenvpn.domain.xray_config import (
-    XrayConfigError, XrayConfigErrorCode, XrayConfigSet, _duplicates, summarize_xray_config, validate_xray_config_set,
+    RuleListValue, XrayConfigError, XrayConfigErrorCode, XrayConfigSet, _duplicates, rule_list_values,
+    summarize_xray_config, validate_xray_config_set,
 )
 from tests.support.isolation import forbid_external_effects
 from tests.support.snapshot import load_xray_snapshot_files, snapshot_xray_config
@@ -102,6 +104,24 @@ class SnapshotXrayConfigTests(unittest.TestCase):
         with patch.object(ConfigDocument, "export", autospec=True, side_effect=ConfigDocument.export) as export:
             summarize_xray_config(config.parts)
         self.assertEqual(export.call_count, len(config.parts))
+
+    def test_snapshot_rule_list_values_keep_order_and_stay_out_of_summary(self):
+        config = snapshot_xray_config()
+        with forbid_external_effects():
+            values = config.rule_list_values()
+        self.assertEqual(values, rule_list_values(config.parts))
+        self.assertEqual(len(values), 41)
+        self.assertTrue(all(type(value) is RuleListValue and value.part == "05_routing.json" for value in values))
+        self.assertEqual([value.path for value in values[:3]], [f"routing.rules[1].domain[{index}]" for index in range(3)])
+        self.assertEqual(
+            [(value.path, value.family, value.qualified) for value in values[-2:]],
+            [("routing.rules[6].ip[0]", ConditionFamily.IP, True), ("routing.rules[7].network[0]", ConditionFamily.IP, True)]
+            if False else [("routing.rules[5].ip[18]", ConditionFamily.IP, True), ("routing.rules[6].ip[0]", ConditionFamily.IP, True)],
+        )
+        self.assertEqual(values[-1].value, "geoip:ru")
+        self.assertEqual(sum(value.family is ConditionFamily.DOMAIN for value in values), 21)
+        self.assertNotIn("geoip:ru", repr(values))
+        self.assertNotIn("geoip:ru", json.dumps(config.to_diagnostic()))
 
 
 class SyntheticXrayConfigTests(unittest.TestCase):
@@ -245,6 +265,102 @@ class SyntheticXrayConfigTests(unittest.TestCase):
         for secret in ("d1", "d2", "bittorrent", "random-" , "53"):
             self.assertNotIn(f'"{secret}"', text)
         self.assertEqual(json.loads(json.dumps(diagnostic)), diagnostic)
+
+    def test_rule_list_values_follow_xray_field_types(self):
+        config = XrayConfigSet((
+            part("01_dns.json", {"dns": {"tag": "dns-a", "servers": [
+                "198.51.100.53",
+                {"address": "198.51.100.54", "domains": ["geosite:cn", "domain:a.example"], "expectIPs": "geoip:cn,geoip:!private",
+                 "expectedIPs": ["geoip:us"], "unexpectedIPs": ["*"]},
+                {"address": "198.51.100.55", "domains": "geosite:cn", "expectIPs": 7},
+                7,
+            ], "hosts": {"geosite:fixture": "127.0.0.1", "a.example": ["127.0.0.1"]}}}),
+            part("02_hosts.json", {"dns": {"servers": {"address": "x"}, "hosts": []}}),
+            part("03_routing.json", {"routing": {"rules": [
+                {"type": "field", "domain": "geosite:ru@attr,ext-domain:a.dat:b", "domains": ["x.example"],
+                 "ip": ["geoip:ru", "198.51.100.0/24"], "sourceIP": "ext-ip:s.dat:x",
+                 "localIP": ["geoip:private"], "inboundTag": "in-a", "outboundTag": "direct"},
+                {"type": "field", "domain": 7, "ip": [5, "geoip:us"], "outboundTag": "direct"},
+            ]}}),
+        ))
+        with forbid_external_effects():
+            values = config.rule_list_values()
+            diagnostic = config.to_diagnostic()
+        dns, routing = "01_dns.json", "03_routing.json"
+        self.assertEqual([(value.part, value.path, value.family.value, value.qualified, value.value) for value in values], [
+            (dns, "dns.servers[1].domains[0]", "domain", True, "geosite:cn"),
+            (dns, "dns.servers[1].domains[1]", "domain", True, "domain:a.example"),
+            (dns, "dns.servers[1].expectedIPs[0]", "ip", True, "geoip:us"),
+            (dns, "dns.servers[1].unexpectedIPs[0]", "ip", True, "*"),
+            (dns, "dns.hosts[0]", "domain", False, "geosite:fixture"),
+            (dns, "dns.hosts[1]", "domain", False, "a.example"),
+            (routing, "routing.rules[0].domain[0]", "domain", True, "geosite:ru@attr"),
+            (routing, "routing.rules[0].domain[1]", "domain", True, "ext-domain:a.dat:b"),
+            (routing, "routing.rules[0].domains[0]", "domain", True, "x.example"),
+            (routing, "routing.rules[0].ip[0]", "ip", True, "geoip:ru"),
+            (routing, "routing.rules[0].ip[1]", "ip", True, "198.51.100.0/24"),
+            (routing, "routing.rules[0].sourceIP[0]", "ip", True, "ext-ip:s.dat:x"),
+            (routing, "routing.rules[0].localIP[0]", "ip", True, "geoip:private"),
+            (routing, "routing.rules[1].ip[1]", "ip", True, "geoip:us"),
+        ])
+        self.assertEqual(diagnostic["dns_tags"], ["dns-a"])
+        self.assertEqual(diagnostic["unsupported_paths"], [
+            {"part": dns, "path": "dns.servers[2].domains"},
+            {"part": dns, "path": "dns.servers[2].expectIPs"},
+            {"part": dns, "path": "dns.servers[3]"},
+            {"part": "02_hosts.json", "path": "dns.servers"},
+            {"part": "02_hosts.json", "path": "dns.hosts"},
+            {"part": routing, "path": "routing.rules[1].domain"},
+            {"part": routing, "path": "routing.rules[1].ip[0]"},
+        ])
+        self.assertEqual(diagnostic["rules"][0]["conditions"], {"domain": 1, "domains": 1, "ip": 2, "sourceIP": 1, "localIP": 1})
+        text = json.dumps(diagnostic, ensure_ascii=False) + repr(values)
+        for private in ("geosite:", "geoip:", "a.example", "x.example", "198.51.100", "127.0.0.1"):
+            self.assertNotIn(private, text)
+        self.assertEqual(repr(values[0]), "RuleListValue(part='01_dns.json', path='dns.servers[1].domains[0]', family=domain)")
+        self.assertEqual(XrayConfigSet(()).rule_list_values(), ())
+
+    def test_rule_list_values_select_aliases_like_xray(self):
+        # Xray v26.3.27: `source` действует только без `sourceIP` или при `null`;
+        # `expectIPs` — только при отсутствующем, `null` или пустом `expectedIPs`.
+        rule_cases = (
+            ({"source": ["geoip:a"]}, ["source"]),
+            ({"sourceIP": ["geoip:b"], "source": ["geoip:a"]}, ["sourceIP"]),
+            ({"source": ["geoip:a"], "sourceIP": ["geoip:b"]}, ["sourceIP"]),
+            ({"sourceIP": None, "source": ["geoip:a"]}, ["source"]),
+            ({"sourceIP": [], "source": ["geoip:a"]}, []),
+            ({"sourceIP": "", "source": ["geoip:a"]}, ["sourceIP"]),
+            ({"sourceIP": "geoip:b"}, ["sourceIP"]),
+            ({"domain": ["geosite:a"], "domains": ["geosite:b"]}, ["domain", "domains"]),
+        )
+        for fields, expected in rule_cases:
+            with self.subTest(rule=fields):
+                rule = {"type": "field", **fields, "outboundTag": "direct"}
+                config = XrayConfigSet((part("01_routing.json", {"routing": {"rules": [rule]}}),))
+                with forbid_external_effects():
+                    values = config.rule_list_values()
+                    diagnostic = config.to_diagnostic()
+                self.assertEqual([value.path.split(".")[-1].split("[")[0] for value in values], expected)
+                self.assertEqual(diagnostic["unsupported_paths"], [])
+                # Поля конфигурации и счётчики условий сохраняются как в файле.
+                self.assertEqual(set(diagnostic["rules"][0]["conditions"]), set(fields))
+        dns_cases = (
+            ({"expectIPs": ["geoip:a"]}, ["expectIPs"]),
+            ({"expectedIPs": ["geoip:b"], "expectIPs": ["geoip:a"]}, ["expectedIPs"]),
+            ({"expectIPs": "geoip:a", "expectedIPs": "geoip:b"}, ["expectedIPs"]),
+            ({"expectedIPs": None, "expectIPs": ["geoip:a"]}, ["expectIPs"]),
+            ({"expectedIPs": [], "expectIPs": ["geoip:a"]}, ["expectIPs"]),
+            ({"expectedIPs": "", "expectIPs": ["geoip:a"]}, ["expectedIPs"]),
+            ({"expectedIPs": ["geoip:b"], "unexpectedIPs": ["geoip:c"], "expectIPs": ["geoip:a"]}, ["expectedIPs", "unexpectedIPs"]),
+        )
+        for fields, expected in dns_cases:
+            with self.subTest(dns=fields):
+                config = XrayConfigSet((part("01_dns.json", {"dns": {"servers": [{"address": "198.51.100.53", **fields}]}}),))
+                with forbid_external_effects():
+                    values = config.rule_list_values()
+                    diagnostic = config.to_diagnostic()
+                self.assertEqual([value.path.split(".")[-1].split("[")[0] for value in values], expected)
+                self.assertEqual(diagnostic["unsupported_paths"], [])
 
     def test_duplicate_tags_keep_order_without_repeats_in_linear_time(self):
         outbounds = [{"tag": tag, "protocol": "freedom"} for tag in ("b", "a", "b", "c", "a", "b", "a")]

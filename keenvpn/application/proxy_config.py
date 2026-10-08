@@ -349,6 +349,17 @@ class XKeenConfigView:
         }
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class ProxyConfigModels:
+    """Прочитанные модели Xray и XKeen для доверенного кода; содержат секреты конфигурации."""
+
+    xray: XrayConfigSet
+    xkeen: XKeenConfig
+
+    def __repr__(self) -> str:
+        return f"ProxyConfigModels(parts={len(self.xray.parts)})"
+
+
 @dataclass(frozen=True, slots=True)
 class ProxyConfigView:
     """Безопасное представление прочитанной конфигурации Xray и XKeen.
@@ -360,6 +371,11 @@ class ProxyConfigView:
 
     xray: XrayConfigView
     xkeen: XKeenConfigView
+
+    @classmethod
+    def from_models(cls, models: ProxyConfigModels) -> "ProxyConfigView":
+        """Построить представление из прочитанных моделей."""
+        return cls(XrayConfigView.from_config(models.xray), XKeenConfigView.from_config(models.xkeen))
 
     def to_dict(self) -> dict[str, object]:
         """Вернуть JSON-совместимое представление."""
@@ -474,7 +490,18 @@ class InspectProxyConfigHandler:
         error = check_contract_version(command.contract_version)
         if error is not None:
             return failed(operation_id, name, error)
+        models = self.read()
+        if isinstance(models, ErrorDetail):
+            return failed(operation_id, name, models)
+        return succeeded(operation_id, name, ProxyConfigView.from_models(models))
 
+    def read(self) -> ProxyConfigModels | ErrorDetail:
+        """Прочитать источники и собрать модели для доверенного кода; отказ — ErrorDetail.
+
+        Общий сценарий чтения установки использует этот метод, чтобы не повторять
+        порядок чтения и коды отказов и разобрать ссылки правил на геобазы.
+        Модели содержат домены, адреса и пароли: наружу передаётся только представление.
+        """
         models: dict[str, object] = {}
         reads = [
             ("xray", self._xray.current_xray_config),
@@ -490,10 +517,10 @@ class InspectProxyConfigHandler:
                 value = read()
             except Exception:
                 # Текст и цепочка исключения источника могут содержать пароли, адреса и пути.
-                return failed(operation_id, name, _unavailable(source))
+                return _unavailable(source)
             error = _check_model(source, value)
             if error is not None:
-                return failed(operation_id, name, error)
+                return error
             models[source] = value
 
         try:
@@ -501,10 +528,9 @@ class InspectProxyConfigHandler:
                 models["settings"], models["init"], models["port_exclude"], models["port_proxying"],
                 models["ip_exclude"],
             )
-            view = ProxyConfigView(XrayConfigView.from_config(models["xray"]), XKeenConfigView.from_config(xkeen))
         except _DOMAIN_ERRORS as error:
-            return failed(operation_id, name, ErrorDetail(
+            return ErrorDetail(
                 ErrorCategory.INVALID_SOURCE_DATA, "proxy_config_inconsistent",
                 "Прочитанные файлы Xray и XKeen не удалось согласовать.", reason=error.code.value,
-            ))
-        return succeeded(operation_id, name, view)
+            )
+        return ProxyConfigModels(models["xray"], xkeen)

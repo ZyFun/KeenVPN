@@ -11,11 +11,12 @@ from typing import Any
 from uuid import UUID
 
 from keenvpn.application.ports import (
-    ConnectionLinkParser, ConnectionProfileSource, GeoDataSource, KeeneticHotspotRuntimeSource,
+    ConnectionLinkParser, ConnectionProfileSource, GeoDatabaseSource, GeoDataSource, KeeneticHotspotRuntimeSource,
     KeeneticHotspotSettingsSource, KeeneticPolicySource, KeeneticRegistrationSource, RoutingPolicySource,
-    XKeenInitSource, XKeenListSource, XKeenSettingsSource, XrayConfigSource,
+    XKeenInitSource, XKeenListSource, XKeenSettingsSource, XrayConfigSource, XrayProcessSource,
 )
 from keenvpn.domain.connection import TrojanConnection
+from keenvpn.domain.geodata import GeoDatabaseInventory
 from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
 from keenvpn.domain.keenetic_policy import KeeneticPolicySet
 from keenvpn.domain.profile import ConnectionProfile
@@ -24,6 +25,7 @@ from keenvpn.domain.routing_explanation import GeoMatch, IPSource, RoutingContex
 from keenvpn.domain.routing_policy import RoutingPolicy
 from keenvpn.domain.xkeen_config import XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings
 from keenvpn.domain.xray_config import XrayConfigSet
+from keenvpn.domain.xray_process import XrayProcessObservation
 
 
 _UNSET = object()
@@ -146,6 +148,20 @@ class InMemoryXKeenInitSource(_ScriptedPort, XKeenInitSource):
     """Заданные параметры init XKeen; текст init не исполняется и не читается."""
 
     def current_xkeen_init(self) -> XKeenInitParameters:
+        return self._respond()
+
+
+class InMemoryGeoDatabaseSource(_ScriptedPort, GeoDatabaseSource):
+    """Заданный инвентарь файлов геобаз; каталог и файлы не читаются."""
+
+    def current_geo_databases(self) -> GeoDatabaseInventory:
+        return self._respond()
+
+
+class InMemoryXrayProcessSource(_ScriptedPort, XrayProcessSource):
+    """Заданное наблюдение процесса Xray; `pidof`, файлы и команды XKeen не вызываются."""
+
+    def current_xray_process(self) -> XrayProcessObservation:
         return self._respond()
 
 

@@ -17,6 +17,7 @@
 | `ResolveKeeneticPolicy` | `ResolveKeeneticPolicyHandler` | Находит ID [политики Keenetic](keenetic-policies.md) по описанию в текущем списке источника; неоднозначность не разрешает сам |
 | `InspectKeeneticState` | `InspectKeeneticStateHandler` | Читает [состояние Keenetic](keenetic-state.md) из четырёх раздельных источников и возвращает счётчики и технические идентификаторы без MAC, имён и адресов |
 | `InspectProxyConfig` | `InspectProxyConfigHandler` | Читает [конфигурацию Xray и XKeen](proxy-config.md): части Xray, `xkeen.json`, параметры init и три списка через раздельные источники и возвращает структурную сводку без доменов, адресов, путей и паролей |
+| `InspectInstallation` | `InspectInstallationHandler` | Читает [существующую установку](installation.md) поверх двух сценариев выше и двух портов: состояние Keenetic, конфигурацию Xray и XKeen, инвентарь геобаз со ссылками правил на наборы и наблюдение процесса Xray; отказ любого источника завершает чтение его кодом без частичного результата |
 
 Сценарии работают в памяти. Они не устанавливают соединения, не выполняют DNS,
 не запускают Xray, не записывают файлы и не меняют конфигурацию роутера.
@@ -33,7 +34,7 @@ application импортирует доменные модели и собств
 контракты, domain не зависит от application, адаптеров или интерфейса.
 
 `ConnectionLinkView`, `ConnectionProfileView`, `ProtocolSupportView`, `RouteExplanationView`,
-`KeeneticPolicyResolutionView`, `KeeneticStateView`, `ProxyConfigView` и `ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
+`KeeneticPolicyResolutionView`, `KeeneticStateView`, `ProxyConfigView`, `InstallationView` и `ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
 ошибки и преобразование `to_dict()` относятся к контракту результата: они не добавляют ANSI-оформление,
 заголовки меню или выравнивание для терминала. Отображение и сериализация одного
 результата не требуют повторного выполнения сценария или чтения его источников.
@@ -48,7 +49,7 @@ application импортирует доменные модели и собств
 | --- | --- |
 | `contract_version` | Версия формата команд и результатов, сейчас `1` (`CONTRACT_VERSION`) |
 | `operation_id` | Идентификатор вызова; по умолчанию случайная hex-строка |
-| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state` или `inspect_proxy_config` |
+| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config` или `inspect_installation` |
 | `status` | `OperationStatus.SUCCEEDED` или `OperationStatus.FAILED` |
 | `data` | Безопасное представление при успехе, иначе `None` |
 | `error` | `ErrorDetail` при отказе, иначе `None` |
@@ -401,10 +402,35 @@ init XKeen и три списка портов и адресов через че
 Поля представления, правила разбора и пример с искусственными источниками
 описаны в [чтении конфигурации Xray и XKeen](proxy-config.md#прикладной-сценарий).
 
+## Чтение существующей установки
+
+`InspectInstallation` объединяет четыре области чтения для первого шага мастера:
+обработчики `InspectKeeneticStateHandler` и `InspectProxyConfigHandler` дают
+модели через метод `read()`, порты `GeoDatabaseSource` и `XrayProcessSource` —
+инвентарь файлов GeoIP и GeoSite и наблюдение процесса Xray. Ссылки `geoip:`,
+`geosite:` и `ext:` из правил маршрутизации и DNS сопоставляются с найденными
+файлами по правилам загрузчика Xray; расхождение процесса и маркера готовности —
+отдельное состояние, а не работающий VPN. Источники читаются по одному разу
+в фиксированном порядке; отказ любого из них завершает сценарий кодом этой
+области без частичного результата. `InstallationView` содержит `keenetic`,
+`proxy`, `geodata` и `xray_process`; коды наборов геобаз, домены, адреса, MAC
+и имена устройств в него не входят.
+
+| Ситуация | Категория и код |
+| --- | --- |
+| Неверный тип команды или версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
+| Отказ или некорректный ответ источника Keenetic, Xray или XKeen | коды сценариев `inspect_keenetic_state` и `inspect_proxy_config` без изменения |
+| Источник геобаз или процесса вызвал исключение | `source_failed` / `geo_databases_unavailable`, `xray_process_unavailable` |
+| Источник вернул объект другого типа или повреждённую модель | `invalid_source_data` / `invalid_geo_databases`, `invalid_xray_process` |
+| Инвентарь и ссылки не удалось собрать | `invalid_source_data` / `installation_inconsistent` |
+
+Поля представления, правила разбора ссылок, состояния процесса и пример
+с искусственными источниками описаны в [чтении существующей установки](installation.md).
+
 ## Тестовые адаптеры в памяти
 
 Модуль [`tests/support/in_memory.py`](../tests/support/in_memory.py) содержит
-управляемые реализации двенадцати используемых портов. Это средства тестов:
+управляемые реализации четырнадцати используемых портов. Это средства тестов:
 application получает их через конструкторы обработчиков и не импортирует
 `tests`. Адаптеры не используют файлы, сеть, SSH или процессы.
 
@@ -421,6 +447,8 @@ application получает их через конструкторы обраб
 | `InMemoryXKeenSettingsSource` | `outcome` — ответ источника `xkeen.json`, `calls` — число обращений |
 | `InMemoryXKeenInitSource` | `outcome` — ответ источника параметров init XKeen, `calls` — число обращений; init не исполняется |
 | `InMemoryXKeenListSource` | `set_response(name, outcome)` — ответ списка по точному `XKeenListName`; `calls` — tuple запрошенных имён; другое имя при настройке — `AdapterSetupError` |
+| `InMemoryGeoDatabaseSource` | `outcome` — ответ источника инвентаря геобаз, `calls` — число обращений; каталог и файлы не читаются |
+| `InMemoryXrayProcessSource` | `outcome` — ответ источника наблюдения процесса Xray, `calls` — число обращений; `pidof`, файлы и команды XKeen не вызываются |
 | `InMemoryGeoDataSource` | `set_response(condition, values, outcome)` — ответ точного запроса; `calls` — неизменяемый снимок истории `GeoDataCall` |
 
 Ответы повторяются до явной замены. `outcome` возвращается как есть, а экземпляр
@@ -504,6 +532,10 @@ assert policies.calls == 2
 init и списки снимка функциями адаптеров `keenvpn.adapters.xray_configs` и
 `keenvpn.adapters.xkeen_files` в четыре источника конфигурации прокси; размер
 и SHA-256 настроек XKeen относятся к сериализации проекции, а не к файлу роутера.
+`snapshot_installation_sources()` объединяет оба набора с искусственными
+`synthetic_geo_inventory()` (найденный `geoip.dat` с известным источником
+и неизвестной версией, отсутствующий `geosite.dat`) и `synthetic_xray_process()`
+(один процесс и маркер готовности): в снимке нет файлов геобаз и состояния процессов.
 
 `GeoDataCall.condition` и `.values` доступны тесту явно. `repr()` истории
 показывает только тип условия и число значений, а `repr()` адаптеров скрывает

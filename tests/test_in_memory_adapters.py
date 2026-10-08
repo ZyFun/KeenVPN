@@ -25,9 +25,9 @@ from keenvpn.domain.routing_explanation import DomainSource, GeoMatch, IPSource
 from keenvpn.domain.routing_policy import FinalRoutingRule, MatchResult, RoutingPolicy
 from keenvpn.domain.xkeen_config import XKeenList, XKeenListName
 from tests.support.in_memory import (
-    AdapterSetupError, GeoDataCall, InMemoryConnectionLinkParser, InMemoryGeoDataSource,
+    AdapterSetupError, GeoDataCall, InMemoryConnectionLinkParser, InMemoryGeoDatabaseSource, InMemoryGeoDataSource,
     InMemoryRoutingPolicySource, InMemoryXKeenInitSource, InMemoryXKeenListSource, InMemoryXKeenSettingsSource,
-    InMemoryXrayConfigSource, UnconfiguredResponseError,
+    InMemoryXrayConfigSource, InMemoryXrayProcessSource, UnconfiguredResponseError,
 )
 from tests.support.isolation import forbid_external_effects
 from tests.support.privacy import frame_locals, reachable
@@ -400,6 +400,8 @@ class ProxyConfigSourceTests(unittest.TestCase):
             (InMemoryXrayConfigSource, "current_xray_config"),
             (InMemoryXKeenSettingsSource, "current_xkeen_settings"),
             (InMemoryXKeenInitSource, "current_xkeen_init"),
+            (InMemoryGeoDatabaseSource, "current_geo_databases"),
+            (InMemoryXrayProcessSource, "current_xray_process"),
         ):
             with self.subTest(source=source_type.__name__):
                 source = source_type()

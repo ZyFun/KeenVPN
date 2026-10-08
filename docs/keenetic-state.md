@@ -59,7 +59,7 @@
 
 ## Прикладной сценарий
 
-`InspectKeeneticState()` не имеет параметров, кроме версии контракта. `InspectKeeneticStateHandler(policies, hotspot, registrations, runtime)` получает четыре источника и вызывает каждый ровно один раз в фиксированном порядке: политики, настройки hotspot, регистрация, runtime. После отказа или некорректного ответа следующие источники не читаются; частичного результата нет.
+`InspectKeeneticState()` не имеет параметров, кроме версии контракта. `InspectKeeneticStateHandler(policies, hotspot, registrations, runtime)` получает четыре источника и вызывает каждый ровно один раз в фиксированном порядке: политики, настройки hotspot, регистрация, runtime. После отказа или некорректного ответа следующие источники не читаются; частичного результата нет. Метод `read()` обработчика выполняет то же чтение и возвращает `KeeneticNativeState` для доверенного кода либо `ErrorDetail` с теми же кодами; его использует [чтение существующей установки](installation.md).
 
 ```python
 from keenvpn.application.keenetic_state import InspectKeeneticState, InspectKeeneticStateHandler

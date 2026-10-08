@@ -9,6 +9,7 @@ from typing import Protocol
 from uuid import UUID
 
 from keenvpn.domain.connection import TrojanConnection
+from keenvpn.domain.geodata import GeoDatabaseInventory
 from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
 from keenvpn.domain.keenetic_policy import KeeneticPolicySet
 from keenvpn.domain.profile import ConnectionProfile
@@ -17,6 +18,7 @@ from keenvpn.domain.routing_explanation import GeoMatch
 from keenvpn.domain.routing_policy import RoutingPolicy
 from keenvpn.domain.xkeen_config import XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings
 from keenvpn.domain.xray_config import XrayConfigSet
+from keenvpn.domain.xray_process import XrayProcessObservation
 
 
 class LinkRejection(StrEnum):
@@ -124,6 +126,22 @@ class XKeenListSource(Protocol):
 
     def current_xkeen_list(self, name: XKeenListName) -> XKeenList:
         """Вернуть список с этим именем; при сбое — вызвать исключение."""
+        ...
+
+
+class GeoDatabaseSource(Protocol):
+    """Чтение инвентаря файлов геобаз: имена, наличие, размер, SHA-256 и известные метаданные."""
+
+    def current_geo_databases(self) -> GeoDatabaseInventory:
+        """Вернуть инвентарь со стандартными именами; при сбое — вызвать исключение."""
+        ...
+
+
+class XrayProcessSource(Protocol):
+    """Наблюдение процесса Xray и ready-маркера чтением, без команд XKeen и init."""
+
+    def current_xray_process(self) -> XrayProcessObservation:
+        """Вернуть наблюдение на момент вызова; при сбое — вызвать исключение."""
         ...
 
 

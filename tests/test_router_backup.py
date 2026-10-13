@@ -1,6 +1,7 @@
 """Архивы и отказы на искусственных разделах; без SSH, сети и реального роутера."""
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import io
@@ -156,6 +157,126 @@ class RouterBackupTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 create_backup(self.storage)
         self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
+
+    def test_repeated_timestamp_preserves_existing_archive_and_checksum(self):
+        moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        with patch("keenvpn.adapters.router_backup.datetime") as clock:
+            clock.now.return_value = moment
+            create_backup(self.storage)
+            before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+            (self.root / "opt/etc/config.json").write_text('{"fixture": "changed"}')
+            with self.assertRaises(BackupError):
+                create_backup(self.storage)
+        self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
+
+    def test_incomplete_backup_names_and_links_prevent_publication(self):
+        name = "keenvpn-20260101T000000.000000Z.tar.gz"
+        self.make_old()
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        for suffix in ("", ".sha256"):
+            for kind in ("file", "link", "directory"):
+                with self.subTest(suffix=suffix, kind=kind):
+                    occupied = self.target / (name + suffix)
+                    if kind == "file":
+                        occupied.write_bytes(b"protected")
+                    elif kind == "link":
+                        occupied.symlink_to("missing-fixture")
+                    else:
+                        occupied.mkdir()
+                    try:
+                        with patch("keenvpn.adapters.router_backup.datetime") as clock:
+                            clock.now.return_value = datetime(2026, 1, 1, tzinfo=timezone.utc)
+                            with self.assertRaises(BackupError):
+                                create_backup(self.storage)
+                        if kind == "file":
+                            self.assertEqual(occupied.read_bytes(), b"protected")
+                        elif kind == "link":
+                            self.assertEqual(os.readlink(occupied), "missing-fixture")
+                        else:
+                            self.assertEqual(list(occupied.iterdir()), [])
+                        self.assertFalse((self.target / (name + (".sha256" if not suffix else ""))).exists())
+                    finally:
+                        occupied.rmdir() if kind == "directory" else occupied.unlink()
+                        self.storage = FixtureStorage(self.config, system_root=self.root, mounts_file=self.mounts)
+        self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
+
+    def test_name_occupied_during_publication_is_not_overwritten(self):
+        self.make_old()
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        link = os.link
+        occupied = None
+
+        def occupy(source, destination, **kwargs):
+            nonlocal occupied
+            if Path(destination).name == self.storage.name:
+                occupied = self.target / self.storage.name
+                occupied.write_bytes(b"protected")
+            return link(source, destination, **kwargs)
+
+        with patch("keenvpn.adapters.router_backup.os.link", side_effect=occupy):
+            with self.assertRaises(BackupError):
+                create_backup(self.storage)
+        self.assertIsNotNone(occupied)
+        self.assertEqual(occupied.read_bytes(), b"protected")
+        self.assertFalse((self.target / (occupied.name + ".sha256")).exists())
+        occupied.unlink()
+        self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
+
+    def test_publication_failure_between_files_preserves_previous_backups(self):
+        self.make_old()
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        link = os.link
+
+        def fail_archive(source, destination, **kwargs):
+            if Path(destination).name == self.storage.name:
+                raise OSError("fixture")
+            return link(source, destination, **kwargs)
+
+        with patch("keenvpn.adapters.router_backup.os.link", side_effect=fail_archive):
+            with self.assertRaises(OSError):
+                create_backup(self.storage)
+        self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
+
+    def test_publication_checksum_cleanup_preserves_replaced_sidecar(self):
+        self.make_old()
+        link = os.link
+        checksum = None
+
+        def replace_checksum(source, destination, **kwargs):
+            nonlocal checksum
+            if Path(destination).name == self.storage.name:
+                checksum = self.target / (self.storage.name + ".sha256")
+                checksum.unlink()
+                checksum.write_bytes(b"protected")
+                raise OSError("fixture")
+            return link(source, destination, **kwargs)
+
+        with patch("keenvpn.adapters.router_backup.os.link", side_effect=replace_checksum):
+            with self.assertRaises(OSError):
+                create_backup(self.storage)
+        self.assertIsNotNone(checksum)
+        self.assertEqual(checksum.read_bytes(), b"protected")
+        self.assertFalse((self.target / self.storage.name).exists())
+        self.assertEqual(len(list(self.target.glob("*.tar.gz"))), 7)
+
+    def test_interruption_after_archive_link_keeps_consistent_pair_without_rotation(self):
+        self.make_old()
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        link = os.link
+
+        def interrupt_after_link(source, destination, **kwargs):
+            link(source, destination, **kwargs)
+            if Path(destination).name == self.storage.name:
+                raise KeyboardInterrupt
+
+        with patch("keenvpn.adapters.router_backup.os.link", side_effect=interrupt_after_link):
+            with self.assertRaises(KeyboardInterrupt):
+                create_backup(self.storage)
+        archive = self.target / self.storage.name
+        checksum = self.target / (self.storage.name + ".sha256")
+        self.assertEqual(checksum.read_text(), digest_file(archive) + "  " + archive.name + "\n")
+        self.assertEqual({name: (self.target / name).read_bytes() for name in before}, before)
+        self.assertFalse(list(self.target.glob(".partial-*")))
 
     def test_wrong_uuid_and_read_only_mount(self):
         for changed in (self.mounts.read_text().replace("/dev/sda3", "/dev/sda2"),

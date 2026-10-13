@@ -475,11 +475,39 @@ class RouterBackupStorage:
     def publish(self) -> None:
         self.check_mounts()
         check_sqlite_identity(self.data / HISTORY, self.database_identity)
-        # Сначала checksum, последним — атомарная публикация готового архива.
-        os.replace(self.checksum, Path(self.name + ".sha256"))
-        os.replace(self.candidate, Path(self.name))
+        archive = Path(self.name)
+        checksum = Path(self.name + ".sha256")
+        # Отклонять также неполные пары, каталоги и ссылки с отсутствующей целью.
+        if any(os.path.lexists(path) for path in (archive, checksum)):
+            raise BackupError("Имя резервной копии уже занято: старые файлы сохранены.")
         descriptor = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
         try:
+            # link публикует готовый inode атомарно и никогда не заменяет назначение.
+            try:
+                os.link(self.checksum, checksum, follow_symlinks=False)
+            except FileExistsError:
+                raise BackupError("Имя резервной копии уже занято: старые файлы сохранены.") from None
+            try:
+                # Закрепить checksum на диске прежде, чем станет виден архив.
+                os.fsync(descriptor)
+                os.link(self.candidate, archive, follow_symlinks=False)
+            except BaseException as error:
+                # При прерывании сразу после link архив уже может быть опубликован.
+                try:
+                    visible = os.path.samestat(archive.lstat(), self.candidate.lstat())
+                except FileNotFoundError:
+                    visible = False
+                if not visible:
+                    # Компенсировать только созданный этой операцией checksum.
+                    try:
+                        if os.path.samestat(checksum.lstat(), self.checksum.lstat()):
+                            checksum.unlink()
+                            os.fsync(descriptor)
+                    except FileNotFoundError:
+                        pass
+                if isinstance(error, FileExistsError):
+                    raise BackupError("Имя резервной копии уже занято: старые файлы сохранены.") from None
+                raise
             os.fsync(descriptor)
         finally:
             os.close(descriptor)

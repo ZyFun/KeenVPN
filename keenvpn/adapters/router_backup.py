@@ -286,6 +286,7 @@ class RouterBackupStorage:
         self.target = self.backup / "keenvpn/daily"
         self.work = None
         self.published = False
+        self.backup_directories = ()
 
     def command(self, args: list[str]) -> bytes:
         """Ограниченный вызов без shell, stderr никогда не попадает в сообщение."""
@@ -301,6 +302,8 @@ class RouterBackupStorage:
     def check_mounts(self) -> None:
         """UUID, ext4, rw, отдельные устройства и действующий bind /opt."""
         rows = [line.split() for line in self.mounts_file.read_text().splitlines()]
+        if any(len(row) >= 4 and row[1].startswith(str(self.backup) + "/") for row in rows):
+            raise BackupError("Вложенное монтирование на BACKUP: операция остановлена.")
         devices = []
         for uuid in (self.config.entware_uuid, self.config.data_uuid, self.config.backup_uuid):
             point = self.mount_base / uuid
@@ -322,6 +325,39 @@ class RouterBackupStorage:
             and "rw" in r[3].split(",") for r in rows
         ) or self.opt.is_symlink():
             raise BackupError("Корень Entware не соответствует выбранному разделу.")
+        if self.backup_directories and not os.path.samestat(
+            self.backup.lstat(), self.backup_directories[0],
+        ):
+            raise BackupError("Раздел BACKUP подменён: операция остановлена.")
+
+    def check_backup_target(self) -> None:
+        """Сверить текущий путь и cwd с закреплёнными каталогами выбранного BACKUP."""
+        self.check_mounts()
+        if len(self.backup_directories) != 3:
+            raise BackupError("Каталог BACKUP не закреплён.")
+        descriptor = None
+        try:
+            descriptor = os.open(self.backup, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            for index, expected in enumerate(self.backup_directories):
+                if index:
+                    child = os.open(("keenvpn", "daily")[index - 1],
+                                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                    dir_fd=descriptor)
+                    os.close(descriptor)
+                    descriptor = child
+                info = os.fstat(descriptor)
+                if not os.path.samestat(info, expected) or (index and (
+                    info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700
+                )):
+                    raise BackupError("Каталог BACKUP подменён: операция остановлена.")
+            if not os.path.samestat(os.stat("."), self.backup_directories[-1]):
+                raise BackupError("Текущий каталог не соответствует BACKUP.")
+            self.check_mounts()
+        except OSError:
+            raise BackupError("Каталог BACKUP недоступен: операция остановлена.") from None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
     @contextmanager
     def session(self):
@@ -329,6 +365,10 @@ class RouterBackupStorage:
         lock = self.system_root / "tmp/keenvpn-backup.lock"
         fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         old_cwd = None
+        directories = []
+        self.work = None
+        self.published = False
+        self.backup_directories = ()
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
@@ -338,19 +378,33 @@ class RouterBackupStorage:
             except BlockingIOError:
                 raise BackupError("Резервное копирование уже выполняется.") from None
             self.check_mounts()
-            for folder in (self.backup / "keenvpn", self.target):
-                if folder.is_symlink():
-                    raise BackupError("Каталог копий заменён ссылкой.")
-                folder.mkdir(mode=0o700, exist_ok=True)
-                if folder.stat().st_uid != os.geteuid():
+            directory = os.open(self.backup, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            directories.append(directory)
+            self.backup_directories = (os.fstat(directory),)
+            for name in ("keenvpn", "daily"):
+                self.check_mounts()
+                try:
+                    os.mkdir(name, mode=0o700, dir_fd=directory)
+                except FileExistsError:
+                    pass
+                try:
+                    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                    dir_fd=directory)
+                except OSError:
+                    raise BackupError("Каталог копий отсутствует или заменён ссылкой.") from None
+                directories.append(child)
+                info = os.fstat(child)
+                if info.st_dev != self.backup_directories[0].st_dev:
+                    raise BackupError("Каталог копий находится на другом хранилище.")
+                if info.st_uid != os.geteuid():
                     raise BackupError("Неверный владелец каталога копий.")
-                folder.chmod(0o700)
+                self.check_mounts()
+                os.fchmod(child, 0o700)
+                self.backup_directories += (os.fstat(child),)
+                directory = child
             old_cwd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
-            directory = os.open(self.target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                os.fchdir(directory)
-            finally:
-                os.close(directory)
+            os.fchdir(directory)
+            self.check_backup_target()
             # После SIGKILL могут остаться только наши временные каталоги.
             for entry in Path(".").iterdir():
                 if re.fullmatch(r"\.partial-[a-z0-9_]{8}", entry.name) and not entry.is_symlink() and entry.is_dir():
@@ -363,14 +417,23 @@ class RouterBackupStorage:
                 yield self
         finally:
             if self.work is not None:
-                shutil.rmtree(self.work, ignore_errors=True)
+                try:
+                    self.check_backup_target()
+                except (BackupError, OSError):
+                    # Не очищать путь, если он уже указывает на другое хранилище.
+                    pass
+                else:
+                    shutil.rmtree(self.work, ignore_errors=True)
             if old_cwd is not None:
                 os.fchdir(old_cwd)
                 os.close(old_cwd)
+            for directory in reversed(directories):
+                os.close(directory)
+            self.backup_directories = ()
             os.close(fd)
 
     def prepare(self) -> None:
-        self.check_mounts()
+        self.check_backup_target()
         source_database = (self.data / HISTORY).absolute()
         check_sqlite_identity(source_database, self.database_identity)
         database_info = sqlite_source_info(source_database)
@@ -452,6 +515,7 @@ class RouterBackupStorage:
             raise BackupError("Метаданные корней источников изменились: архив не опубликован.")
 
     def create_and_verify(self) -> None:
+        self.check_backup_target()
         self.check_source_roots()
         database_name = "data/" + HISTORY
         # Снимок обязателен как отдельный файл внутри payload, а не цель ссылки.
@@ -501,7 +565,7 @@ class RouterBackupStorage:
         native = re.sub(bytes([27]) + rb"\[[0-9;]*[A-Za-z]", b"", native)
         if hashlib.sha256(native).hexdigest() != self.native_revision:
             raise BackupError("Конфигурация Keenetic изменилась: архив не опубликован.")
-        self.check_mounts()
+        self.check_backup_target()
         check_sqlite_identity(self.data / HISTORY, self.database_identity)
         self.sha256 = digest_file(self.candidate)
         self.size = self.candidate.stat().st_size
@@ -512,7 +576,7 @@ class RouterBackupStorage:
                 os.fsync(source.fileno())
 
     def publish(self) -> None:
-        self.check_mounts()
+        self.check_backup_target()
         self.check_source_roots()
         check_sqlite_identity(self.data / HISTORY, self.database_identity)
         archive = Path(self.name)
@@ -556,7 +620,7 @@ class RouterBackupStorage:
     def retain(self) -> BackupResult:
         if not self.published:
             raise BackupError("Ротация без опубликованного архива запрещена.")
-        self.check_mounts()
+        self.check_backup_target()
         archives = sorted(p for p in Path(".").iterdir()
                           if ARCHIVE_NAME.fullmatch(p.name) and p.is_file() and not p.is_symlink())
         if not archives or archives[-1].name != self.name:

@@ -886,6 +886,163 @@ class RouterBackupTests(unittest.TestCase):
             self.storage.retain()
 
 
+class BackupMountTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self):
+        case = RouterBackupTests()
+        case.setUp()
+        try:
+            case.make_old()
+            case.target.parent.chmod(0o750)
+            case.target.chmod(0o755)
+            stale = case.target / ".partial-12345678"
+            stale.mkdir()
+            (stale / "protected").write_bytes(b"foreign-work")
+            yield case
+        finally:
+            case.doCleanups()
+
+    def add_mount(self, case, point, device="tmpfs", filesystem="tmpfs"):
+        with case.mounts.open("a") as output:
+            output.write(f"{device} {point} {filesystem} rw 0 0\n")
+
+    def old_archives(self, target):
+        return {p.name: p.read_bytes() for p in target.iterdir() if p.is_file()}
+
+    def test_nested_backup_mounts_rejected_before_chmod_cleanup_and_rotation(self):
+        for relative in ("keenvpn", "keenvpn/daily", "keenvpn/daily/.partial-12345678"):
+            for device, filesystem in (("tmpfs", "tmpfs"), ("/dev/sdz1", "ext4"),
+                                       ("/dev/sda3", "ext4")):
+                with self.subTest(point=relative, device=device), self.fixture() as case:
+                    before = self.old_archives(case.target)
+                    self.add_mount(case, case.storage.backup / relative, device, filesystem)
+                    with self.assertRaises(BackupError):
+                        create_backup(case.storage)
+                    self.assertEqual(self.old_archives(case.target), before)
+                    self.assertEqual(case.target.parent.stat().st_mode & 0o777, 0o750)
+                    self.assertEqual(case.target.stat().st_mode & 0o777, 0o755)
+                    self.assertEqual((case.target / ".partial-12345678/protected").read_bytes(),
+                                     b"foreign-work")
+
+    def test_opened_backup_child_on_another_device_is_rejected(self):
+        for name in ("keenvpn", "daily"):
+            with self.subTest(directory=name), self.fixture() as case:
+                real_open, real_fstat = os.open, os.fstat
+                foreign = {}
+                before = self.old_archives(case.target)
+
+                def open_directory(path, flags, *args, **kwargs):
+                    descriptor = real_open(path, flags, *args, **kwargs)
+                    if str(path) == name and kwargs.get("dir_fd") is not None \
+                            or Path(path) == (case.target.parent if name == "keenvpn" else case.target):
+                        foreign[descriptor] = real_fstat(descriptor)
+                    return descriptor
+
+                def foreign_filesystem(descriptor):
+                    info = real_fstat(descriptor)
+                    if descriptor in foreign and os.path.samestat(info, foreign[descriptor]):
+                        values = list(info)
+                        values[2] = info.st_dev + 1
+                        return os.stat_result(values)
+                    return info
+
+                with patch("keenvpn.adapters.router_backup.os.open", side_effect=open_directory), \
+                        patch("keenvpn.adapters.router_backup.os.fstat", side_effect=foreign_filesystem):
+                    with self.assertRaises(BackupError):
+                        create_backup(case.storage)
+                self.assertTrue(foreign)
+                self.assertEqual(self.old_archives(case.target), before)
+                folder = case.target.parent if name == "keenvpn" else case.target
+                self.assertEqual(folder.stat().st_mode & 0o777, 0o750 if name == "keenvpn" else 0o755)
+                self.assertTrue((case.target / ".partial-12345678/protected").is_file())
+
+    def test_same_filesystem_bind_appearing_during_open_is_rejected(self):
+        for name in ("keenvpn", "daily"):
+            with self.subTest(directory=name), self.fixture() as case:
+                real_open = os.open
+                inserted = []
+                before = self.old_archives(case.target)
+                folder = case.target.parent if name == "keenvpn" else case.target
+
+                def mount_during_open(path, flags, *args, **kwargs):
+                    if not inserted and (str(path) == name and kwargs.get("dir_fd") is not None
+                                         or Path(path) == folder):
+                        self.add_mount(case, folder, "/dev/sda3", "ext4")
+                        inserted.append(True)
+                    return real_open(path, flags, *args, **kwargs)
+
+                with patch("keenvpn.adapters.router_backup.os.open", side_effect=mount_during_open):
+                    with self.assertRaises(BackupError):
+                        create_backup(case.storage)
+                self.assertTrue(inserted)
+                self.assertEqual(self.old_archives(case.target), before)
+                self.assertEqual(folder.stat().st_mode & 0o777, 0o750 if name == "keenvpn" else 0o755)
+                self.assertTrue((case.target / ".partial-12345678/protected").is_file())
+
+    def test_target_replacement_after_open_is_rejected_before_stale_cleanup(self):
+        with self.fixture() as case:
+            real_open = os.open
+            displaced = case.storage.backup / "displaced"
+            before = self.old_archives(case.target)
+            replaced = []
+
+            def replace_during_open(path, flags, *args, **kwargs):
+                descriptor = real_open(path, flags, *args, **kwargs)
+                if not replaced and (str(path) == "daily" and kwargs.get("dir_fd") is not None
+                                     or Path(path) == case.target):
+                    case.target.rename(displaced)
+                    case.target.mkdir()
+                    (case.target / "foreign").write_bytes(b"foreign-directory")
+                    replaced.append(True)
+                return descriptor
+
+            with patch("keenvpn.adapters.router_backup.os.open", side_effect=replace_during_open):
+                with self.assertRaises(BackupError):
+                    create_backup(case.storage)
+            self.assertEqual(self.old_archives(displaced), before)
+            self.assertEqual((displaced / ".partial-12345678/protected").read_bytes(), b"foreign-work")
+            self.assertEqual(self.old_archives(case.target), {"foreign": b"foreign-directory"})
+
+    def test_new_nested_mount_prevents_publication_or_rotation_and_cleanup(self):
+        for phase in ("publish", "retain"):
+            with self.subTest(phase=phase), self.fixture() as case:
+                before = self.old_archives(case.target)
+                with case.storage.session():
+                    case.storage.prepare()
+                    case.storage.create_and_verify()
+                    if phase == "retain":
+                        case.storage.publish()
+                    work = case.storage.work
+                    self.add_mount(case, case.target / work.name)
+                    with self.assertRaises(BackupError):
+                        getattr(case.storage, phase)()
+                self.assertTrue((case.target / work.name).is_dir())
+                for name, content in before.items():
+                    self.assertEqual((case.target / name).read_bytes(), content)
+                self.assertEqual((case.target / case.storage.name).exists(), phase == "retain")
+
+    def test_backup_path_replacement_before_publication_preserves_both_trees(self):
+        for relative in ("", "keenvpn", "keenvpn/daily"):
+            with self.subTest(directory=relative), self.fixture() as case:
+                before = self.old_archives(case.target)
+                displaced = case.root / "displaced"
+                with case.storage.session():
+                    case.storage.prepare()
+                    case.storage.create_and_verify()
+                    folder = case.storage.backup / relative
+                    folder.rename(displaced)
+                    folder.mkdir()
+                    (folder / "foreign").write_bytes(b"foreign-directory")
+                    with self.assertRaises(BackupError):
+                        case.storage.publish()
+                    work = case.storage.work
+                suffix = "keenvpn/daily" if not relative else "daily" if relative == "keenvpn" else ""
+                original_target = displaced / suffix
+                self.assertEqual(self.old_archives(original_target), before)
+                self.assertTrue((original_target / work.name).is_dir())
+                self.assertEqual(self.old_archives(folder), {"foreign": b"foreign-directory"})
+
+
 class BackupConfigTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

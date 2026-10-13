@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.domain.routing import (
     ConditionFamily, DomainCondition, DomainMatch, GeoDatabase, GeoDatabaseKind,
     GeoIPCondition, GeoSiteCondition, IPCondition, RoutingAction,
-    RoutingErrorCode, RoutingRule, RoutingValidationError, UnknownCondition,
+    RoutingErrorCode, RoutingRule, RoutingValidationError, UnknownCondition, UnsupportedRuleCondition,
 )
 from keenvpn.domain.routing_policy import FinalRoutingRule, MatchResult, RoutingPolicy
 from keenvpn.domain.routing_explanation import (
@@ -268,14 +268,19 @@ class RoutingExplanationTests(unittest.TestCase):
         self.assertEqual((final["enabled"], final["protected"]), (None, None))
 
     def test_unknown_import_stops_only_if_reached_and_is_never_sent_to_source(self):
-        unknown = RoutingRule(UnknownCondition(ConditionFamily.IP, "ext:fixture:unknown"), RoutingAction.VPN)
-        source = Mock(side_effect=AssertionError("Неизвестный импорт не передаётся источнику"))
-        report = explain_route(self.policy(unknown, self.domain), self.context, geo_matcher=source)
-        self.assertIsNone(report.selection)
-        self.assertIs(report.steps[0].reason, ExplanationReason.UNSUPPORTED)
-        report = explain_route(self.policy(self.domain, unknown), self.context, geo_matcher=source)
-        self.assertIs(report.selection.rule, self.domain)
-        source.assert_not_called()
+        for condition in (
+            UnknownCondition(ConditionFamily.IP, "ext:fixture:unknown"),
+            UnsupportedRuleCondition(("inboundTag", "port"), '{"inboundTag":["lan"],"port":"53"}'),
+        ):
+            unknown = RoutingRule(condition, RoutingAction.VPN)
+            source = Mock(side_effect=AssertionError("Неизвестный импорт не передаётся источнику"))
+            report = explain_route(self.policy(unknown, self.domain), self.context, geo_matcher=source)
+            self.assertIsNone(report.selection)
+            self.assertIs(report.steps[0].reason, ExplanationReason.UNSUPPORTED)
+            self.assertEqual(report.to_diagnostic()["steps"][0]["condition_type"], type(condition).__name__)
+            report = explain_route(self.policy(self.domain, unknown), self.context, geo_matcher=source)
+            self.assertIs(report.selection.rule, self.domain)
+            source.assert_not_called()
 
     def test_explicit_final_for_empty_disabled_and_all_nonmatching_policies(self):
         for action in RoutingAction:

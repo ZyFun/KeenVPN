@@ -32,6 +32,7 @@ from keenvpn.domain.routing import (
     RoutingRule,
     RoutingValidationError,
     UnknownCondition,
+    UnsupportedRuleCondition,
 )
 
 
@@ -218,6 +219,24 @@ class RoutingRuleTests(RoutingTestCase):
                     restored = UnknownCondition(**asdict(condition))
                     self.assertEqual(restored, condition)
 
+    def test_unsupported_rule_condition_keeps_fields_and_snapshot_read_only(self):
+        condition = UnsupportedRuleCondition(("inboundTag", "port"), '{"inboundTag":["lan"],"port":"53"}')
+        for action in RoutingAction:
+            rule = RoutingRule(condition, action)
+            self.assertTrue(rule.read_only)
+            self.assertEqual(rule.to_diagnostic()["condition_type"], "UnsupportedRuleCondition")
+            self.assertEqual(rule.to_diagnostic()["parameters"], "<скрыто>")
+        self.assertEqual(UnsupportedRuleCondition((), "{}").fields, ())
+        # Имя поля — исходный ключ JSON: пустая строка допустима, повтор — нет.
+        self.assertEqual(UnsupportedRuleCondition(("", "port"), '{"":1,"port":"53"}').fields, ("", "port"))
+        self.assertNotEqual(condition, UnsupportedRuleCondition(("inboundTag", "port"), "{}"))
+        self.assertNotEqual(condition, UnknownCondition(ConditionFamily.DOMAIN, '{"inboundTag":["lan"],"port":"53"}'))
+        for fields, snapshot in (
+            (["inboundTag"], "{}"), (("inboundTag", "inboundTag"), "{}"), (("", ""), "{}"), ((7,), "{}"),
+            (("port",), ""), (("port",), None), (None, "{}"), (("port",), b"{}"),
+        ):
+            self.assert_invalid(RoutingErrorCode.RULE_FIELDS, UnsupportedRuleCondition, fields, snapshot)
+
     def test_unknown_reference_does_not_become_a_normal_domain(self):
         unknown = UnknownCondition(ConditionFamily.DOMAIN, "domain:ru")
         self.assertNotEqual(unknown, DomainCondition("ru"))
@@ -239,6 +258,7 @@ class RoutingRuleTests(RoutingTestCase):
             (database, "reference"), (condition, "set_name"), (rule, "action"),
             (DomainCondition("example.test"), "value"), (IPCondition("192.0.2.1"), "value"),
             (UnknownCondition(ConditionFamily.IP, "unknown"), "reference"),
+            (UnsupportedRuleCondition(("port",), "{}"), "snapshot"),
         ):
             with self.assertRaises(FrozenInstanceError):
                 setattr(value, field, "changed")
@@ -251,6 +271,7 @@ class RoutingPrivacyTests(RoutingTestCase):
         values = (
             database, GeoSiteCondition(database, marker), DomainCondition(marker.replace("_", "-") + ".test"),
             IPCondition("192.0.2.17"), UnknownCondition(ConditionFamily.IP, marker),
+            UnsupportedRuleCondition(("domain",), marker),
         )
         stream = io.StringIO()
         logger = logging.Logger("routing-test")

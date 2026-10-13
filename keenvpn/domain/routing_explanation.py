@@ -9,8 +9,8 @@ from typing import TypeAlias
 from keenvpn.domain.routing import (
     DomainCondition, DomainMatch, GeoDatabase, GeoIPCondition, GeoSiteCondition,
     IPCondition, RoutingCondition, RoutingErrorCode, RoutingRule,
-    RoutingValidationError, UnknownCondition, _PrivateRepresentation,
-    _raise_detached,
+    RoutingValidationError, UnknownCondition, UnsupportedRuleCondition,
+    _PrivateRepresentation, _raise_detached,
 )
 from keenvpn.domain.routing_policy import (
     FinalRoutingRule, MatchResult, RoutingPolicy, RoutingSelection,
@@ -256,7 +256,7 @@ def _match_condition(
     addresses: tuple[IPAddress, ...] | None,
     matcher: GeoMatcher | None,
 ) -> tuple[MatchResult, ExplanationReason, GeoDatabase | None]:
-    if isinstance(condition, UnknownCondition):
+    if isinstance(condition, (UnknownCondition, UnsupportedRuleCondition)):
         return MatchResult.UNKNOWN, ExplanationReason.UNSUPPORTED, None
     if isinstance(condition, (DomainCondition, GeoSiteCondition)):
         if context.domain_source is DomainSource.UNKNOWN:

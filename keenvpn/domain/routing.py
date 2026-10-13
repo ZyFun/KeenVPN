@@ -47,6 +47,7 @@ class RoutingErrorCode(str, Enum):
     DATABASE_KIND = "invalid_database_kind"
     SET_NAME = "invalid_set_name"
     REFERENCE = "invalid_imported_reference"
+    RULE_FIELDS = "invalid_rule_fields"
     CONDITION = "invalid_condition"
     ACTION = "invalid_action"
     RULES = "invalid_rules"
@@ -275,7 +276,37 @@ class UnknownCondition(_PrivateRepresentation):
             raise RoutingValidationError(RoutingErrorCode.REFERENCE) from None
 
 
-RoutingCondition = DomainCondition | IPCondition | GeoIPCondition | GeoSiteCondition | UnknownCondition
+@dataclass(frozen=True, slots=True, repr=False)
+class UnsupportedRuleCondition(_PrivateRepresentation):
+    """Условия правила Xray целиком, которые модель не сводит к одному условию.
+
+    Хранит имена полей условий правила в порядке файла и канонический
+    JSON-снимок их значений, чтобы правило сохранило позицию в порядке без
+    подмены смысла: логическое И нескольких полей, порты, сети, inbound и
+    прочие поля Xray модель не сопоставляет. Имя поля — исходный ключ JSON,
+    поэтому допустима любая строка, включая пустую; повторов нет. Пустой
+    кортеж полей описывает правило без условий, которое не может быть
+    финальным. Такое условие доступно только для просмотра, как и
+    неизвестная ссылка.
+    """
+
+    fields: tuple[str, ...]
+    snapshot: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.fields) is not tuple
+            or any(type(name) is not str for name in self.fields)
+            or len(set(self.fields)) != len(self.fields)
+            or type(self.snapshot) is not str
+            or not self.snapshot
+        ):
+            raise RoutingValidationError(RoutingErrorCode.RULE_FIELDS) from None
+
+
+RoutingCondition = (
+    DomainCondition | IPCondition | GeoIPCondition | GeoSiteCondition | UnknownCondition | UnsupportedRuleCondition
+)
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -299,8 +330,8 @@ class RoutingRule(_PrivateRepresentation):
 
     @property
     def read_only(self) -> bool:
-        """Неизвестную ссылку нельзя безопасно редактировать как известную."""
-        return isinstance(self.condition, UnknownCondition)
+        """Неизвестную ссылку и неподдержанное правило нельзя безопасно редактировать как известные."""
+        return isinstance(self.condition, (UnknownCondition, UnsupportedRuleCondition))
 
     def to_diagnostic(self) -> dict[str, str | bool]:
         """Описание структуры без доменов, адресов, ссылок и метаданных."""

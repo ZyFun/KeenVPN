@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.domain.config_document import ConfigDocument, ConfigDocumentError, ConfigDocumentErrorCode
 from keenvpn.domain.routing import ConditionFamily
 from keenvpn.domain.xray_config import (
-    RuleListValue, XrayConfigError, XrayConfigErrorCode, XrayConfigSet, _duplicates, rule_list_values,
+    RuleListValue, XrayConfigError, XrayConfigErrorCode, XrayConfigSet, _duplicates, decode_string_list, rule_list_values,
     summarize_xray_config, validate_xray_config_set,
 )
 from tests.support.isolation import forbid_external_effects
@@ -361,6 +361,15 @@ class SyntheticXrayConfigTests(unittest.TestCase):
                     diagnostic = config.to_diagnostic()
                 self.assertEqual([value.path.split(".")[-1].split("[")[0] for value in values], expected)
                 self.assertEqual(diagnostic["unsupported_paths"], [])
+
+    def test_decode_string_list_follows_xray_decoder(self):
+        for value, expected in (
+            ("a,b", ("a", "b")), ("", ("",)), ("a,, b", ("a", "", " b")), (["a,b"], ("a,b",)), ([], ()),
+            (["a", "b"], ("a", "b")), (None, None), (7, None), (["a", 7], None), ({"a": 1}, None), (True, None),
+            (("a",), None),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(decode_string_list(value), expected)
 
     def test_duplicate_tags_keep_order_without_repeats_in_linear_time(self):
         outbounds = [{"tag": tag, "protocol": "freedom"} for tag in ("b", "a", "b", "c", "a", "b", "a")]

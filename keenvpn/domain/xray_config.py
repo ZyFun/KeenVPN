@@ -97,6 +97,19 @@ def _text(value: object) -> str | None:
     return value if type(value) is str else None
 
 
+def decode_string_list(value: object) -> tuple[str, ...] | None:
+    """Разобрать `StringList` Xray: массив строк либо строка с разделением по запятым.
+
+    Строка делится без удаления пробелов и пустых элементов, элементы массива
+    повторно не делятся; `None` означает значение, которое декодер Xray отклонит.
+    """
+    if type(value) is str:
+        return tuple(value.split(","))
+    if type(value) is list and all(type(item) is str for item in value):
+        return tuple(value)
+    return None
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class RuleListValue:
     """Одно значение списка доменов или адресов правила маршрутизации либо DNS.

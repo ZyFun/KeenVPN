@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application.backup import BackupError, create_backup
 from keenvpn.adapters.router_backup import (
     BackupConfig, RouterBackupStorage, digest_file, inventory, load_config,
-    snapshot_sqlite, verify_archive,
+    snapshot_sqlite, sqlite_source_info, verify_archive,
 )
 
 
@@ -100,6 +100,62 @@ class RouterBackupTests(unittest.TestCase):
         with self.assertRaises(BackupError):
             create_backup(self.storage)
         self.assertFalse(self.target.exists())
+
+    def test_sqlite_snapshot_preserves_source_metadata_in_archive_and_manifest(self):
+        self.database.chmod(0o640)
+        source = self.database.stat()
+        result = create_backup(self.storage)
+        name = "data/keenvpn/vpn-history/history.sqlite"
+        with tarfile.open(self.target / result.name) as archive:
+            member = archive.getmember(name)
+            record = json.load(archive.extractfile("manifest.json"))["files"][name]
+        self.assertEqual((member.mode, member.uid, member.gid),
+                         (0o640, source.st_uid, source.st_gid))
+        self.assertEqual((record["mode"], record["uid"], record["gid"]),
+                         (0o640, source.st_uid, source.st_gid))
+
+    def test_sqlite_snapshot_uses_source_service_owner(self):
+        self.make_old()
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        chown = os.chown
+        owners = []
+
+        def source_info(path):
+            info = sqlite_source_info(path)
+            if path == self.database:
+                values = list(info)
+                values[4:6] = [12345, 12346]
+                return os.stat_result(values)
+            return info
+
+        def reject_owner(path, uid, gid, **kwargs):
+            if Path(path) == self.storage.work / "history.sqlite":
+                owners.append((uid, gid))
+                raise PermissionError("fixture")
+            return chown(path, uid, gid, **kwargs)
+
+        with patch("keenvpn.adapters.router_backup.sqlite_source_info", side_effect=source_info), \
+                patch("keenvpn.adapters.router_backup.os.chown", side_effect=reject_owner):
+            with self.assertRaises(PermissionError):
+                create_backup(self.storage)
+        self.assertEqual(owners, [(12345, 12346)])
+        self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
+
+    def test_sqlite_snapshot_metadata_failure_preserves_old_archives(self):
+        self.make_old()
+        self.database.chmod(0o640)
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        chmod = os.chmod
+
+        def reject_mode(path, mode, **kwargs):
+            if self.storage.work is not None and Path(path) == self.storage.work / "history.sqlite" and mode == 0o640:
+                raise PermissionError("fixture")
+            return chmod(path, mode, **kwargs)
+
+        with patch("keenvpn.adapters.router_backup.os.chmod", side_effect=reject_mode):
+            with self.assertRaises(PermissionError):
+                create_backup(self.storage)
+        self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
 
     def test_wrong_uuid_and_read_only_mount(self):
         for changed in (self.mounts.read_text().replace("/dev/sda3", "/dev/sda2"),

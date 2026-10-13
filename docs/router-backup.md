@@ -59,6 +59,8 @@ cron и размещение команды выполняются отдель�
   init, cron, пользовательские скрипты, настройки и SSH-материалы.
 - `data/`: постоянные файлы DATA; `keenvpn/vpn-history/history.sqlite` заменена
   согласованным online-снимком SQLite с `PRAGMA integrity_check`.
+  Снимок сохраняет владельца, группу и права исходной базы; ошибка их переноса
+  отменяет публикацию и сохраняет старые архивы.
 - `keenetic/running-config.txt`: текущая конфигурация Keenetic без ANSI-кодов;
   это **running-config**, а не отдельный экспорт сохранённой startup-config.
 - `metadata/`: версии пакетов, Keenetic и Xray; `manifest.json`: версия формата,

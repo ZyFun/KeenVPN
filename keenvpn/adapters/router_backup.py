@@ -389,6 +389,9 @@ class RouterBackupStorage:
         check_sqlite_identity(source_database, self.database_identity)
         snapshot_sqlite(source_database, snapshot)
         check_sqlite_identity(source_database, self.database_identity)
+        # Смена владельца может сбросить специальные биты, поэтому права — после неё.
+        os.chown(snapshot, database_info.st_uid, database_info.st_gid, follow_symlinks=False)
+        os.chmod(snapshot, stat.S_IMODE(database_info.st_mode))
         database = self.stage / "data" / HISTORY
         with sqlite_parent(database) as (absolute, parent):
             os.replace(snapshot, absolute.name, dst_dir_fd=parent)

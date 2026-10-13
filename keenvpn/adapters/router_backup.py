@@ -72,9 +72,21 @@ class BackupConfig:
 
 
 def load_config(path: Path) -> BackupConfig:
-    """Не исполнять конфигурацию; принимать только известные JSON-поля."""
-    with path.open("rb") as source:
-        raw = source.read(4097)
+    """Проверить открытый приватный файл root до чтения известных JSON-полей."""
+    message = "Конфигурация резервных копий должна быть файлом root с правами 600 без ссылки."
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 \
+                    or stat.S_IMODE(info.st_mode) != 0o600:
+                raise BackupError(message)
+            with os.fdopen(descriptor, "rb", closefd=False) as source:
+                raw = source.read(4097)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        raise BackupError(message) from None
     if len(raw) > 4096:
         raise BackupError("Конфигурация резервных копий слишком велика.")
     try:

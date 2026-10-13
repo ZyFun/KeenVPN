@@ -8,13 +8,15 @@ import io
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application.backup import BackupError, create_backup
@@ -882,6 +884,155 @@ class RouterBackupTests(unittest.TestCase):
     def test_no_rotation_without_publication(self):
         with self.assertRaises(BackupError):
             self.storage.retain()
+
+
+class BackupConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.path = self.root / "vpn-backup.json"
+        self.config = BackupConfig(*UUIDS)
+        self.path.write_text(json.dumps(self.config.__dict__))
+        self.path.chmod(0o600)
+        self.real_fstat = os.fstat
+
+        def root_owner(descriptor):
+            values = list(self.real_fstat(descriptor))
+            values[4] = 0
+            return os.stat_result(values)
+
+        # Владельца root моделируем, права и тип проверяем на настоящих файлах.
+        owner = patch("keenvpn.adapters.router_backup.os.fstat", side_effect=root_owner)
+        owner.start()
+        self.addCleanup(owner.stop)
+
+    def test_regular_root_owned_private_config_is_accepted(self):
+        self.assertEqual(load_config(self.path), self.config)
+
+    def test_insecure_config_modes_are_rejected_before_parsing(self):
+        for mode in (0o400, 0o640, 0o644, 0o660, 0o666, 0o4600):
+            with self.subTest(mode=oct(mode)):
+                self.path.chmod(mode)
+                self.assertEqual(self.path.stat().st_mode & 0o7777, mode)
+                with patch("keenvpn.adapters.router_backup.json.loads") as parse:
+                    with self.assertRaises(BackupError):
+                        load_config(self.path)
+                    parse.assert_not_called()
+
+    def test_non_root_config_owner_is_rejected(self):
+        def service_owner(descriptor):
+            values = list(self.real_fstat(descriptor))
+            values[4] = 12345
+            return os.stat_result(values)
+
+        with patch("keenvpn.adapters.router_backup.os.fstat", side_effect=service_owner):
+            with self.assertRaises(BackupError):
+                load_config(self.path)
+
+    def test_config_links_are_rejected(self):
+        for target in (self.path, self.root / "missing"):
+            with self.subTest(target=target.name):
+                link = self.root / "link"
+                link.symlink_to(target)
+                try:
+                    with self.assertRaises(BackupError):
+                        load_config(link)
+                finally:
+                    link.unlink()
+
+    def test_config_directory_is_rejected(self):
+        with self.assertRaises(BackupError):
+            load_config(self.root)
+
+    def test_config_fifo_is_rejected_without_blocking(self):
+        fifo = self.root / "pipe"
+        os.mkfifo(fifo, 0o600)
+        code = """import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from keenvpn.adapters.router_backup import load_config
+from keenvpn.application.backup import BackupError
+try:
+    load_config(Path(sys.argv[1]))
+except BackupError:
+    raise SystemExit(0)
+raise SystemExit(1)
+"""
+        result = subprocess.run(
+            [sys.executable, "-I", "-S", "-B", "-c", code, str(fifo),
+             str(Path(__file__).resolve().parents[1])],
+            timeout=3, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+
+    def test_config_reads_the_validated_descriptor_after_name_replacement(self):
+        real_open = os.open
+        opened = []
+
+        def replace_after_open(path, flags, *args, **kwargs):
+            descriptor = real_open(path, flags, *args, **kwargs)
+            opened.append(descriptor)
+            self.path.rename(self.root / "original")
+            self.path.write_text(json.dumps({**self.config.__dict__, "keep": 1}))
+            self.path.chmod(0o666)
+            return descriptor
+
+        with patch("keenvpn.adapters.router_backup.os.open", side_effect=replace_after_open):
+            self.assertEqual(load_config(self.path), self.config)
+        self.assertEqual(len(opened), 1)
+        with self.assertRaises(OSError):
+            self.real_fstat(opened[0])
+
+    def test_config_validates_opened_file_even_if_name_now_points_to_safe_file(self):
+        self.path.chmod(0o666)
+        real_open = os.open
+        opened = []
+
+        def replace_after_open(path, flags, *args, **kwargs):
+            descriptor = real_open(path, flags, *args, **kwargs)
+            opened.append(descriptor)
+            self.path.rename(self.root / "unsafe")
+            self.path.write_text(json.dumps(self.config.__dict__))
+            self.path.chmod(0o600)
+            return descriptor
+
+        with patch("keenvpn.adapters.router_backup.os.open", side_effect=replace_after_open):
+            with self.assertRaises(BackupError):
+                load_config(self.path)
+        self.assertEqual(len(opened), 1)
+        with self.assertRaises(OSError):
+            self.real_fstat(opened[0])
+
+    def test_insecure_config_stops_cli_before_storage_and_archive_creation(self):
+        original_path = sys.path[:]
+        try:
+            namespace = runpy.run_path(str(Path(__file__).resolve().parents[1]
+                                           / "scripts/router_backup.py"))
+        finally:
+            sys.path[:] = original_path
+        main = namespace["main"]
+        storage, backup, output = Mock(), Mock(), Mock()
+        self.path.chmod(0o666)
+        with patch.dict(main.__globals__, {
+            "Path": lambda _path: self.path, "RouterBackupStorage": storage,
+            "create_backup": backup, "syslog": Mock(), "signal": Mock(), "print": output,
+        }), patch.object(sys, "argv", ["vpn-backup"]), \
+                patch("os.geteuid", return_value=0), patch("os.umask"), patch("os.nice"):
+            self.assertEqual(main(), 1)
+        storage.assert_not_called()
+        backup.assert_not_called()
+        self.assertNotIn(str(self.path), str(output.call_args))
+        self.assertNotIn(UUIDS[0], str(output.call_args))
+
+    def test_secure_config_still_validates_json_fields_and_size(self):
+        for raw in ("[]", "{}", "invalid", " " * 4097,
+                    json.dumps({**self.config.__dict__, "command": "bad"}),
+                    json.dumps({**self.config.__dict__, "keep": True})):
+            with self.subTest(raw=raw[:30]):
+                self.path.write_text(raw)
+                with self.assertRaises(BackupError):
+                    load_config(self.path)
 
 
 class BackupOrderingTests(unittest.TestCase):

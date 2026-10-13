@@ -435,6 +435,71 @@ class TargetResolutionTests(unittest.TestCase):
                     self.assertEqual(scheme.reasons, ())
                     self.assertEqual(scheme.policy.rules[0].action, expected.action)
 
+    def test_direct_and_block_aliases_preserve_actions_and_parts(self):
+        for protocol, action in (("direct", DIRECT), ("DIRECT", DIRECT), ("block", BLOCK), ("BlOcK", BLOCK)):
+            with self.subTest(protocol=protocol):
+                config = XrayConfigSet((part("routing.json", {
+                    "outbounds": [{"tag": "target", "protocol": protocol}],
+                    "routing": {"rules": [rule(domain=["domain:a.example"], outboundTag="target"),
+                                          final(outboundTag="target")]},
+                }),))
+                before = [(document.content, document.sha256) for document in config.parts]
+                with forbid_external_effects():
+                    scheme = import_routing_scheme(config)
+                self.assertEqual([group.action for group in scheme.groups], [action, action])
+                self.assertFalse(scheme.read_only)
+                self.assertEqual(scheme.reasons, ())
+                self.assertIs(scheme.policy.rules[0].action, action)
+                self.assertEqual(scheme.policy.final_rule, FinalRoutingRule(action))
+                self.assertEqual([(document.content, document.sha256) for document in config.parts], before)
+                validate_routing_scheme(scheme)
+
+    def test_alias_balancers_and_fallbacks_keep_direction_ambiguity(self):
+        cases = (("direct", "freedom", DIRECT), ("freedom", "direct", DIRECT),
+                 ("block", "blackhole", BLOCK), ("blackhole", "block", BLOCK),
+                 ("trojan", "block", None), ("direct", "trojan", None))
+        for primary, reserve, action in cases:
+            with self.subTest(primary=primary, reserve=reserve):
+                scheme = scheme_for(
+                    [final(balancerTag="pool")],
+                    outbounds=[{"tag": "primary", "protocol": primary}, {"tag": "reserve", "protocol": reserve}],
+                    balancers=[{"tag": "pool", "selector": ["primary"], "fallbackTag": "reserve"}],
+                )
+                group = scheme.groups[0]
+                self.assertIs(group.action, action)
+                self.assertEqual((group.target.outbound_tags, group.target.fallback_tag), (("primary",), "reserve"))
+                if action is None:
+                    self.assertEqual(group.target.reasons, (ImportReason.FALLBACK_MIXED,))
+                    self.assertTrue(group.read_only and scheme.read_only)
+                    self.assertIsNone(scheme.policy)
+                else:
+                    self.assertEqual(group.target.reasons, ())
+                    self.assertFalse(group.read_only or scheme.read_only)
+                    self.assertEqual(scheme.policy.final_rule, FinalRoutingRule(action))
+                validate_routing_scheme(scheme)
+        mixed = scheme_for(
+            [final(balancerTag="pool")],
+            outbounds=[{"tag": "alias-direct", "protocol": "direct"}, {"tag": "alias-block", "protocol": "block"}],
+            balancers=[{"tag": "pool", "selector": ["alias-"]}],
+        )
+        self.assertEqual(mixed.groups[0].target.reasons, (ImportReason.BALANCER_MIXED,))
+        self.assertIsNone(mixed.policy)
+
+    def test_chained_alias_outbounds_remain_unresolved(self):
+        for protocol in ("direct", "block"):
+            for chain in ({"proxySettings": {"tag": "proxy-one"}},
+                          {"streamSettings": {"sockopt": {"dialerProxy": "proxy-one"}}}):
+                with self.subTest(protocol=protocol, chain=chain):
+                    scheme = scheme_for(
+                        [final(outboundTag="target")],
+                        outbounds=[*OUTBOUNDS, {"tag": "target", "protocol": protocol, **chain}],
+                    )
+                    group = scheme.groups[0]
+                    self.assertIsNone(group.action)
+                    self.assertEqual(group.target.reasons, (ImportReason.OUTBOUND_CHAINED,))
+                    self.assertTrue(group.read_only and scheme.read_only)
+                    self.assertIsNone(scheme.policy)
+
     def test_balancer_targets_keep_selection_and_fallback_without_choosing_a_profile(self):
         R, K = ImportReason, RuleTargetKind
         cases = (

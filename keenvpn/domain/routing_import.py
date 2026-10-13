@@ -38,9 +38,9 @@ XRAY_RULE_CONDITION_FIELDS = frozenset({
     "inboundTag", "protocol", "attrs", "localIP", "localPort", "process", "webhook",
 })
 """Поля условий правила, которые читает `parseFieldRule` Xray v26.3.27; регистр имён учитывается."""
-DIRECT_OUTBOUND_PROTOCOLS = frozenset({"freedom"})
+DIRECT_OUTBOUND_PROTOCOLS = frozenset({"freedom", "direct"})
 """Протоколы outbound, означающие прямой выход."""
-BLOCK_OUTBOUND_PROTOCOLS = frozenset({"blackhole"})
+BLOCK_OUTBOUND_PROTOCOLS = frozenset({"blackhole", "block"})
 """Протоколы outbound, означающие блокировку."""
 VPN_OUTBOUND_PROTOCOLS = frozenset({"trojan", "vless", "vmess", "shadowsocks", "socks", "http", "wireguard"})
 """Протоколы outbound, означающие направление через прокси или туннель; профиль не выбирается."""

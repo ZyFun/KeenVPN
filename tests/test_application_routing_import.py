@@ -175,6 +175,27 @@ class ImportRoutingSchemeTests(unittest.TestCase):
                 self.assertEqual(sources.calls, (1, 1, 1, LIST_NAMES))
                 self.assert_private(result)
 
+    def test_direct_and_block_aliases_reach_view_with_policy(self):
+        for protocol, action in (("direct", "DIRECT"), ("block", "BLOCK")):
+            with self.subTest(protocol=protocol):
+                sources = snapshot_proxy_sources()
+                config = XrayConfigSet((part("routing.json", {
+                    "outbounds": [{"tag": "target", "protocol": protocol}],
+                    "routing": {"rules": [{"network": "tcp,udp", "outboundTag": "target"}]},
+                }),))
+                before = [(document.content, document.sha256) for document in config.parts]
+                sources.xray.outcome = config
+                with forbid_external_effects():
+                    result = handler_for(sources).execute(ImportRoutingScheme())
+                self.assertTrue(result.succeeded)
+                data = result.to_dict()["data"]
+                self.assertFalse(data["read_only"])
+                self.assertEqual((data["final_action"], data["policy"]["final_action"]), (action, action))
+                self.assertEqual(data["groups"][0]["target"]["reasons"], [])
+                self.assertEqual([(document.content, document.sha256) for document in config.parts], before)
+                self.assertEqual(sources.calls, (1, 1, 1, LIST_NAMES))
+                self.assert_private(result)
+
     def test_wrong_command_and_version_do_not_read_sources(self):
         for command, code in (
             ("import", "invalid_command"), (None, "invalid_command"),

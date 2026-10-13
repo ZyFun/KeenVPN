@@ -84,8 +84,8 @@ JSON-декодер Go, которым Xray читает конфигураци�
 
 | Протокол outbound | Действие |
 |---|---|
-| `freedom` | `DIRECT` |
-| `blackhole` | `BLOCK` |
+| `freedom`, `direct` | `DIRECT` |
+| `blackhole`, `block` | `BLOCK` |
 | `trojan`, `vless`, `vmess`, `shadowsocks`, `socks`, `http`, `wireguard` | `VPN` — направление без выбора профиля |
 | Другой, отсутствующий или не строка | не определено, `outbound_protocol_unsupported` |
 

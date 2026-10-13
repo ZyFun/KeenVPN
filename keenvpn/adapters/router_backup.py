@@ -100,6 +100,14 @@ def fingerprint(info: os.stat_result) -> tuple:
             info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+def root_revision(path: Path) -> tuple:
+    """Идентичность и права корня без времени, меняющегося при записи его детей."""
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise BackupError("Корень источника отсутствует или заменён ссылкой.")
+    return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
+
+
 def inventory(root: Path, exclusions: tuple[str, ...]) -> dict[str, tuple]:
     """Обойти ровно один раздел, не переходя по символическим ссылкам."""
     device = root.stat().st_dev
@@ -179,17 +187,18 @@ def sqlite_source(path: Path):
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode):
                 raise BackupError("База истории имеет неподдерживаемый тип.")
-            identities.append((info.st_dev, info.st_ino))
+            # Права и владелец входят в ревизию, содержимое и времена — нет.
+            identities.append((info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid))
             yield tuple(identities)
         finally:
             os.close(descriptor)
 
 
 def check_sqlite_identity(path: Path, expected: tuple) -> None:
-    """Разрешать запись WAL, но отклонять смену файла и родительских каталогов."""
+    """Разрешать WAL, но отклонять смену файла, его метаданных или каталогов."""
     with sqlite_source(path) as actual:
         if actual != expected:
-            raise BackupError("Источник SQLite заменён: архив не опубликован.")
+            raise BackupError("Источник SQLite или его метаданные изменились: архив не опубликован.")
 
 
 def snapshot_sqlite(source: Path, destination: Path, timeout: float = 60) -> None:
@@ -354,6 +363,7 @@ class RouterBackupStorage:
         check_sqlite_identity(source_database, self.database_identity)
         database_info = sqlite_source_info(source_database)
         self.sources = ((self.opt, "opt", EXCLUDED_OPT), (self.data, "data", EXCLUDED_DATA))
+        self.root_before = {label: root_revision(root) for root, label, _exclude in self.sources}
         self.before = {label: inventory(root, exclude) for root, label, exclude in self.sources}
         total = sum(info[5] for entries in self.before.values() for info in entries.values()
                     if len(info) > 5 and stat.S_ISREG(info[2]))
@@ -414,8 +424,23 @@ class RouterBackupStorage:
                 raise BackupError("Отсутствуют обязательные сведения о версиях.")
             (self.stage / "metadata" / name).write_bytes(value)
         (self.stage / "RESTORE.txt").write_text(RESTORE_GUIDE, encoding="utf-8")
+        # Назначать метаданные корней после заполнения дерева, включая снимок SQLite.
+        self.check_source_roots()
+        for root, label, _exclude in self.sources:
+            revision = self.root_before[label]
+            base = self.stage / label
+            os.chown(base, revision[3], revision[4], follow_symlinks=False)
+            shutil.copystat(root, base, follow_symlinks=False)
+        self.check_source_roots()
+
+    def check_source_roots(self) -> None:
+        """Не публиковать корни с устаревшим владельцем, правами или идентичностью."""
+        if any(root_revision(root) != self.root_before[label]
+               for root, label, _exclude in self.sources):
+            raise BackupError("Метаданные корней источников изменились: архив не опубликован.")
 
     def create_and_verify(self) -> None:
+        self.check_source_roots()
         database_name = "data/" + HISTORY
         # Снимок обязателен как отдельный файл внутри payload, а не цель ссылки.
         sqlite_source_info(self.stage / database_name)
@@ -459,6 +484,7 @@ class RouterBackupStorage:
         for root, label, exclude in self.sources:
             if inventory(root, exclude) != self.before[label]:
                 raise BackupError("Исходные файлы изменились: архив не опубликован.")
+        self.check_source_roots()
         native = self.command([str(self.system_root / "bin/ndmc"), "-c", "show running-config"])
         native = re.sub(bytes([27]) + rb"\[[0-9;]*[A-Za-z]", b"", native)
         if hashlib.sha256(native).hexdigest() != self.native_revision:
@@ -475,6 +501,7 @@ class RouterBackupStorage:
 
     def publish(self) -> None:
         self.check_mounts()
+        self.check_source_roots()
         check_sqlite_identity(self.data / HISTORY, self.database_identity)
         archive = Path(self.name)
         checksum = Path(self.name + ".sha256")

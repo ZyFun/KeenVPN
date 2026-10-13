@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application.backup import BackupError, create_backup
 from keenvpn.adapters.router_backup import (
     BackupConfig, RouterBackupStorage, digest_file, inventory, load_config,
-    snapshot_sqlite, sqlite_source_info, verify_archive,
+    root_revision, snapshot_sqlite, sqlite_source_info, verify_archive,
 )
 
 
@@ -162,6 +162,115 @@ class RouterBackupTests(unittest.TestCase):
                         create_backup(self.storage)
                 self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
                 self.storage = FixtureStorage(self.config, system_root=self.root, mounts_file=self.mounts)
+
+    def test_source_root_metadata_survives_private_umask(self):
+        opt = self.root / "opt"
+        opt.chmod(0o755)
+        self.data.chmod(0o2775)
+        expected = {label: source.stat() for label, source in (("opt", opt), ("data", self.data))}
+        old_umask = os.umask(0o077)
+        try:
+            result = create_backup(self.storage)
+        finally:
+            os.umask(old_umask)
+        with tarfile.open(self.target / result.name) as archive:
+            records = json.load(archive.extractfile("manifest.json"))["files"]
+            for label, info in expected.items():
+                with self.subTest(root=label):
+                    member = archive.getmember(label)
+                    self.assertEqual((member.mode, member.uid, member.gid),
+                                     (info.st_mode & 0o7777, info.st_uid, info.st_gid))
+                    record = records[label]
+                    self.assertEqual((record["mode"], record["uid"], record["gid"]),
+                                     (info.st_mode & 0o7777, info.st_uid, info.st_gid))
+        self.assertEqual(self.target.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.target / result.name).stat().st_mode & 0o777, 0o600)
+
+    def test_changed_root_metadata_prevents_publication_at_each_stage(self):
+        self.make_old()
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        for root in (self.root / "opt", self.data):
+            for phase in ("prepare", "create_and_verify", "publish"):
+                with self.subTest(root=root.name, phase=phase):
+                    mode = root.stat().st_mode & 0o7777
+                    original = getattr(self.storage, phase)
+
+                    def change():
+                        if phase == "prepare":
+                            command = self.storage.command
+                            def change_on_export(args):
+                                if args[-1] == "show running-config":
+                                    root.chmod(0o750)
+                                return command(args)
+                            with patch.object(self.storage, "command", side_effect=change_on_export):
+                                original()
+                        else:
+                            root.chmod(0o750)
+                            original()
+
+                    try:
+                        with patch.object(self.storage, phase, side_effect=change):
+                            with self.assertRaises(BackupError):
+                                create_backup(self.storage)
+                        self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
+                    finally:
+                        root.chmod(mode)
+                        self.storage = FixtureStorage(self.config, system_root=self.root, mounts_file=self.mounts)
+
+    def test_source_root_metadata_failure_preserves_old_archives(self):
+        self.make_old()
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        for operation in ("os.chown", "shutil.copystat"):
+            with self.subTest(operation=operation):
+                original = os.chown if operation == "os.chown" else shutil.copystat
+
+                def reject(*args, **kwargs):
+                    target = args[0] if operation == "os.chown" else args[1]
+                    if Path(target) == self.storage.stage / "opt":
+                        raise PermissionError("fixture")
+                    return original(*args, **kwargs)
+
+                with patch("keenvpn.adapters.router_backup." + operation, side_effect=reject):
+                    with self.assertRaises(PermissionError):
+                        create_backup(self.storage)
+                self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
+                self.storage = FixtureStorage(self.config, system_root=self.root, mounts_file=self.mounts)
+
+    def test_source_root_service_owner_is_applied(self):
+        self.make_old()
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        chown = os.chown
+        owners = []
+
+        def service_owner(path):
+            revision = root_revision(path)
+            return (*revision[:3], 12345, 12346) if path == self.root / "opt" else revision
+
+        def reject_owner(path, uid, gid, **kwargs):
+            if Path(path) == self.storage.stage / "opt":
+                owners.append((uid, gid))
+                raise PermissionError("fixture")
+            return chown(path, uid, gid, **kwargs)
+
+        with patch("keenvpn.adapters.router_backup.root_revision", side_effect=service_owner), \
+                patch("keenvpn.adapters.router_backup.os.chown", side_effect=reject_owner):
+            with self.assertRaises(PermissionError):
+                create_backup(self.storage)
+        self.assertEqual(owners, [(12345, 12346)])
+        self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
+
+    def test_source_root_timestamp_change_does_not_prevent_publication(self):
+        original = self.storage.publish
+
+        def change_timestamps():
+            for root in (self.root / "opt", self.data):
+                info = root.stat()
+                os.utime(root, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+            original()
+
+        with patch.object(self.storage, "publish", side_effect=change_timestamps):
+            result = create_backup(self.storage)
+        self.assertTrue((self.target / result.name).exists())
 
     def test_sqlite_snapshot_preserves_source_metadata_in_archive_and_manifest(self):
         self.database.chmod(0o640)
@@ -644,6 +753,92 @@ class RouterBackupTests(unittest.TestCase):
         with sqlite3.connect(restored) as db:
             self.assertEqual(db.execute("SELECT * FROM history").fetchall(), [("fixture",)])
         db.close()
+
+    def test_sqlite_mode_change_at_each_stage_preserves_previous_backups(self):
+        self.make_old()
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        for phase in ("copy", "snapshot", "create_and_verify", "publish"):
+            with self.subTest(phase=phase):
+                self.database.chmod(0o600)
+                if phase == "copy":
+                    original = shutil.copyfileobj
+                    def change(*args, **kwargs):
+                        self.database.chmod(0o640)
+                        return original(*args, **kwargs)
+                    target = "keenvpn.adapters.router_backup.shutil.copyfileobj"
+                elif phase == "snapshot":
+                    original = snapshot_sqlite
+                    def change(*args, **kwargs):
+                        original(*args, **kwargs)
+                        self.database.chmod(0o640)
+                    target = "keenvpn.adapters.router_backup.snapshot_sqlite"
+                else:
+                    original = getattr(self.storage, phase)
+                    def change():
+                        self.database.chmod(0o640)
+                        original()
+                    target = None
+                try:
+                    context = patch(target, side_effect=change) if target else patch.object(
+                        self.storage, phase, side_effect=change)
+                    with context:
+                        with self.assertRaises(BackupError):
+                            create_backup(self.storage)
+                    self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
+                finally:
+                    self.database.chmod(0o600)
+                    self.storage = FixtureStorage(self.config, system_root=self.root, mounts_file=self.mounts)
+
+    def test_sqlite_owner_change_without_inode_change_prevents_publication(self):
+        self.make_old()
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        database = self.database.stat()
+        fstat, copy = os.fstat, shutil.copyfileobj
+        for index in (4, 5):
+            with self.subTest(field="uid" if index == 4 else "gid"):
+                changed = False
+
+                def change_owner(*args, **kwargs):
+                    nonlocal changed
+                    changed = True
+                    return copy(*args, **kwargs)
+
+                def observe_owner(descriptor):
+                    info = fstat(descriptor)
+                    if changed and (info.st_dev, info.st_ino) == (database.st_dev, database.st_ino):
+                        values = list(info)
+                        values[index] += 1
+                        return os.stat_result(values)
+                    return info
+
+                with patch("keenvpn.adapters.router_backup.os.fstat", side_effect=observe_owner), \
+                        patch("keenvpn.adapters.router_backup.shutil.copyfileobj", side_effect=change_owner):
+                    with self.assertRaises(BackupError):
+                        create_backup(self.storage)
+                self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
+                self.storage = FixtureStorage(self.config, system_root=self.root, mounts_file=self.mounts)
+
+    def test_sqlite_mode_change_during_backup_prevents_publication(self):
+        self.make_old()
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        self.database.chmod(0o600)
+        database = self.database
+        connect = sqlite3.connect
+
+        class ChangingConnection(sqlite3.Connection):
+            def backup(self, target, *args, **kwargs):
+                super().backup(target, *args, **kwargs)
+                database.chmod(0o640)
+
+        def open_source(path, *args, **kwargs):
+            if str(path).startswith(database.as_uri()):
+                kwargs["factory"] = ChangingConnection
+            return connect(path, *args, **kwargs)
+
+        with patch("keenvpn.adapters.router_backup.sqlite3.connect", side_effect=open_source):
+            with self.assertRaises(BackupError):
+                create_backup(self.storage)
+        self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
 
     def test_busybox_blkid_full_output_and_ambiguous_uuid(self):
         self.storage.check_mounts()

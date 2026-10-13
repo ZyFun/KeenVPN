@@ -617,6 +617,59 @@ class TargetResolutionTests(unittest.TestCase):
         self.assertEqual(scheme.reasons, ())
         self.assertIsNotNone(scheme.policy)
 
+    def test_strategy_case_variants_make_balancer_read_only(self):
+        strategies = (
+            {"Type": "leastPing"}, {"TYPE": "leastPing"},
+            {"type": "random", "Type": "leastPing"}, {"Type": "leastPing", "type": "random"},
+            {"type": "leastLoad", "Settings": {}}, {"type": "leastLoad", "settings": {}, "SETTINGS": {}},
+        )
+        for strategy in strategies:
+            with self.subTest(strategy=strategy):
+                config = XrayConfigSet((part("routing.json", {
+                    "outbounds": [{"tag": "proxy-one", "protocol": "trojan"}],
+                    "routing": {
+                        "rules": [final(balancerTag="pool")],
+                        "balancers": [{"tag": "pool", "selector": ["proxy-"], "strategy": strategy}],
+                    },
+                }),))
+                before = [(document.content, document.sha256) for document in config.parts]
+                with forbid_external_effects():
+                    scheme = import_routing_scheme(config)
+                group = scheme.groups[0]
+                self.assertEqual(group.target.reasons, (ImportReason.FIELD_CASE_VARIANT,))
+                self.assertIsNone(group.action)
+                self.assertIsNone(group.target.strategy)
+                self.assertTrue(group.read_only and scheme.read_only)
+                self.assertIn(ImportReason.FIELD_CASE_VARIANT, scheme.reasons)
+                self.assertIsNone(scheme.policy)
+                self.assertEqual([(document.content, document.sha256) for document in config.parts], before)
+                validate_routing_scheme(scheme)
+
+    def test_unused_balancer_strategy_case_variant_also_blocks_policy(self):
+        scheme = scheme_for(
+            [final(outboundTag="direct")],
+            balancers=[{"tag": "unused", "selector": ["proxy-"], "strategy": {"Type": "leastPing"}}],
+        )
+        self.assertEqual(scheme.reasons, (ImportReason.FIELD_CASE_VARIANT,))
+        self.assertTrue(scheme.read_only)
+        self.assertIsNone(scheme.policy)
+
+    def test_exact_strategy_fields_and_unrelated_keys_remain_supported(self):
+        for strategy in ({"type": "leastPing"}, {"type": "leastLoad", "settings": {}},
+                         {"type": "random", "Comment": "fixture"}):
+            with self.subTest(strategy=strategy):
+                scheme = scheme_for(
+                    [final(balancerTag="pool")],
+                    balancers=[{"tag": "pool", "selector": ["proxy-"], "strategy": strategy}],
+                )
+                group = scheme.groups[0]
+                self.assertEqual(group.target.strategy, strategy["type"])
+                self.assertEqual((group.target.reasons, scheme.reasons), ((), ()))
+                self.assertFalse(group.read_only or scheme.read_only)
+                self.assertIs(group.action, VPN)
+                self.assertIsNotNone(scheme.policy)
+                validate_routing_scheme(scheme)
+
     def test_chained_outbounds_have_no_action(self):
         R, K = ImportReason, RuleTargetKind
         chains = (

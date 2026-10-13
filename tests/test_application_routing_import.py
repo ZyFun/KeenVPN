@@ -149,6 +149,32 @@ class ImportRoutingSchemeTests(unittest.TestCase):
                 self.assertEqual(sources.calls, (1, 1, 1, LIST_NAMES))
                 self.assert_private(result)
 
+    def test_strategy_case_variants_reach_view_without_guessed_strategy(self):
+        for strategy in ({"Type": "leastPing"}, {"type": "random", "Type": "leastPing"},
+                         {"type": "leastLoad", "Settings": {}}):
+            with self.subTest(strategy=strategy):
+                sources = snapshot_proxy_sources()
+                sources.xray.outcome = XrayConfigSet((part("routing.json", {
+                    "outbounds": [{"tag": "primary", "protocol": "trojan"}],
+                    "routing": {
+                        "rules": [{"network": "tcp,udp", "balancerTag": "pool"}],
+                        "balancers": [{"tag": "pool", "selector": ["primary"], "strategy": strategy}],
+                    },
+                }),))
+                with forbid_external_effects():
+                    result = handler_for(sources).execute(ImportRoutingScheme())
+                self.assertTrue(result.succeeded)
+                data = result.to_dict()["data"]
+                self.assertTrue(data["read_only"])
+                self.assertIsNone(data["policy"])
+                self.assertIn("field_case_variant", data["reasons"])
+                group = data["groups"][0]
+                self.assertEqual(group["target"]["reasons"], ["field_case_variant"])
+                self.assertEqual((group["action"], group["target"]["strategy"]), (None, None))
+                self.assertTrue(group["read_only"])
+                self.assertEqual(sources.calls, (1, 1, 1, LIST_NAMES))
+                self.assert_private(result)
+
     def test_wrong_command_and_version_do_not_read_sources(self):
         for command, code in (
             ("import", "invalid_command"), (None, "invalid_command"),

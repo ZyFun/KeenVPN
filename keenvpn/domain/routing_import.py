@@ -57,6 +57,7 @@ _PROXY_SETTINGS_FIELDS = frozenset({"tag", "transportLayer"})
 _STREAM_SETTINGS_FIELDS = frozenset({"sockopt"})
 _SOCKOPT_FIELDS = frozenset({"dialerProxy"})
 _BALANCER_FIELDS = frozenset({"tag", "selector", "fallbackTag", "strategy"})
+_STRATEGY_FIELDS = frozenset({"type", "settings"})
 _RULE_FIELDS = XRAY_RULE_CONDITION_FIELDS | _SERVICE_FIELDS
 BALANCER_STRATEGIES = frozenset({"random", "leastping", "roundrobin", "leastload"})
 """Стратегии балансировщика Xray v26.3.27; тип сравнивается без учёта регистра, как в загрузчике."""
@@ -78,6 +79,14 @@ def _case_variants(item: dict[str, object], names: frozenset[str]) -> bool:
     """
     folded = {name.casefold() for name in names}
     return any(key not in names and key.casefold() in folded for key in item)
+
+
+def _balancer_case_variants(item: dict[str, object]) -> bool:
+    """Варианты регистра полей балансировщика и вложенной стратегии."""
+    strategy = item.get("strategy")
+    return _case_variants(item, _BALANCER_FIELDS) or (
+        type(strategy) is dict and _case_variants(strategy, _STRATEGY_FIELDS)
+    )
 
 
 def safe_identifier(value: object) -> str | None:
@@ -776,7 +785,7 @@ class _TargetResolver:
             self.balancers_supported = False
             return
         for item in balancers:
-            if type(item) is dict and _case_variants(item, _BALANCER_FIELDS):
+            if type(item) is dict and _balancer_case_variants(item):
                 self.case_variant = True
             if type(item) is dict and type(item.get("tag")) is str and item["tag"]:
                 self._balancers.setdefault(item["tag"], []).append(item)
@@ -819,7 +828,7 @@ class _TargetResolver:
             return _target(RuleTargetKind.BALANCER, tag, ImportReason.TARGET_DUPLICATE)
         item = items[0]
         reasons: list[ImportReason] = []
-        if _case_variants(item, _BALANCER_FIELDS):
+        if _balancer_case_variants(item):
             reasons.append(ImportReason.FIELD_CASE_VARIANT)
         selectors = decode_string_list(item["selector"]) if item.get("selector") is not None else ()
         fallback = item.get("fallbackTag")
@@ -830,7 +839,10 @@ class _TargetResolver:
         ):
             reasons.append(ImportReason.BALANCER_INVALID)
             selectors = () if selectors is None else selectors
-        elif type(strategy) is dict and type(strategy.get("type")) is str:
+        elif (
+            type(strategy) is dict and not _case_variants(strategy, _STRATEGY_FIELDS)
+            and type(strategy.get("type")) is str
+        ):
             strategy_type = strategy["type"]
         fallback = fallback if type(fallback) is str and fallback else None
         selected = _select_outbounds(selectors, self._tags)

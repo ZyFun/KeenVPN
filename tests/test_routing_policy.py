@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.domain.routing import (
     ConditionFamily, DomainCondition, GeoDatabase, GeoDatabaseKind,
     GeoIPCondition, GeoSiteCondition, IPCondition, RoutingAction,
-    RoutingErrorCode, RoutingRule, RoutingValidationError, UnknownCondition,
+    RoutingErrorCode, RoutingRule, RoutingValidationError, UnknownCondition, UnsupportedRuleCondition,
 )
 from keenvpn.domain.routing_policy import (
     FinalRoutingRule, MatchResult, RoutingPolicy, RoutingSelection,
@@ -204,17 +204,33 @@ class RoutingPolicyTests(unittest.TestCase):
             self.policy.select_first(Mock(side_effect=KeyboardInterrupt))
 
     def test_unknown_imported_rule_stops_only_when_reached(self):
-        unknown = RoutingRule(UnknownCondition(ConditionFamily.DOMAIN, "ext:Test.dat:unknown"), RoutingAction.VPN)
-        for rules in ((unknown, self.domain), (self.domain, unknown)):
-            policy = RoutingPolicy(rules, self.final)
-            matcher = Mock(return_value=MatchResult.NO_MATCH)
-            self.assert_invalid(RoutingErrorCode.MATCH_UNKNOWN, policy.select_first, matcher)
-            self.assertEqual(matcher.call_count, rules.index(unknown))
-            self.assertIs(policy.rules[rules.index(unknown)], unknown)
-        policy = RoutingPolicy((self.domain, unknown), self.final)
-        matcher = Mock(return_value=MatchResult.MATCH)
-        self.assertIs(policy.select_first(matcher).rule, self.domain)
-        matcher.assert_called_once_with(self.domain.condition)
+        for condition in (
+            UnknownCondition(ConditionFamily.DOMAIN, "ext:Test.dat:unknown"),
+            UnsupportedRuleCondition(("inboundTag",), '{"inboundTag":["lan"]}'),
+        ):
+            unknown = RoutingRule(condition, RoutingAction.VPN)
+            for rules in ((unknown, self.domain), (self.domain, unknown)):
+                policy = RoutingPolicy(rules, self.final)
+                matcher = Mock(return_value=MatchResult.NO_MATCH)
+                self.assert_invalid(RoutingErrorCode.MATCH_UNKNOWN, policy.select_first, matcher)
+                self.assertEqual(matcher.call_count, rules.index(unknown))
+                self.assertIs(policy.rules[rules.index(unknown)], unknown)
+            policy = RoutingPolicy((self.domain, unknown), self.final)
+            matcher = Mock(return_value=MatchResult.MATCH)
+            self.assertIs(policy.select_first(matcher).rule, self.domain)
+            matcher.assert_called_once_with(self.domain.condition)
+
+    def test_unsupported_rule_condition_freezes_edits_like_unknown_reference(self):
+        placeholder = RoutingRule(UnsupportedRuleCondition(("port",), '{"port":"53"}'), RoutingAction.DIRECT)
+        policy = RoutingPolicy((placeholder, self.domain), self.final)
+        self.assertTrue(policy.read_only)
+        for function, args in (
+            (policy.insert, (1, self.ip)), (policy.move, (0, 1)), (policy.remove, (0,)),
+            (policy.with_enabled, (1, False)), (policy.with_final_action, (RoutingAction.BLOCK,)),
+        ):
+            self.assert_invalid(RoutingErrorCode.READ_ONLY, function, *args)
+        self.assertEqual(policy.active_rules, (placeholder, self.domain, self.final))
+        self.assertEqual(policy.to_diagnostic()["read_only"], True)
 
     def test_unknown_import_freezes_priority_edits_without_discarding_data(self):
         unknown = RoutingRule(UnknownCondition(ConditionFamily.IP, "  ext:Custom.dat:unknown\n"), RoutingAction.DIRECT)

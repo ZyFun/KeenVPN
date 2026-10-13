@@ -10,7 +10,6 @@ from keenvpn.domain.routing import (
     RoutingErrorCode,
     RoutingRule,
     RoutingValidationError,
-    UnknownCondition,
     _raise_detached,
 )
 
@@ -116,7 +115,7 @@ class RoutingPolicy:
 
     @property
     def read_only(self) -> bool:
-        """Не менять приоритеты, пока смысл импортированного условия неизвестен."""
+        """Не менять приоритеты, пока смысл импортированного условия или правила неизвестен."""
         return any(rule.read_only for rule in self.rules)
 
     def to_diagnostic(self) -> dict[str, int | str | bool]:
@@ -220,13 +219,13 @@ class RoutingPolicy:
 
         matcher — доверенный источник результатов для одного набора входных
         данных. Модель не проверяет его достоверность или отсутствие I/O.
-        Неизвестные импортированные условия ему не передаются.
+        Неизвестные ссылки и неподдержанные правила импорта ему не передаются.
         """
         if not callable(matcher):
             raise RoutingValidationError(RoutingErrorCode.MATCHER) from None
 
         def evaluate(index: int, rule: RoutingRule) -> MatchResult:
-            if isinstance(rule.condition, UnknownCondition):
+            if rule.read_only:
                 raise RoutingValidationError(RoutingErrorCode.MATCH_UNKNOWN) from None
             try:
                 return matcher(rule.condition)

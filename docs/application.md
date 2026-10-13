@@ -18,6 +18,7 @@
 | `InspectKeeneticState` | `InspectKeeneticStateHandler` | Читает [состояние Keenetic](keenetic-state.md) из четырёх раздельных источников и возвращает счётчики и технические идентификаторы без MAC, имён и адресов |
 | `InspectProxyConfig` | `InspectProxyConfigHandler` | Читает [конфигурацию Xray и XKeen](proxy-config.md): части Xray, `xkeen.json`, параметры init и три списка через раздельные источники и возвращает структурную сводку без доменов, адресов, путей и паролей |
 | `InspectInstallation` | `InspectInstallationHandler` | Читает [существующую установку](installation.md) поверх двух сценариев выше и двух портов: состояние Keenetic, конфигурацию Xray и XKeen, инвентарь геобаз со ссылками правил на наборы и наблюдение процесса Xray; отказ любого источника завершает чтение его кодом без частичного результата |
+| `ImportRoutingScheme` | `ImportRoutingSchemeHandler` | Переводит действующие [правила Xray в модель маршрутизации](routing-import.md) поверх `InspectProxyConfigHandler.read()`: группы условий в порядке файла, явные действия, неизвестные значения и поля только для просмотра, политика без выдуманного финального правила |
 
 Сценарии работают в памяти. Они не устанавливают соединения, не выполняют DNS,
 не запускают Xray, не записывают файлы и не меняют конфигурацию роутера.
@@ -34,7 +35,7 @@ application импортирует доменные модели и собств
 контракты, domain не зависит от application, адаптеров или интерфейса.
 
 `ConnectionLinkView`, `ConnectionProfileView`, `ProtocolSupportView`, `RouteExplanationView`,
-`KeeneticPolicyResolutionView`, `KeeneticStateView`, `ProxyConfigView`, `InstallationView` и `ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
+`KeeneticPolicyResolutionView`, `KeeneticStateView`, `ProxyConfigView`, `InstallationView`, `RoutingSchemeView` и `ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
 ошибки и преобразование `to_dict()` относятся к контракту результата: они не добавляют ANSI-оформление,
 заголовки меню или выравнивание для терминала. Отображение и сериализация одного
 результата не требуют повторного выполнения сценария или чтения его источников.
@@ -49,7 +50,7 @@ application импортирует доменные модели и собств
 | --- | --- |
 | `contract_version` | Версия формата команд и результатов, сейчас `1` (`CONTRACT_VERSION`) |
 | `operation_id` | Идентификатор вызова; по умолчанию случайная hex-строка |
-| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config` или `inspect_installation` |
+| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_installation` или `import_routing_scheme` |
 | `status` | `OperationStatus.SUCCEEDED` или `OperationStatus.FAILED` |
 | `data` | Безопасное представление при успехе, иначе `None` |
 | `error` | `ErrorDetail` при отказе, иначе `None` |
@@ -426,6 +427,33 @@ init XKeen и три списка портов и адресов через че
 
 Поля представления, правила разбора ссылок, состояния процесса и пример
 с искусственными источниками описаны в [чтении существующей установки](installation.md).
+
+## Импорт правил маршрутизации
+
+`ImportRoutingScheme` переводит действующий раздел `routing` частей Xray
+в группы условий и политику маршрутизации в памяти. Обработчик
+`ImportRoutingSchemeHandler(proxy)` принимает `InspectProxyConfigHandler`
+и читает источники его методом `read()` с теми же порядком и кодами
+отказов. Правило со списком доменов или адресов становится группой условий
+с одним действием в порядке файла; непереводимое значение сохраняется
+как неизвестная ссылка, правило с полями вне модели — как одно
+неподдержанное условие, и такие объекты остаются только для просмотра
+с машинной причиной. Действие определяется только по явному outbound или
+балансировщику; финальное правило берётся из конфигурации только
+в поддержанной форме. `RoutingSchemeView` содержит действующую часть,
+группы с причинами, счётчики и сводку политики; домены, адреса, коды
+наборов, теги правил и имена неизвестных полей в него не входят, а теги
+outbound и балансировщиков показываются только в формате технического
+идентификатора. Ничего не записывается и не сохраняется.
+
+| Ситуация | Категория и код |
+| --- | --- |
+| Неверный тип команды или версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
+| Отказ или некорректный ответ источника Xray или XKeen | коды сценария `inspect_proxy_config` без изменения |
+| Прочитанные части не удалось перевести | `invalid_source_data` / `routing_import_failed`; доменная причина в `reason` |
+
+Правила перевода, причины режима только для просмотра и пример
+с искусственными источниками описаны в [импорте правил маршрутизации](routing-import.md).
 
 ## Тестовые адаптеры в памяти
 

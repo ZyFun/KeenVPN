@@ -107,17 +107,47 @@ class ImportRoutingSchemeTests(unittest.TestCase):
         self.assertEqual(self.sources.calls, (1, 1, 1, LIST_NAMES))
         self.assertIs(type(result.data), RoutingSchemeView)
         data = result.data
-        self.assertEqual((data.routing_part, data.group_count, data.rule_count, data.final_action), ("05_routing.json", 8, 43, "VPN"))
+        self.assertEqual((data.routing_part, data.group_count, data.rule_count, data.final_action), ("05_routing.json", 8, 40, None))
         self.assertTrue(data.read_only)
-        self.assertEqual(data.reasons, ())
-        self.assertEqual(data.policy.rule_count, 43)
+        self.assertEqual(data.reasons, ("final_rule_unresolved",))
+        self.assertIsNone(data.policy)
         self.assertEqual(data.groups[0].reasons, ("unsupported_conditions",))
         self.assertEqual(data.groups[0].unsupported_fields, ("inboundTag",))
         self.assertEqual(data.groups[3].target.fallback_tag, "blocked")
         self.assertEqual(data.groups[3].target.outbound_tags, ("trojan-out",))
+        self.assertEqual((data.groups[3].target.action, data.groups[3].target.reasons), (None, ("fallback_mixed",)))
         self.assertEqual([item.count for item in data.groups[4].condition_types], [16])
         self.assertEqual(data.groups[7].kind, "final")
         self.assert_private(result)
+
+    def test_balancer_fallback_ambiguity_reaches_view_without_flattened_policy(self):
+        for protocol, reason in (("blackhole", "fallback_mixed"), ("freedom", "fallback_mixed"),
+                                 ("dns", "outbound_protocol_unsupported")):
+            with self.subTest(protocol=protocol):
+                sources = snapshot_proxy_sources()
+                config = XrayConfigSet((
+                    part("04_outbounds.json", {"outbounds": [
+                        {"tag": "primary", "protocol": "trojan"}, {"tag": "reserve", "protocol": protocol},
+                    ]}),
+                    part("05_routing.json", {"routing": {
+                        "rules": [{"network": "tcp,udp", "balancerTag": "pool"}],
+                        "balancers": [{"tag": "pool", "selector": ["primary"], "fallbackTag": "reserve"}],
+                    }}),
+                ))
+                before = [(document.content, document.sha256) for document in config.parts]
+                sources.xray.outcome = config
+                with forbid_external_effects():
+                    result = handler_for(sources).execute(ImportRoutingScheme())
+                self.assertTrue(result.succeeded)
+                data = result.to_dict()["data"]
+                self.assertEqual((data["policy"], data["final_action"], data["read_only"], data["reasons"]),
+                                 (None, None, True, ["final_rule_unresolved"]))
+                group = data["groups"][0]
+                self.assertEqual((group["action"], group["read_only"], group["target"]["reasons"]), (None, True, [reason]))
+                self.assertEqual((group["target"]["outbound_tags"], group["target"]["fallback_tag"]), (["primary"], "reserve"))
+                self.assertEqual([(document.content, document.sha256) for document in config.parts], before)
+                self.assertEqual(sources.calls, (1, 1, 1, LIST_NAMES))
+                self.assert_private(result)
 
     def test_wrong_command_and_version_do_not_read_sources(self):
         for command, code in (
@@ -255,7 +285,7 @@ class ImportRoutingSchemeTests(unittest.TestCase):
         self.assertEqual((first.target.tag, first.target.tag_known, first.target.outbound_tags), (None, True, (None,)))
         self.assertEqual((final.target.tag, final.target.outbound_tags, final.target.fallback_tag, final.target.fallback_known),
                          ("pool", (None, "proxy-safe"), None, True))
-        self.assertEqual((first.action, final.action), ("DIRECT", "VPN"))
+        self.assertEqual((first.action, final.action), ("DIRECT", None))
         text = repr(result) + json.dumps(result.to_dict(), ensure_ascii=False)
         for marker in ("198.51.100.7", "private.example.test", "example.test"):
             self.assertNotIn(marker, text)
@@ -284,7 +314,7 @@ class ImportRoutingSchemeTests(unittest.TestCase):
         self.assertIn("vpn-group", str(result.data))
         self.assertEqual(self.sources.calls, calls)
         for model, field in ((result.data, "groups"), (result.data.groups[0], "action"), (result.data.groups[0].target, "tag"),
-                             (result.data.policy, "read_only")):
+                             (result.data.groups[7].target, "action")):
             with self.assertRaises(FrozenInstanceError):
                 setattr(model, field, None)
 

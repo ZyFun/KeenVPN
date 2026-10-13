@@ -43,7 +43,7 @@ OUTBOUNDS = [
     {"tag": "proxy-one", "protocol": "trojan"}, {"tag": "proxy-two", "protocol": "VLESS"},
 ]
 FINAL = {"type": "field", "network": "tcp,udp", "balancerTag": "pool"}
-BALANCERS = [{"tag": "pool", "selector": ["proxy-"], "fallbackTag": "blocked", "strategy": {"type": "leastPing"}}]
+BALANCERS = [{"tag": "pool", "selector": ["proxy-"], "fallbackTag": "proxy-two", "strategy": {"type": "leastPing"}}]
 
 
 def part(name, document):
@@ -84,18 +84,18 @@ class SnapshotRoutingImportTests(unittest.TestCase):
         groups = self.scheme.groups
         self.assertEqual(self.scheme.routing_part, "05_routing.json")
         self.assertEqual(self.scheme.routing_parts, ("05_routing.json",))
-        self.assertEqual(self.scheme.reasons, ())
+        self.assertEqual(self.scheme.reasons, (ImportReason.FINAL_RULE_UNRESOLVED,))
         self.assertEqual(
             [(g.index, g.kind.value, [type(c).__name__ for c in g.conditions], g.action, g.read_only, g.reasons) for g in groups],
             [
                 (0, "rules", ["UnsupportedRuleCondition"], DIRECT, True, (ImportReason.UNSUPPORTED_CONDITIONS,)),
                 (1, "rules", ["DomainCondition"] * 3, DIRECT, False, ()),
-                (2, "rules", ["UnsupportedRuleCondition"], VPN, True, (ImportReason.UNSUPPORTED_CONDITIONS,)),
-                (3, "rules", ["DomainCondition"] * 2, VPN, False, ()),
+                (2, "rules", ["UnsupportedRuleCondition"], None, True, (ImportReason.UNSUPPORTED_CONDITIONS,)),
+                (3, "rules", ["DomainCondition"] * 2, None, True, ()),
                 (4, "rules", ["DomainCondition"] * 16, DIRECT, False, ()),
                 (5, "rules", ["IPCondition"] * 19, DIRECT, False, ()),
                 (6, "rules", ["GeoIPCondition"], DIRECT, False, ()),
-                (7, "final", [], VPN, False, ()),
+                (7, "final", [], None, True, ()),
             ],
         )
         self.assertEqual([g.unsupported_fields for g in groups], [("inboundTag",), (), ("inboundTag",), (), (), (), (), ()])
@@ -117,30 +117,22 @@ class SnapshotRoutingImportTests(unittest.TestCase):
         self.assertIsNone(groups[6].conditions[0].database.version)
         for index in (2, 3, 7):
             self.assertEqual(groups[index].target, RuleTarget(
-                RuleTargetKind.BALANCER, "vpn-group", ("trojan-out",), "blocked", "leastPing", VPN, (),
+                RuleTargetKind.BALANCER, "vpn-group", ("trojan-out",), "blocked", "leastPing", None, (ImportReason.FALLBACK_MIXED,),
             ))
         self.assertEqual(groups[0].target, RuleTarget(RuleTargetKind.OUTBOUND, "direct", ("direct",), None, None, DIRECT, ()))
 
-    def test_policy_preserves_group_order_without_protected_or_disabled_rules(self):
-        policy = self.scheme.policy
-        self.assertIs(type(policy), RoutingPolicy)
-        self.assertEqual(policy.rules, tuple(r for g in self.scheme.groups[:-1] for r in g.rules))
-        self.assertEqual(len(policy.rules), 43)
-        self.assertEqual(policy.final_rule, FinalRoutingRule(VPN))
-        self.assertIs(self.scheme.final_action, VPN)
-        self.assertTrue(policy.read_only and self.scheme.read_only)
-        self.assertTrue(all(r.enabled and not r.protected for r in policy.rules))
-        self.assertEqual([r.action for r in policy.rules[:6]], [DIRECT, DIRECT, DIRECT, DIRECT, VPN, VPN])
-        self.assertEqual(policy.to_diagnostic(), {
-            "rule_count": 43, "active_rule_count": 43, "protected_rule_count": 0, "final_action": "VPN", "read_only": True,
-        })
-        # Неподдержанное правило в начале останавливает выбор и объяснение, а не подменяется.
-        with self.assertRaises(RoutingValidationError) as caught:
-            policy.select_first(lambda _condition: MatchResult.NO_MATCH)
-        self.assertIs(caught.exception.code, RoutingErrorCode.MATCH_UNKNOWN)
-        report = explain_route(policy, RoutingContext(domain="host-02.example", domain_source=DomainSource.DESTINATION))
-        self.assertIsNone(report.selection)
-        self.assertIs(report.steps[0].reason, ExplanationReason.UNSUPPORTED)
+    def test_snapshot_with_mixed_fallback_keeps_groups_without_flattened_policy(self):
+        self.assertIsNone(self.scheme.policy)
+        self.assertIsNone(self.scheme.final_action)
+        self.assertTrue(self.scheme.read_only)
+        self.assertEqual([group.index for group in self.scheme.groups], list(range(8)))
+        rules = tuple(rule for group in self.scheme.groups[:-1] for rule in group.rules)
+        self.assertEqual(len(rules), 40)
+        self.assertTrue(all(rule.enabled and not rule.protected for rule in rules))
+        self.assertTrue(all(rule.action is DIRECT for rule in rules))
+        for index in (2, 3, 7):
+            self.assertEqual(self.scheme.groups[index].rules, ())
+            self.assertEqual(self.scheme.groups[index].target.reasons, (ImportReason.FALLBACK_MIXED,))
         validate_routing_scheme(self.scheme)
 
     def test_import_does_not_change_parts_and_exports_each_once(self):
@@ -159,9 +151,8 @@ class SnapshotRoutingImportTests(unittest.TestCase):
         self.assertEqual(
             {key: value for key, value in diagnostic.items() if key != "groups"},
             {
-                "routing_part": "05_routing.json", "routing_parts": ["05_routing.json"], "group_count": 8, "rule_count": 43,
-                "final_action": "VPN", "read_only": True, "reasons": [],
-                "policy": {"rule_count": 43, "active_rule_count": 43, "protected_rule_count": 0, "final_action": "VPN", "read_only": True},
+                "routing_part": "05_routing.json", "routing_parts": ["05_routing.json"], "group_count": 8, "rule_count": 40,
+                "final_action": None, "read_only": True, "reasons": ["final_rule_unresolved"], "policy": None,
             },
         )
         self.assertEqual(diagnostic["groups"][4], {
@@ -175,14 +166,14 @@ class SnapshotRoutingImportTests(unittest.TestCase):
         self.assertEqual(diagnostic["groups"][7]["target"], {
             "kind": "balancer", "tag_known": True, "tag": "vpn-group", "outbound_tags": ["trojan-out"],
             "fallback_known": True, "fallback_tag": "blocked", "strategy_known": True, "strategy": "leastPing",
-            "action": "VPN", "reasons": [],
+            "action": None, "reasons": ["fallback_mixed"],
         })
         self.assertEqual(diagnostic["groups"][7]["unsupported_fields"], [])
         text = json.dumps(diagnostic, ensure_ascii=False) + repr(self.scheme) + repr(self.scheme.groups)
-        text += repr(self.scheme.policy) + repr(self.scheme.policy.rules) + str(self.scheme.groups[0].conditions)
+        text += repr(self.scheme.policy) + str(self.scheme.groups[0].conditions)
         for marker in PRIVATE_MARKERS:
             self.assertNotIn(marker, text)
-        self.assertEqual(repr(self.scheme), "RoutingScheme(groups=8, policy=True)")
+        self.assertEqual(repr(self.scheme), "RoutingScheme(groups=8, policy=False)")
         self.assertEqual(repr(self.scheme.groups[6]), "ImportedRuleGroup(part='05_routing.json', index=6, kind=rules)")
 
 
@@ -393,7 +384,7 @@ class TargetResolutionTests(unittest.TestCase):
         {"tag": "twin", "protocol": "trojan"}, {"protocol": "freedom"}, {"tag": "", "protocol": "freedom"},
     ]
     BALANCERS = [
-        *BALANCERS,
+        {**BALANCERS[0], "fallbackTag": "blocked"},
         {"tag": "mixed", "selector": ["proxy-one", "direct"]},
         {"tag": "all", "selector": ""},
         {"tag": "prefix", "selector": "proxy-o,none-", "fallbackTag": ""},
@@ -410,7 +401,8 @@ class TargetResolutionTests(unittest.TestCase):
     ]
 
     def target(self, **fields):
-        scheme = scheme_for([rule(domain=["domain:a.example"], **fields), FINAL], balancers=self.BALANCERS, outbounds=self.OUTBOUNDS)
+        scheme = scheme_for([rule(domain=["domain:a.example"], **fields), final(outboundTag="direct")],
+                            balancers=self.BALANCERS, outbounds=self.OUTBOUNDS)
         return scheme.groups[0].target, scheme
 
     def test_outbound_targets_map_only_explicit_protocols(self):
@@ -424,8 +416,8 @@ class TargetResolutionTests(unittest.TestCase):
             ({"outboundTag": "missing"}, RuleTarget(K.OUTBOUND, "missing", (), None, None, None, (R.TARGET_UNRESOLVED,))),
             ({"outboundTag": "dup"}, RuleTarget(K.OUTBOUND, "dup", (), None, None, None, (R.TARGET_DUPLICATE,))),
             ({"outboundTag": "direct", "balancerTag": "pool"}, RuleTarget(K.BOTH, None, (), None, None, None, (R.TARGET_AMBIGUOUS,))),
-            ({"outboundTag": "", "balancerTag": "pool"}, RuleTarget(K.BALANCER, "pool", ("proxy-one", "proxy-two"), "blocked", "leastPing", VPN, ())),
-            ({"outboundTag": None, "balancerTag": "pool"}, RuleTarget(K.BALANCER, "pool", ("proxy-one", "proxy-two"), "blocked", "leastPing", VPN, ())),
+            ({"outboundTag": "", "balancerTag": "pool"}, RuleTarget(K.BALANCER, "pool", ("proxy-one", "proxy-two"), "blocked", "leastPing", None, (R.FALLBACK_MIXED,))),
+            ({"outboundTag": None, "balancerTag": "pool"}, RuleTarget(K.BALANCER, "pool", ("proxy-one", "proxy-two"), "blocked", "leastPing", None, (R.FALLBACK_MIXED,))),
             ({}, RuleTarget(K.NONE, None, (), None, None, None, (R.TARGET_MISSING,))),
             ({"outboundTag": ""}, RuleTarget(K.NONE, None, (), None, None, None, (R.TARGET_MISSING,))),
             ({"outboundTag": 5}, RuleTarget(K.NONE, None, (), None, None, None, (R.TARGET_INVALID,))),
@@ -446,7 +438,7 @@ class TargetResolutionTests(unittest.TestCase):
     def test_balancer_targets_keep_selection_and_fallback_without_choosing_a_profile(self):
         R, K = ImportReason, RuleTargetKind
         cases = (
-            ("pool", RuleTarget(K.BALANCER, "pool", ("proxy-one", "proxy-two"), "blocked", "leastPing", VPN, ())),
+            ("pool", RuleTarget(K.BALANCER, "pool", ("proxy-one", "proxy-two"), "blocked", "leastPing", None, (R.FALLBACK_MIXED,))),
             ("mixed", RuleTarget(K.BALANCER, "mixed", ("direct", "proxy-one"), None, None, None, (R.BALANCER_MIXED,))),
             ("all", RuleTarget(K.BALANCER, "all", ("direct", "blocked", "proxy-one", "proxy-two", "dns-out", "dup", "notype", "twin"),
                                None, None, None, (R.OUTBOUND_PROTOCOL_UNSUPPORTED, R.TARGET_DUPLICATE, R.BALANCER_MIXED))),
@@ -454,7 +446,7 @@ class TargetResolutionTests(unittest.TestCase):
             ("empty", RuleTarget(K.BALANCER, "empty", (), None, None, None, (R.BALANCER_EMPTY,))),
             ("noselector", RuleTarget(K.BALANCER, "noselector", (), None, None, None, (R.BALANCER_EMPTY,))),
             ("dupb", RuleTarget(K.BALANCER, "dupb", (), None, None, None, (R.TARGET_DUPLICATE,))),
-            ("nofb", RuleTarget(K.BALANCER, "nofb", ("proxy-one",), "missing", None, VPN, (R.FALLBACK_UNRESOLVED,))),
+            ("nofb", RuleTarget(K.BALANCER, "nofb", ("proxy-one",), "missing", None, None, (R.FALLBACK_UNRESOLVED,))),
             ("dupfb", RuleTarget(K.BALANCER, "dupfb", ("proxy-one",), "dup", None, None, (R.TARGET_DUPLICATE,))),
             ("badsel", RuleTarget(K.BALANCER, "badsel", (), None, None, None, (R.BALANCER_INVALID, R.BALANCER_EMPTY))),
             ("badstrategy", RuleTarget(K.BALANCER, "badstrategy", ("proxy-one",), None, None, None, (R.BALANCER_INVALID,))),
@@ -469,7 +461,85 @@ class TargetResolutionTests(unittest.TestCase):
                 self.assertEqual(target, expected)
                 self.assertEqual(scheme.groups[0].read_only, bool(expected.reasons))
         # Группа резервирования остаётся назначением с fallbackTag, а не одним профилем.
-        self.assertEqual(self.target(balancerTag="nofb")[1].policy.rules[0].action, VPN)
+        self.assertIsNone(self.target(balancerTag="nofb")[1].policy)
+
+    def test_balancer_different_fallback_action_has_no_policy(self):
+        for primary, fallback in (("trojan", "blackhole"), ("trojan", "freedom"),
+                                  ("freedom", "trojan"), ("freedom", "blackhole"),
+                                  ("blackhole", "trojan"), ("blackhole", "freedom")):
+            with self.subTest(primary=primary, fallback=fallback):
+                scheme = scheme_for(
+                    [final(balancerTag="pool")],
+                    outbounds=[{"tag": "primary", "protocol": primary}, {"tag": "reserve", "protocol": fallback}],
+                    balancers=[{"tag": "pool", "selector": ["primary"], "fallbackTag": "reserve"}],
+                )
+                group = scheme.groups[0]
+                self.assertIsNone(group.action)
+                self.assertEqual(tuple(reason.value for reason in group.target.reasons), ("fallback_mixed",))
+                self.assertTrue(group.read_only and scheme.read_only)
+                self.assertEqual((group.target.outbound_tags, group.target.fallback_tag), (("primary",), "reserve"))
+                self.assertIsNone(scheme.policy)
+                self.assertEqual(scheme.reasons, (ImportReason.FINAL_RULE_UNRESOLVED,))
+                validate_routing_scheme(scheme)
+
+    def test_balancer_unknown_fallback_action_has_no_policy(self):
+        cases = (
+            ([], ImportReason.FALLBACK_UNRESOLVED),
+            ([{"tag": "reserve", "protocol": "dns"}], ImportReason.OUTBOUND_PROTOCOL_UNSUPPORTED),
+            ([{"tag": "reserve"}], ImportReason.OUTBOUND_PROTOCOL_UNSUPPORTED),
+            ([{"tag": "reserve", "protocol": "freedom", "proxySettings": {"tag": "primary"}}], ImportReason.OUTBOUND_CHAINED),
+            ([{"tag": "reserve", "protocol": "trojan", "streamSettings": {"sockopt": {"dialerProxy": "primary"}}}],
+             ImportReason.OUTBOUND_CHAINED),
+            ([{"tag": "reserve", "protocol": "trojan"}, {"tag": "reserve", "protocol": "trojan"}],
+             ImportReason.TARGET_DUPLICATE),
+        )
+        for reserves, reason in cases:
+            with self.subTest(reserves=reserves):
+                scheme = scheme_for(
+                    [final(balancerTag="pool")], outbounds=[{"tag": "primary", "protocol": "trojan"}, *reserves],
+                    balancers=[{"tag": "pool", "selector": ["primary"], "fallbackTag": "reserve"}],
+                )
+                group = scheme.groups[0]
+                self.assertIsNone(group.action)
+                self.assertEqual(group.target.reasons, (reason,))
+                self.assertTrue(group.read_only and scheme.read_only)
+                self.assertEqual((group.target.outbound_tags, group.target.fallback_tag), (("primary",), "reserve"))
+                self.assertIsNone(scheme.policy)
+                self.assertEqual(scheme.reasons, (ImportReason.FINAL_RULE_UNRESOLVED,))
+                validate_routing_scheme(scheme)
+
+    def test_balancer_same_fallback_action_remains_supported(self):
+        for primary, fallback, action in (("trojan", "vless", VPN), ("freedom", "freedom", DIRECT),
+                                          ("blackhole", "blackhole", BLOCK)):
+            with self.subTest(primary=primary, fallback=fallback):
+                scheme = scheme_for(
+                    [final(balancerTag="pool")],
+                    outbounds=[{"tag": "primary", "protocol": primary}, {"tag": "reserve", "protocol": fallback}],
+                    balancers=[{"tag": "pool", "selector": ["primary"], "fallbackTag": "reserve"}],
+                )
+                group = scheme.groups[0]
+                self.assertIs(group.action, action)
+                self.assertEqual(group.target.reasons, ())
+                self.assertFalse(group.read_only or scheme.read_only)
+                self.assertEqual((group.target.outbound_tags, group.target.fallback_tag), (("primary",), "reserve"))
+                self.assertEqual(scheme.policy.final_rule, FinalRoutingRule(action))
+                validate_routing_scheme(scheme)
+
+    def test_nonfinal_balancer_mixed_fallback_blocks_policy(self):
+        scheme = scheme_for(
+            [rule(domain=["domain:a.example"], balancerTag="pool"), final(outboundTag="direct")],
+            outbounds=OUTBOUNDS,
+            balancers=[{"tag": "pool", "selector": ["proxy-"], "fallbackTag": "blocked"}],
+        )
+        first, last = scheme.groups
+        self.assertEqual(first.conditions, (DomainCondition("a.example"),))
+        self.assertIsNone(first.action)
+        self.assertEqual(first.rules, ())
+        self.assertTrue(first.read_only)
+        self.assertIs(last.action, DIRECT)
+        self.assertIsNone(scheme.policy)
+        self.assertEqual(scheme.reasons, (ImportReason.RULE_ACTION_UNRESOLVED,))
+        validate_routing_scheme(scheme)
 
     def test_outbounds_and_routing_follow_override_of_installed_xray(self):
         first = part("01_first.json", {"outbounds": [{"tag": "x", "protocol": "trojan"}, {"tag": "x", "protocol": "trojan"}],
@@ -856,7 +926,7 @@ class ValidationAndSafetyTests(unittest.TestCase):
         self.assertEqual(diagnostic["groups"][1]["target"], {
             "kind": "balancer", "tag_known": True, "tag": None, "outbound_tags": ["proxy-safe", None],
             "fallback_known": True, "fallback_tag": None, "strategy_known": True, "strategy": None,
-            "action": "VPN", "reasons": [],
+            "action": None, "reasons": ["fallback_mixed"],
         })
         self.assertEqual(diagnostic["groups"][2]["target"]["tag"], "proxy-safe")
         text = json.dumps(diagnostic, ensure_ascii=False) + repr(scheme) + repr(scheme.groups)

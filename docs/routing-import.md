@@ -91,7 +91,7 @@ JSON-декодер Go, которым Xray читает конфигураци�
 
 Протокол определяет выход, только если outbound не передаёт соединение другому. Непустой `proxySettings.tag` или `streamSettings.sockopt.dialerProxy` задают цепочку: Xray отправляет соединение через указанный outbound, поэтому действие не определяется и назначение получает причину `outbound_chained`. Так же трактуются неподдержанная структура этих разделов и варианты регистра их ключей. Обычные параметры `sockopt` без `dialerProxy` цепочкой не считаются.
 
-Для балансировщика выбираются outbound, тег которых начинается с одного из селекторов (пустой селектор выбирает все); действие определено, когда все выбранные outbound дают одно действие. `fallback_tag` и `strategy` сохраняются как есть: группа резервирования не сводится к одному профилю. Пустой или `null` тег означает отсутствие.
+Для балансировщика выбираются outbound, тег которых начинается с одного из селекторов (пустой селектор выбирает все); действие определено, когда все выбранные outbound и заданный fallback дают одно действие. Если fallback ведёт в другое направление, его outbound отсутствует, повторяется, имеет неизвестный протокол или передаёт соединение другому, действие не определяется: группа сохраняется только для просмотра, а упрощённая политика не собирается. Так, VPN с резервом BLOCK или DIRECT не представляется безусловным VPN. `fallback_tag` и `strategy` сохраняются как есть: группа резервирования не сводится к одному профилю. Пустой или `null` тег означает отсутствие.
 
 | Причина назначения | Условие |
 |---|---|
@@ -101,11 +101,12 @@ JSON-декодер Go, которым Xray читает конфигураци�
 | `field_case_variant` | В правиле есть вариант регистра `outboundTag` или `balancerTag` либо в балансировщике — вариант его поля |
 | `target_unresolved` | Тега нет среди действующих outbound или балансировщиков |
 | `target_duplicate` | Тег outbound или балансировщика определён более одного раза; ничего не выбирается по первому |
-| `outbound_chained` | Outbound назначения или выбранный балансировщиком outbound передаёт соединение другому |
+| `outbound_chained` | Outbound назначения, выбранный балансировщиком outbound или fallback передаёт соединение другому |
 | `balancer_invalid` | Селектор не `StringList`, `fallbackTag` не строка или `strategy` не объект |
 | `balancer_empty` | Селектор не выбрал ни одного outbound, в том числе отсутствующий селектор |
 | `balancer_mixed` | Выбранные outbound дают разные действия |
-| `fallback_unresolved` | `fallbackTag` не соответствует outbound; действие сохраняется, группа только для просмотра |
+| `fallback_unresolved` | `fallbackTag` не соответствует outbound; действие не определяется |
+| `fallback_mixed` | Fallback даёт другое действие, чем выбранные селектором outbound |
 
 ## Политика
 
@@ -148,8 +149,8 @@ assert first.reasons == (ImportReason.UNSUPPORTED_CONDITIONS,) and first.action 
 assert domains.conditions[0] == DomainCondition("example.test") and not domains.read_only
 assert isinstance(addresses.conditions[0], GeoIPCondition)
 assert final.kind.value == "final" and final.target.fallback_tag == "blocked"
-assert scheme.final_action is RoutingAction.VPN
-assert len(scheme.policy.rules) == 5 and scheme.policy.read_only
+assert final.target.reasons == (ImportReason.FALLBACK_MIXED,) and final.read_only
+assert scheme.final_action is None and scheme.policy is None and scheme.read_only
 assert "example.test" not in json.dumps(scheme.to_diagnostic())
 ```
 

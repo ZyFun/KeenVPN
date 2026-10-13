@@ -182,6 +182,8 @@ class ImportReason(StrEnum):
     """Выбранные outbound дают разные действия."""
     FALLBACK_UNRESOLVED = "fallback_unresolved"
     """`fallbackTag` балансировщика не соответствует outbound."""
+    FALLBACK_MIXED = "fallback_mixed"
+    """Fallback балансировщика даёт другое действие, чем выбранные селектором outbound."""
     UNSUPPORTED_CONDITIONS = "unsupported_conditions"
     """Поля условий Xray вне модели: `port`, `network`, `inboundTag`, `protocol` и другие."""
     UNKNOWN_FIELDS = "unknown_fields"
@@ -264,8 +266,10 @@ class RuleTarget:
 
     Для балансировщика `outbound_tags` — outbound, выбранные селектором по
     префиксу, `fallback_tag` и `strategy` — как в конфигурации; группа
-    резервирования не сводится к одному профилю. `action` равно `None`, когда
-    соответствие неоднозначно или отсутствует; причины объясняют почему.
+    резервирования не сводится к одному профилю. Действие fallback должно
+    быть определено и совпадать с действием выбранных outbound. `action`
+    равно `None`, когда соответствие неоднозначно или отсутствует;
+    причины объясняют почему.
     Теги и стратегия хранятся как написаны для доверенного кода; в вывод
     они попадают только после проверки формата.
     """
@@ -843,18 +847,20 @@ class _TargetResolver:
             reasons.append(ImportReason.BALANCER_EMPTY)
         if len(actions) > 1:
             reasons.append(ImportReason.BALANCER_MIXED)
-        blocking = bool(reasons)
         if fallback is not None:
-            if fallback not in self._by_tag:
-                reasons.append(ImportReason.FALLBACK_UNRESOLVED)
-            elif len(self._by_tag[fallback]) > 1:
-                reasons.append(ImportReason.TARGET_DUPLICATE)
-                blocking = True
+            fallback_target = self._outbound_target(fallback)
+            if fallback_target.action is None:
+                reasons.extend(
+                    ImportReason.FALLBACK_UNRESOLVED if reason is ImportReason.TARGET_UNRESOLVED else reason
+                    for reason in fallback_target.reasons
+                )
+            elif len(actions) == 1 and fallback_target.action is not actions[0]:
+                reasons.append(ImportReason.FALLBACK_MIXED)
         unique: list[ImportReason] = []
         for reason in reasons:
             if reason not in unique:
                 unique.append(reason)
-        action = None if blocking or len(actions) != 1 else actions[0]
+        action = None if reasons or len(actions) != 1 else actions[0]
         return RuleTarget(RuleTargetKind.BALANCER, tag, selected, fallback, strategy_type, action, tuple(unique))
 
 

@@ -40,7 +40,7 @@ class RouterBackupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.config = BackupConfig(*UUIDS)
         for uuid in UUIDS:
             (self.root / "tmp/mnt" / uuid).mkdir(parents=True)
@@ -205,6 +205,92 @@ class RouterBackupTests(unittest.TestCase):
         with sqlite3.connect(destination) as db:
             self.assertEqual(db.execute("SELECT * FROM history").fetchall(), [("fixture",), ("committed",)])
         db.close()
+
+    def test_sqlite_parent_links_preserve_other_database_and_old_archives(self):
+        for component in ("keenvpn", "keenvpn/vpn-history"):
+            for absolute in (False, True):
+                with self.subTest(component=component, absolute=absolute):
+                    folder = self.data / component
+                    original = self.root / "history-original"
+                    folder.rename(original)
+                    link = original if absolute else Path(os.path.relpath(original, folder.parent))
+                    folder.symlink_to(link, target_is_directory=True)
+                    self.make_old()
+                    before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+                    database_before = self.database.read_bytes()
+                    try:
+                        with self.assertRaises(BackupError):
+                            create_backup(self.storage)
+                        self.assertEqual(self.database.read_bytes(), database_before)
+                        self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
+                    finally:
+                        folder.unlink()
+                        original.rename(folder)
+                        self.storage = FixtureStorage(self.config, system_root=self.root, mounts_file=self.mounts)
+
+    def test_relative_sqlite_parent_link_cannot_overwrite_foreign_database(self):
+        original = self.root / "history-other"
+        self.database.parent.rename(original)
+        self.database.parent.symlink_to("../../../../history-other", target_is_directory=True)
+        self.make_old()
+        foreign = self.target / "history-other/history.sqlite"
+        foreign.parent.mkdir()
+        with sqlite3.connect(foreign) as db:
+            db.execute("CREATE TABLE protected(value TEXT)")
+            db.execute("INSERT INTO protected VALUES ('must-remain')")
+        db.close()
+        before = foreign.read_bytes()
+        with self.assertRaises(BackupError):
+            create_backup(self.storage)
+        self.assertEqual(foreign.read_bytes(), before)
+        self.assertEqual(len(list(self.target.glob("*.tar.gz"))), 7)
+        self.assertFalse(list(self.target.glob(".partial-*")))
+
+    def test_sqlite_snapshot_rejects_destination_parent_link(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        foreign = outside / "history.sqlite"
+        foreign.write_bytes(b"must-remain")
+        link = self.root / "snapshot-link"
+        link.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(BackupError):
+            snapshot_sqlite(self.database, link / "history.sqlite")
+        self.assertEqual(foreign.read_bytes(), b"must-remain")
+
+    def test_sqlite_snapshot_never_overwrites_existing_destination(self):
+        destination = self.root / "protected.sqlite"
+        destination.write_bytes(b"must-remain")
+        with self.assertRaises(FileExistsError):
+            snapshot_sqlite(self.database, destination)
+        self.assertEqual(destination.read_bytes(), b"must-remain")
+
+    def test_staged_parent_link_during_snapshot_preserves_foreign_database(self):
+        self.make_old()
+        outside = self.root / "outside"
+        outside.mkdir()
+        foreign = outside / "history.sqlite"
+        foreign.write_bytes(b"must-remain")
+        def replace_parent(source, destination):
+            snapshot_sqlite(source, destination)
+            folder = self.storage.stage / "data/keenvpn/vpn-history"
+            folder.rename(folder.with_name("saved-history"))
+            folder.symlink_to(outside, target_is_directory=True)
+        with patch("keenvpn.adapters.router_backup.snapshot_sqlite", side_effect=replace_parent):
+            with self.assertRaises(BackupError):
+                create_backup(self.storage)
+        self.assertEqual(foreign.read_bytes(), b"must-remain")
+        self.assertEqual(len(list(self.target.glob("*.tar.gz"))), 7)
+
+    def test_missing_staged_sqlite_snapshot_prevents_publication(self):
+        self.make_old()
+        original = self.storage.create_and_verify
+        def remove_snapshot():
+            (self.storage.stage / "data" / "keenvpn/vpn-history/history.sqlite").unlink()
+            original()
+        with patch.object(self.storage, "create_and_verify", side_effect=remove_snapshot):
+            with self.assertRaises(BackupError):
+                create_backup(self.storage)
+        self.assertEqual(len(list(self.target.glob("*.tar.gz"))), 7)
 
     def test_busybox_blkid_full_output_and_ambiguous_uuid(self):
         self.storage.check_mounts()

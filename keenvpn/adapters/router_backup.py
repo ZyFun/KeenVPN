@@ -126,10 +126,48 @@ def inventory(root: Path, exclusions: tuple[str, ...]) -> dict[str, tuple]:
     return result
 
 
+@contextmanager
+def sqlite_parent(path: Path):
+    """Закрепить каталог БД, не переходя по ссылкам ни в одном компоненте."""
+    absolute = path.absolute()
+    descriptor = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in absolute.parts[1:-1]:
+            if name == "..":
+                raise BackupError("Небезопасный путь снимка SQLite.")
+            try:
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=descriptor)
+            except OSError:
+                raise BackupError("Каталог SQLite отсутствует или заменён ссылкой.") from None
+            os.close(descriptor)
+            descriptor = child
+        yield absolute, descriptor
+    finally:
+        os.close(descriptor)
+
+
+def sqlite_source_info(path: Path) -> os.stat_result:
+    """База и все родительские каталоги должны быть обычными объектами."""
+    with sqlite_parent(path) as (absolute, descriptor):
+        try:
+            info = os.stat(absolute.name, dir_fd=descriptor, follow_symlinks=False)
+        except OSError:
+            raise BackupError("База истории отсутствует или недоступна.") from None
+        if not stat.S_ISREG(info.st_mode):
+            raise BackupError("База истории отсутствует или заменена ссылкой.")
+        return info
+
+
 def snapshot_sqlite(source: Path, destination: Path, timeout: float = 60) -> None:
     """Согласованный снимок работающей БД с ограниченным временем ожидания."""
-    if not source.is_file() or source.is_symlink():
-        raise BackupError("База истории отсутствует или заменена ссылкой.")
+    source = source.absolute()
+    sqlite_source_info(source)
+    with sqlite_parent(destination) as (destination, parent):
+        # Существующие файлы, включая ссылки и посторонние БД, не перезаписываются.
+        descriptor = os.open(destination.name, os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                             | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        os.close(descriptor)
     deadline = time.monotonic() + timeout
 
     def progress(_status, _remaining, _total):
@@ -273,12 +311,14 @@ class RouterBackupStorage:
 
     def prepare(self) -> None:
         self.check_mounts()
+        source_database = (self.data / HISTORY).absolute()
+        database_info = sqlite_source_info(source_database)
         self.sources = ((self.opt, "opt", EXCLUDED_OPT), (self.data, "data", EXCLUDED_DATA))
         self.before = {label: inventory(root, exclude) for root, label, exclude in self.sources}
         total = sum(info[5] for entries in self.before.values() for info in entries.values()
                     if len(info) > 5 and stat.S_ISREG(info[2]))
         # Дерево, архив и возможный снимок/журнал SQLite; резерв 256 МиБ.
-        required = total * 3 + (self.data / HISTORY).stat().st_size * 3 + 256 * 1024 * 1024
+        required = total * 3 + database_info.st_size * 3 + 256 * 1024 * 1024
         if shutil.disk_usage(".").free < required:
             raise BackupError("Недостаточно места: старые копии сохранены.")
         self.stage = self.work / "payload"
@@ -304,8 +344,12 @@ class RouterBackupStorage:
                 if not target.is_symlink():
                     shutil.copystat(source, target, follow_symlinks=False)
                 os.chown(target, revision[3], revision[4], follow_symlinks=False)
+        # SQLite пишет вне скопированного дерева, которое содержит ссылки источников.
+        snapshot = self.work / "history.sqlite"
+        snapshot_sqlite(source_database, snapshot)
         database = self.stage / "data" / HISTORY
-        snapshot_sqlite((self.data / HISTORY).absolute(), database)
+        with sqlite_parent(database) as (absolute, parent):
+            os.replace(snapshot, absolute.name, dst_dir_fd=parent)
         (self.stage / "keenetic").mkdir()
         native = self.command([str(self.system_root / "bin/ndmc"), "-c", "show running-config"])
         native = re.sub(bytes([27]) + rb"\[[0-9;]*[A-Za-z]", b"", native)
@@ -326,6 +370,9 @@ class RouterBackupStorage:
         (self.stage / "RESTORE.txt").write_text(RESTORE_GUIDE, encoding="utf-8")
 
     def create_and_verify(self) -> None:
+        database_name = "data/" + HISTORY
+        # Снимок обязателен как отдельный файл внутри payload, а не цель ссылки.
+        sqlite_source_info(self.stage / database_name)
         now = datetime.now(timezone.utc)
         self.name = "keenvpn-" + now.strftime("%Y%m%dT%H%M%S.%fZ") + ".tar.gz"
         records = {}
@@ -340,6 +387,8 @@ class RouterBackupStorage:
             else:
                 record.update(type="file", size=info.st_size, sha256=digest_file(path))
             records[name] = record
+        if database_name not in records or records[database_name]["type"] != "file":
+            raise BackupError("Архив не содержит обязательного снимка SQLite.")
         manifest = {
             "format": "keenvpn-installation-backup", "version": 1,
             "created_utc": now.isoformat(), "python": platform.python_version(),

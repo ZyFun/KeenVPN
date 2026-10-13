@@ -127,11 +127,14 @@ def inventory(root: Path, exclusions: tuple[str, ...]) -> dict[str, tuple]:
 
 
 @contextmanager
-def sqlite_parent(path: Path):
+def sqlite_parent(path: Path, identities: list | None = None):
     """Закрепить каталог БД, не переходя по ссылкам ни в одном компоненте."""
     absolute = path.absolute()
     descriptor = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
     try:
+        if identities is not None:
+            info = os.fstat(descriptor)
+            identities.append((info.st_dev, info.st_ino))
         for name in absolute.parts[1:-1]:
             if name == "..":
                 raise BackupError("Небезопасный путь снимка SQLite.")
@@ -142,6 +145,9 @@ def sqlite_parent(path: Path):
                 raise BackupError("Каталог SQLite отсутствует или заменён ссылкой.") from None
             os.close(descriptor)
             descriptor = child
+            if identities is not None:
+                info = os.fstat(descriptor)
+                identities.append((info.st_dev, info.st_ino))
         yield absolute, descriptor
     finally:
         os.close(descriptor)
@@ -159,6 +165,33 @@ def sqlite_source_info(path: Path) -> os.stat_result:
         return info
 
 
+@contextmanager
+def sqlite_source(path: Path):
+    """Удерживать файл открытым, чтобы его inode не переиспользовался при проверках."""
+    identities = []
+    with sqlite_parent(path, identities) as (absolute, parent):
+        try:
+            descriptor = os.open(absolute.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                 dir_fd=parent)
+        except OSError:
+            raise BackupError("База истории отсутствует или заменена ссылкой.") from None
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise BackupError("База истории имеет неподдерживаемый тип.")
+            identities.append((info.st_dev, info.st_ino))
+            yield tuple(identities)
+        finally:
+            os.close(descriptor)
+
+
+def check_sqlite_identity(path: Path, expected: tuple) -> None:
+    """Разрешать запись WAL, но отклонять смену файла и родительских каталогов."""
+    with sqlite_source(path) as actual:
+        if actual != expected:
+            raise BackupError("Источник SQLite заменён: архив не опубликован.")
+
+
 def snapshot_sqlite(source: Path, destination: Path, timeout: float = 60) -> None:
     """Согласованный снимок работающей БД с ограниченным временем ожидания."""
     source = source.absolute()
@@ -174,11 +207,15 @@ def snapshot_sqlite(source: Path, destination: Path, timeout: float = 60) -> Non
         if time.monotonic() > deadline:
             raise BackupError("Истекло время создания снимка SQLite.")
 
-    with closing(sqlite3.connect(source.as_uri() + "?mode=ro", timeout=5, uri=True)) as original:
-        with closing(sqlite3.connect(destination)) as copy:
-            original.backup(copy, pages=128, progress=progress, sleep=0.1)
-            if copy.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
-                raise BackupError("Проверка снимка SQLite не пройдена.")
+    with sqlite_source(source) as identity:
+        with closing(sqlite3.connect(source.as_uri() + "?mode=ro", timeout=5, uri=True)) as original:
+            check_sqlite_identity(source, identity)
+            with closing(sqlite3.connect(destination)) as copy:
+                original.backup(copy, pages=128, progress=progress, sleep=0.1)
+                check_sqlite_identity(source, identity)
+                if copy.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+                    raise BackupError("Проверка снимка SQLite не пройдена.")
+        check_sqlite_identity(source, identity)
     os.chmod(destination, 0o600)
 
 
@@ -300,7 +337,9 @@ class RouterBackupStorage:
             self.work = Path(tempfile.mkdtemp(prefix=".partial-", dir=".")).absolute()
             # Все дальнейшие записи — относительно закреплённого каталога.
             self.work = Path(self.work.name)
-            yield self
+            # Удерживать исходный файл до публикации; WAL и содержимое могут меняться.
+            with sqlite_source(self.data / HISTORY) as self.database_identity:
+                yield self
         finally:
             if self.work is not None:
                 shutil.rmtree(self.work, ignore_errors=True)
@@ -312,6 +351,7 @@ class RouterBackupStorage:
     def prepare(self) -> None:
         self.check_mounts()
         source_database = (self.data / HISTORY).absolute()
+        check_sqlite_identity(source_database, self.database_identity)
         database_info = sqlite_source_info(source_database)
         self.sources = ((self.opt, "opt", EXCLUDED_OPT), (self.data, "data", EXCLUDED_DATA))
         self.before = {label: inventory(root, exclude) for root, label, exclude in self.sources}
@@ -346,7 +386,9 @@ class RouterBackupStorage:
                 os.chown(target, revision[3], revision[4], follow_symlinks=False)
         # SQLite пишет вне скопированного дерева, которое содержит ссылки источников.
         snapshot = self.work / "history.sqlite"
+        check_sqlite_identity(source_database, self.database_identity)
         snapshot_sqlite(source_database, snapshot)
+        check_sqlite_identity(source_database, self.database_identity)
         database = self.stage / "data" / HISTORY
         with sqlite_parent(database) as (absolute, parent):
             os.replace(snapshot, absolute.name, dst_dir_fd=parent)
@@ -418,6 +460,7 @@ class RouterBackupStorage:
         if hashlib.sha256(native).hexdigest() != self.native_revision:
             raise BackupError("Конфигурация Keenetic изменилась: архив не опубликован.")
         self.check_mounts()
+        check_sqlite_identity(self.data / HISTORY, self.database_identity)
         self.sha256 = digest_file(self.candidate)
         self.size = self.candidate.stat().st_size
         self.checksum = self.work / (self.name + ".sha256")
@@ -428,6 +471,7 @@ class RouterBackupStorage:
 
     def publish(self) -> None:
         self.check_mounts()
+        check_sqlite_identity(self.data / HISTORY, self.database_identity)
         # Сначала checksum, последним — атомарная публикация готового архива.
         os.replace(self.checksum, Path(self.name + ".sha256"))
         os.replace(self.candidate, Path(self.name))

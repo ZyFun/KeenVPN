@@ -292,6 +292,121 @@ class RouterBackupTests(unittest.TestCase):
                 create_backup(self.storage)
         self.assertEqual(len(list(self.target.glob("*.tar.gz"))), 7)
 
+    def test_sqlite_source_replaced_on_open_prevents_publication(self):
+        for symlink in (False, True):
+            with self.subTest(symlink=symlink):
+                self.make_old()
+                other = self.root / "other.sqlite"
+                with sqlite3.connect(other) as db:
+                    db.execute("CREATE TABLE foreign_data(value TEXT)")
+                db.close()
+                connect = sqlite3.connect
+                replaced = False
+                def replace_on_open(path, *args, **kwargs):
+                    nonlocal replaced
+                    if not replaced and str(path).startswith(self.database.as_uri()):
+                        replaced = True
+                        self.database.rename(self.root / "original.sqlite")
+                        if symlink:
+                            self.database.symlink_to(other)
+                        else:
+                            self.database.write_bytes(other.read_bytes())
+                    return connect(path, *args, **kwargs)
+                try:
+                    with patch("keenvpn.adapters.router_backup.sqlite3.connect", side_effect=replace_on_open):
+                        with self.assertRaises(BackupError):
+                            create_backup(self.storage)
+                    self.assertEqual(len(list(self.target.glob("*.tar.gz"))), 7)
+                    self.assertFalse(list(self.target.glob(".partial-*")))
+                finally:
+                    self.database.unlink()
+                    (self.root / "original.sqlite").rename(self.database)
+                    other.unlink()
+                    self.storage = FixtureStorage(self.config, system_root=self.root, mounts_file=self.mounts)
+
+    def test_sqlite_source_parent_replaced_on_open_prevents_publication(self):
+        for symlink in (False, True):
+            with self.subTest(symlink=symlink):
+                self.make_old()
+                folder = self.database.parent
+                original = self.root / "original-history"
+                connect = sqlite3.connect
+                replaced = False
+                def replace_on_open(path, *args, **kwargs):
+                    nonlocal replaced
+                    if not replaced and str(path).startswith(self.database.as_uri()):
+                        replaced = True
+                        folder.rename(original)
+                        if symlink:
+                            folder.symlink_to(original, target_is_directory=True)
+                        else:
+                            folder.mkdir()
+                            self.database.hardlink_to(original / "history.sqlite")
+                    return connect(path, *args, **kwargs)
+                try:
+                    with patch("keenvpn.adapters.router_backup.sqlite3.connect", side_effect=replace_on_open):
+                        with self.assertRaises(BackupError):
+                            create_backup(self.storage)
+                    self.assertEqual(len(list(self.target.glob("*.tar.gz"))), 7)
+                finally:
+                    if symlink:
+                        folder.unlink()
+                    else:
+                        self.database.unlink()
+                        folder.rmdir()
+                    original.rename(folder)
+                    self.storage = FixtureStorage(self.config, system_root=self.root, mounts_file=self.mounts)
+
+    def test_sqlite_source_replaced_after_verification_preserves_old_archives(self):
+        self.make_old()
+        original = self.storage.publish
+        def replace_before_publication():
+            self.database.rename(self.root / "original.sqlite")
+            self.database.write_bytes((self.root / "original.sqlite").read_bytes())
+            original()
+        with patch.object(self.storage, "publish", side_effect=replace_before_publication):
+            with self.assertRaises(BackupError):
+                create_backup(self.storage)
+        self.assertEqual(len(list(self.target.glob("*.tar.gz"))), 7)
+
+    def test_sqlite_source_replaced_during_backup_prevents_publication(self):
+        self.make_old()
+        database = self.database
+        original = self.root / "original.sqlite"
+        connect = sqlite3.connect
+        class ReplacingConnection(sqlite3.Connection):
+            def backup(self, target, *args, **kwargs):
+                super().backup(target, *args, **kwargs)
+                database.rename(original)
+                database.write_bytes(original.read_bytes())
+        def open_source(path, *args, **kwargs):
+            if str(path).startswith(database.as_uri()):
+                kwargs["factory"] = ReplacingConnection
+            return connect(path, *args, **kwargs)
+        with patch("keenvpn.adapters.router_backup.sqlite3.connect", side_effect=open_source):
+            with self.assertRaises(BackupError):
+                create_backup(self.storage)
+        self.assertEqual(len(list(self.target.glob("*.tar.gz"))), 7)
+        self.assertFalse(list(self.target.glob(".partial-*")))
+
+    def test_committed_wal_write_after_snapshot_does_not_block_archive(self):
+        original = self.storage.create_and_verify
+        with sqlite3.connect(self.database) as writer:
+            writer.execute("PRAGMA journal_mode=WAL")
+            def write_after_snapshot():
+                writer.execute("INSERT INTO history VALUES ('after-snapshot')")
+                writer.commit()
+                original()
+            with patch.object(self.storage, "create_and_verify", side_effect=write_after_snapshot):
+                result = create_backup(self.storage)
+        writer.close()
+        with tarfile.open(self.target / result.name) as archive:
+            restored = self.root / "verify.sqlite"
+            restored.write_bytes(archive.extractfile("data/keenvpn/vpn-history/history.sqlite").read())
+        with sqlite3.connect(restored) as db:
+            self.assertEqual(db.execute("SELECT * FROM history").fetchall(), [("fixture",)])
+        db.close()
+
     def test_busybox_blkid_full_output_and_ambiguous_uuid(self):
         self.storage.check_mounts()
         command = self.storage.command

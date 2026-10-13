@@ -381,9 +381,10 @@ class RouterBackupStorage:
                         shutil.copyfileobj(reader, writer, 1024 * 1024)
                         if fingerprint(os.fstat(reader.fileno())) != revision:
                             raise BackupError("Исходные файлы изменились во время копирования.")
+                # chown может сбросить setuid/setgid: права переносить после владельца.
+                os.chown(target, revision[3], revision[4], follow_symlinks=False)
                 if not target.is_symlink():
                     shutil.copystat(source, target, follow_symlinks=False)
-                os.chown(target, revision[3], revision[4], follow_symlinks=False)
         # SQLite пишет вне скопированного дерева, которое содержит ссылки источников.
         snapshot = self.work / "history.sqlite"
         check_sqlite_identity(source_database, self.database_identity)

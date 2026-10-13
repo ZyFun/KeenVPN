@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import sys
 import tarfile
@@ -101,6 +102,66 @@ class RouterBackupTests(unittest.TestCase):
         with self.assertRaises(BackupError):
             create_backup(self.storage)
         self.assertFalse(self.target.exists())
+
+    def test_source_special_file_modes_survive_in_archive_and_manifest(self):
+        expected = {}
+        for mode in (0o4755, 0o2755, 0o6755):
+            name = f"opt/etc/helper-{mode:o}"
+            source = self.root / name
+            source.write_bytes(b"fixture")
+            source.chmod(mode)
+            self.assertEqual(source.stat().st_mode & 0o7777, mode)
+            expected[name] = mode
+        result = create_backup(self.storage)
+        with tarfile.open(self.target / result.name) as archive:
+            records = json.load(archive.extractfile("manifest.json"))["files"]
+            for name, mode in expected.items():
+                with self.subTest(name=name):
+                    self.assertEqual(archive.getmember(name).mode, mode)
+                    self.assertEqual(records[name]["mode"], mode)
+
+    def test_directory_special_mode_and_link_target_are_preserved(self):
+        folder = self.root / "opt/etc/shared"
+        folder.mkdir()
+        (folder / "fixture").write_bytes(b"fixture")
+        folder.chmod(0o2775)
+        self.assertEqual(folder.stat().st_mode & 0o7777, 0o2775)
+        external = self.root / "external-helper"
+        external.write_bytes(b"protected")
+        external.chmod(0o4755)
+        self.assertEqual(external.stat().st_mode & 0o7777, 0o4755)
+        (self.root / "opt/etc/external-link").symlink_to(external)
+        before = external.stat()
+        result = create_backup(self.storage)
+        with tarfile.open(self.target / result.name) as archive:
+            records = json.load(archive.extractfile("manifest.json"))["files"]
+            self.assertEqual(archive.getmember("opt/etc/shared").mode, 0o2775)
+            self.assertEqual(records["opt/etc/shared"]["mode"], 0o2775)
+            self.assertTrue(archive.getmember("opt/etc/external-link").issym())
+            self.assertEqual(records["opt/etc/external-link"]["type"], "link")
+        after = external.stat()
+        self.assertEqual((after.st_mode, after.st_uid, after.st_gid),
+                         (before.st_mode, before.st_uid, before.st_gid))
+        self.assertEqual(external.read_bytes(), b"protected")
+
+    def test_regular_file_metadata_failure_preserves_previous_backups(self):
+        self.make_old()
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        for operation in ("os.chown", "shutil.copystat"):
+            with self.subTest(operation=operation):
+                original = os.chown if operation == "os.chown" else shutil.copystat
+
+                def reject(*args, **kwargs):
+                    target = args[0] if operation == "os.chown" else args[1]
+                    if Path(target).name == "config.json":
+                        raise PermissionError("fixture")
+                    return original(*args, **kwargs)
+
+                with patch("keenvpn.adapters.router_backup." + operation, side_effect=reject):
+                    with self.assertRaises(PermissionError):
+                        create_backup(self.storage)
+                self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
+                self.storage = FixtureStorage(self.config, system_root=self.root, mounts_file=self.mounts)
 
     def test_sqlite_snapshot_preserves_source_metadata_in_archive_and_manifest(self):
         self.database.chmod(0o640)

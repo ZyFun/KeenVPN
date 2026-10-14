@@ -358,3 +358,7 @@ class ManagerMetadataFiles:
             os.fsync(directory)
         except OSError:
             _raise(MetadataStoreFailure.WRITE_UNCONFIRMED, MetadataStoreReason.IO_ERROR)
+        # После публикации дескриптор мог остаться у переименованного каталога.
+        # Успех подтверждает файл по настроенному пути, а не только завершённый fsync.
+        self._check_identity(directory)
+        self._check_revision(directory, metadata_revision(content))

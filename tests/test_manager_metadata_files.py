@@ -87,6 +87,12 @@ class StoreCase(unittest.TestCase):
     def leftovers(self, directory: Path | None = None) -> list[str]:
         return sorted(name for name in os.listdir(directory or self.directory) if name != METADATA_FILE_NAME)
 
+    def initial_store(self, name):
+        directory = self.root / name
+        store = ManagerMetadataFiles(str(directory))
+        revision = store.write_metadata(metadata(), None)
+        return store, directory, directory / METADATA_FILE_NAME, revision
+
 
 class ReadWriteTests(StoreCase):
     def test_store_implements_port(self):
@@ -222,12 +228,6 @@ class ReadWriteTests(StoreCase):
 class ConfirmationTests(StoreCase):
     """Совпадающий файл не подтверждается после внешней правки в обход блокировки."""
 
-    def initial_store(self, name):
-        directory = self.root / name
-        store = ManagerMetadataFiles(str(directory))
-        revision = store.write_metadata(metadata(), None)
-        return store, directory, directory / METADATA_FILE_NAME, revision
-
     def change_file(self, file, action):
         if action == "delete":
             file.unlink()
@@ -329,6 +329,109 @@ class ConfirmationTests(StoreCase):
                 self.assertTrue(changed)
                 self.assertEqual(list(directory.iterdir()), [])
                 self.assertEqual((old_directory / METADATA_FILE_NAME).read_bytes(), encode_manager_metadata(metadata()))
+
+
+class PublicationTests(StoreCase):
+    """Опубликованный файл должен оставаться доступным по настроенному пути."""
+
+    def replace_directory(self, directory, moved, foreign):
+        directory.rename(moved)
+        directory.mkdir(mode=0o700)
+        if foreign:
+            file = directory / METADATA_FILE_NAME
+            file.write_bytes(encode_manager_metadata(metadata("внешняя")))
+            file.chmod(0o600)
+
+    def assert_replaced_directory_preserved(self, store, directory, moved, foreign):
+        self.assertEqual((moved / METADATA_FILE_NAME).read_bytes(), encode_manager_metadata(metadata("вторая")))
+        self.assertEqual(self.leftovers(moved), [])
+        if foreign:
+            self.assertEqual(store.read_metadata().metadata, metadata("внешняя"))
+        else:
+            self.assertEqual(list(directory.iterdir()), [])
+            self.assertIsNone(store.read_metadata())
+
+    def test_directory_replaced_around_atomic_publication_is_not_confirmed(self):
+        for phase in ("before", "after"):
+            for foreign in (False, True):
+                with self.subTest(phase=phase, foreign=foreign):
+                    name = phase + "-" + str(foreign)
+                    store, directory, _file, revision = self.initial_store(name)
+                    moved = self.root / ("moved-" + name)
+                    original = os.replace
+
+                    def replace(*args, **kwargs):
+                        if phase == "before":
+                            self.replace_directory(directory, moved, foreign)
+                        original(*args, **kwargs)
+                        if phase == "after":
+                            self.replace_directory(directory, moved, foreign)
+
+                    with patch.object(os, "replace", replace):
+                        self.assert_failure(lambda: store.write_metadata(metadata("вторая"), revision),
+                                            Failure.UNSAFE, Reason.REPLACED)
+                    self.assert_replaced_directory_preserved(store, directory, moved, foreign)
+
+    def test_directory_replaced_during_publication_fsync_is_not_confirmed(self):
+        for foreign in (False, True):
+            with self.subTest(foreign=foreign):
+                name = "fsync-" + str(foreign)
+                store, directory, _file, revision = self.initial_store(name)
+                moved = self.root / ("moved-" + name)
+                original = os.fsync
+                changed = False
+
+                def sync(descriptor):
+                    nonlocal changed
+                    original(descriptor)
+                    if not changed and stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                        changed = True
+                        self.replace_directory(directory, moved, foreign)
+
+                with patch.object(os, "fsync", sync):
+                    self.assert_failure(lambda: store.write_metadata(metadata("вторая"), revision),
+                                        Failure.UNSAFE, Reason.REPLACED)
+                self.assertTrue(changed)
+                self.assert_replaced_directory_preserved(store, directory, moved, foreign)
+
+    def test_file_changed_after_publication_is_not_confirmed(self):
+        for phase in ("replace", "fsync"):
+            for action in ("replace", "delete"):
+                with self.subTest(phase=phase, action=action):
+                    store, directory, file, revision = self.initial_store("file-" + phase + "-" + action)
+                    changed = False
+
+                    def change_file():
+                        nonlocal changed
+                        changed = True
+                        if action == "delete":
+                            file.unlink()
+                        else:
+                            replacement = directory / "external.json"
+                            replacement.write_bytes(encode_manager_metadata(metadata("внешняя")))
+                            replacement.chmod(0o600)
+                            original_replace(replacement, file)
+
+                    original_replace = os.replace
+                    original_fsync = os.fsync
+
+                    def replace(*args, **kwargs):
+                        original_replace(*args, **kwargs)
+                        change_file()
+
+                    def sync(descriptor):
+                        original_fsync(descriptor)
+                        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                            change_file()
+
+                    target, callback = ("replace", replace) if phase == "replace" else ("fsync", sync)
+                    with patch.object(os, target, callback):
+                        self.assert_failure(lambda: store.write_metadata(metadata("вторая"), revision), Failure.CONFLICT)
+                    self.assertTrue(changed)
+                    if action == "delete":
+                        self.assertIsNone(store.read_metadata())
+                    else:
+                        self.assertEqual(store.read_metadata().metadata, metadata("внешняя"))
 
 
 class FailureInjectionTests(StoreCase):

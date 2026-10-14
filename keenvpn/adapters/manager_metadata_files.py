@@ -169,7 +169,7 @@ class ManagerMetadataFiles:
                 if current is None or current.revision != revision:
                     self._replace(directory, content, expected_revision)
                 else:
-                    self._confirm(directory)
+                    self._confirm(directory, expected_revision)
             finally:
                 # Закрытие дескриптора снимает блокировку.
                 os.close(directory)
@@ -255,12 +255,16 @@ class ManagerMetadataFiles:
             _raise(MetadataStoreFailure.CONFLICT)
         return current
 
-    def _confirm(self, directory: int) -> None:
+    def _confirm(self, directory: int, expected_revision: str | None) -> None:
         """Закрепить на диске уже опубликованный файл с теми же байтами без перезаписи.
 
         Иначе повтор после `metadata_write_unconfirmed` вернул бы успех,
         так и не подтвердив сохранность файла и переименования.
+        Проверки до и после fsync отклоняют внешнюю правку файла и подмену
+        каталога, сделанные в обход блокировки во время подтверждения.
         """
+        self._check_identity(directory)
+        self._check_revision(directory, expected_revision)
         try:
             descriptor = os.open(METADATA_FILE_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
             try:
@@ -270,6 +274,8 @@ class ManagerMetadataFiles:
             os.fsync(directory)
         except OSError:
             _raise(MetadataStoreFailure.WRITE_UNCONFIRMED, MetadataStoreReason.IO_ERROR)
+        self._check_identity(directory)
+        self._check_revision(directory, expected_revision)
 
     def _remove_stale(self, directory: int) -> None:
         """Удалить временные файлы прерванной записи; под блокировкой живых записей нет.

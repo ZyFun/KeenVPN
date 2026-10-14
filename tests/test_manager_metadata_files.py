@@ -219,6 +219,118 @@ class ReadWriteTests(StoreCase):
         self.assertFalse(self.directory.exists())
 
 
+class ConfirmationTests(StoreCase):
+    """Совпадающий файл не подтверждается после внешней правки в обход блокировки."""
+
+    def initial_store(self, name):
+        directory = self.root / name
+        store = ManagerMetadataFiles(str(directory))
+        revision = store.write_metadata(metadata(), None)
+        return store, directory, directory / METADATA_FILE_NAME, revision
+
+    def change_file(self, file, action):
+        if action == "delete":
+            file.unlink()
+        else:
+            replacement = file.parent / "external.json"
+            replacement.write_bytes(encode_manager_metadata(metadata("внешняя")))
+            replacement.chmod(0o600)
+            os.replace(replacement, file)
+
+    def test_unchanged_file_changed_after_initial_read_is_not_confirmed(self):
+        for action in ("replace", "delete"):
+            with self.subTest(action=action):
+                store, _directory, file, revision = self.initial_store("before-" + action)
+                original = store._read
+                changed = False
+
+                def read(descriptor):
+                    nonlocal changed
+                    current = original(descriptor)
+                    if not changed:
+                        changed = True
+                        self.change_file(file, action)
+                    return current
+
+                with patch.object(store, "_read", read), patch.object(os, "fsync", wraps=os.fsync) as sync:
+                    self.assert_failure(lambda: store.write_metadata(metadata(), revision), Failure.CONFLICT)
+                sync.assert_not_called()
+                self.assertTrue(changed)
+                if action == "delete":
+                    self.assertFalse(file.exists())
+                else:
+                    self.assertEqual(file.read_bytes(), encode_manager_metadata(metadata("внешняя")))
+
+    def test_unchanged_directory_replaced_after_initial_read_is_not_confirmed(self):
+        store, directory, _file, revision = self.initial_store("before-directory")
+        old_directory = self.root / "original-directory"
+        original = store._read
+        changed = False
+
+        def read(descriptor):
+            nonlocal changed
+            current = original(descriptor)
+            if not changed:
+                changed = True
+                directory.rename(old_directory)
+                directory.mkdir(mode=0o700)
+            return current
+
+        with patch.object(store, "_read", read), patch.object(os, "fsync", wraps=os.fsync) as sync:
+            self.assert_failure(lambda: store.write_metadata(metadata(), revision), Failure.UNSAFE, Reason.REPLACED)
+        sync.assert_not_called()
+        self.assertTrue(changed)
+        self.assertEqual(list(directory.iterdir()), [])
+        self.assertEqual((old_directory / METADATA_FILE_NAME).read_bytes(), encode_manager_metadata(metadata()))
+
+    def test_unchanged_file_changed_during_fsync_is_not_confirmed(self):
+        for phase in ("file", "directory"):
+            for action in ("replace", "delete"):
+                with self.subTest(phase=phase, action=action):
+                    store, _directory, file, revision = self.initial_store("during-" + phase + "-" + action)
+                    original = os.fsync
+                    changed = False
+
+                    def sync(descriptor):
+                        nonlocal changed
+                        original(descriptor)
+                        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+                        if not changed and kind == phase:
+                            changed = True
+                            self.change_file(file, action)
+
+                    with patch.object(os, "fsync", sync):
+                        self.assert_failure(lambda: store.write_metadata(metadata(), revision), Failure.CONFLICT)
+                    self.assertTrue(changed)
+                    if action == "delete":
+                        self.assertFalse(file.exists())
+                    else:
+                        self.assertEqual(file.read_bytes(), encode_manager_metadata(metadata("внешняя")))
+
+    def test_unchanged_directory_replaced_during_fsync_is_not_confirmed(self):
+        for phase in ("file", "directory"):
+            with self.subTest(phase=phase):
+                store, directory, _file, revision = self.initial_store("during-directory-" + phase)
+                old_directory = self.root / ("original-directory-" + phase)
+                original = os.fsync
+                changed = False
+
+                def sync(descriptor):
+                    nonlocal changed
+                    original(descriptor)
+                    kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+                    if not changed and kind == phase:
+                        changed = True
+                        directory.rename(old_directory)
+                        directory.mkdir(mode=0o700)
+
+                with patch.object(os, "fsync", sync):
+                    self.assert_failure(lambda: store.write_metadata(metadata(), revision), Failure.UNSAFE, Reason.REPLACED)
+                self.assertTrue(changed)
+                self.assertEqual(list(directory.iterdir()), [])
+                self.assertEqual((old_directory / METADATA_FILE_NAME).read_bytes(), encode_manager_metadata(metadata()))
+
+
 class FailureInjectionTests(StoreCase):
     def check_failed_write(self, target, error, reason, *, after=0):
         content, revision = self.write_initial()

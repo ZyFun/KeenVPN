@@ -12,6 +12,7 @@ from keenvpn.domain.connection import TrojanConnection
 from keenvpn.domain.geodata import GeoDatabaseInventory
 from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
 from keenvpn.domain.keenetic_policy import KeeneticPolicySet
+from keenvpn.domain.manager_metadata import ManagerMetadata, StoredManagerMetadata
 from keenvpn.domain.profile import ConnectionProfile
 from keenvpn.domain.routing import GeoIPCondition, GeoSiteCondition
 from keenvpn.domain.routing_explanation import GeoMatch
@@ -150,4 +151,89 @@ class GeoDataSource(Protocol):
 
     def match(self, condition: GeoIPCondition | GeoSiteCondition, values: tuple[str, ...]) -> GeoMatch:
         """Вернуть результат и метаданные фактически использованной базы."""
+        ...
+
+
+class MetadataStoreFailure(StrEnum):
+    """Почему хранилище метаданных менеджера отказало."""
+
+    UNAVAILABLE = "metadata_store_unavailable"
+    """Каталог или его родитель отсутствует либо не читается."""
+    UNSAFE = "metadata_store_unsafe"
+    """Ссылка, неверные права, владелец или тип, защищённый или подменённый каталог."""
+    BUSY = "metadata_store_busy"
+    """Запись уже выполняет другая операция."""
+    CONFLICT = "metadata_revision_conflict"
+    """Текущая ревизия не совпала с ожидаемой."""
+    INVALID = "invalid_stored_metadata"
+    """Файл нарушает формат или имеет другую версию схемы; код домена — в `reason`."""
+    WRITE_FAILED = "metadata_write_failed"
+    """Запись не выполнена, прежний файл не заменён."""
+    WRITE_UNCONFIRMED = "metadata_write_unconfirmed"
+    """Новый файл виден, но сохранность переименования на диске не подтверждена."""
+
+
+class MetadataStoreReason(StrEnum):
+    """Уточнение отказа хранилища, кроме `invalid_stored_metadata`."""
+
+    INVALID_DIRECTORY = "invalid_directory"
+    PROTECTED_DIRECTORY = "protected_directory"
+    MISSING = "missing"
+    SYMLINK = "symlink"
+    NOT_DIRECTORY = "not_directory"
+    NOT_REGULAR_FILE = "not_regular_file"
+    OWNER = "owner"
+    PERMISSIONS = "permissions"
+    REPLACED = "replaced"
+    NO_SPACE = "no_space"
+    READ_ONLY = "read_only"
+    PERMISSION_DENIED = "permission_denied"
+    IO_ERROR = "io_error"
+
+
+_METADATA_STORE_MESSAGES = {
+    MetadataStoreFailure.UNAVAILABLE: "Каталог метаданных менеджера недоступен.",
+    MetadataStoreFailure.UNSAFE: (
+        "Каталог или файл метаданных менеджера небезопасен: ссылка, неверные права, владелец или тип."
+    ),
+    MetadataStoreFailure.BUSY: "Метаданные менеджера уже записывает другая операция.",
+    MetadataStoreFailure.CONFLICT: "Метаданные менеджера изменились после чтения: запись отклонена.",
+    MetadataStoreFailure.INVALID: "Файл метаданных менеджера повреждён или имеет неподдерживаемую версию схемы.",
+    MetadataStoreFailure.WRITE_FAILED: "Не удалось записать метаданные менеджера: прежний файл сохранён.",
+    MetadataStoreFailure.WRITE_UNCONFIRMED: (
+        "Метаданные менеджера записаны, но сохранность на диске не подтверждена: перечитайте их."
+    ),
+}
+
+
+class ManagerMetadataStoreError(Exception):
+    """Отказ хранилища метаданных с безопасными кодами и заранее заданным текстом.
+
+    Пути, имена файлов, содержимое и текст системной ошибки в поля
+    и сообщение не попадают.
+    """
+
+    def __init__(self, failure: MetadataStoreFailure, *, reason: str | None = None) -> None:
+        self.failure = failure
+        self.reason = reason
+        super().__init__(_METADATA_STORE_MESSAGES[failure])
+
+
+class ManagerMetadataStore(Protocol):
+    """Собственные метаданные менеджера отдельно от active configs.
+
+    Ревизия — SHA-256 байтов файла. Запись сравнивает её с ожидаемой
+    и при расхождении отказывает, не перезаписывая файл.
+    """
+
+    def read_metadata(self) -> StoredManagerMetadata | None:
+        """Вернуть метаданные с ревизией или None, если их ещё нет; при отказе — ManagerMetadataStoreError."""
+        ...
+
+    def write_metadata(self, metadata: ManagerMetadata, expected_revision: str | None) -> str:
+        """Записать при совпадении ревизии и вернуть новую.
+
+        `expected_revision=None` означает, что метаданных быть не должно.
+        Совпадающее содержимое не перезаписывается. При отказе — ManagerMetadataStoreError.
+        """
         ...

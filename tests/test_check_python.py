@@ -72,10 +72,33 @@ class RequirementTests(unittest.TestCase):
 
     def test_successful_import_does_not_hide_missing_api(self):
         """Облегчённый модуль может импортироваться, но не содержать нужное API."""
-        for name, label in (("fcntl", "API блокировки flock"), ("tarfile", "Фильтр tarfile.data_filter"), ("os", "API файловых операций POSIX")):
-            with self.subTest(module=name):
+        for name, label in (
+            ("fcntl", "API блокировки flock"), ("tarfile", "Фильтр tarfile.data_filter"),
+            ("os", "API файловых операций POSIX"), ("os", "Файловые операции относительно каталога"),
+        ):
+            with self.subTest(module=name, label=label):
                 report = self.check_with({name: types.SimpleNamespace()})
                 self.assertTrue(report["Импорт " + name])
+                self.assertFalse(report[label])
+
+    def test_directory_relative_operations_require_each_capability(self):
+        """Без `dir_fd` или `listdir` по дескриптору адаптеры не смогут не проходить по ссылкам."""
+        label = "Файловые операции относительно каталога"
+        self.assertTrue(self.check_with({})[label])
+        for attribute, missing in (
+            ("supports_dir_fd", os.mkdir), ("supports_dir_fd", os.rename), ("supports_fd", os.listdir),
+            ("supports_follow_symlinks", os.stat),
+        ):
+            reduced = types.SimpleNamespace(**{
+                name: getattr(os, name) for name in (
+                    "open", "mkdir", "rename", "unlink", "stat", "listdir", "replace", "fsync", "chmod", "fchmod",
+                    "O_NOFOLLOW", "O_DIRECTORY", "supports_dir_fd", "supports_fd", "supports_follow_symlinks",
+                )
+            })
+            setattr(reduced, attribute, getattr(os, attribute) - {missing})
+            with self.subTest(attribute=attribute, missing=missing.__name__):
+                report = self.check_with({"os": reduced})
+                self.assertTrue(report["API файловых операций POSIX"])
                 self.assertFalse(report[label])
 
     def test_tls_failure_is_reported_without_exception_text(self):

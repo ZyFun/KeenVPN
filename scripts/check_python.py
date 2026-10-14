@@ -88,6 +88,16 @@ def check_python(version_info=None, implementation=None, importer=None):
             and hasattr(module, "O_DIRECTORY")
         )
 
+    def directory_relative_api():
+        """Проверить поддержку `dir_fd` и чтения каталога по дескриптору без файловых операций."""
+        module = modules["os"]
+        relative = getattr(module, "supports_dir_fd", set())
+        return (
+            all(getattr(module, name, None) in relative for name in ("open", "mkdir", "rename", "unlink", "stat"))
+            and getattr(module, "listdir", None) in getattr(module, "supports_fd", set())
+            and getattr(module, "stat", None) in getattr(module, "supports_follow_symlinks", set())
+        )
+
     def tls_client_context():
         """Создать контекст без сети, чтения CA и обработки SSLKEYLOGFILE."""
         ssl = modules["ssl"]
@@ -97,6 +107,7 @@ def check_python(version_info=None, implementation=None, importer=None):
         return context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED
 
     check_api("API файловых операций POSIX", ("os",), filesystem_api)
+    check_api("Файловые операции относительно каталога", ("os",), directory_relative_api)
     check_api(
         "API блокировки flock", ("fcntl",),
         lambda: callable(getattr(modules["fcntl"], "flock", None))

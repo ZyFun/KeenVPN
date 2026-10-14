@@ -126,30 +126,42 @@ def _constant(_value: str) -> NoReturn:
     raise ValueError("Недопустимая константа JSON.")
 
 
-def _check_tree(value: object, depth: int = 0) -> bool:
-    """Отклонить бесконечные числа и вложенность свыше границы снимка."""
+def valid_json_tree(value: object, depth: int = 0) -> bool:
+    """Проверить дерево значений JSON: точные типы, строковые ключи, конечные числа и глубину.
+
+    Результат `json.loads` проходит проверку типов всегда; она нужна для
+    значений, собранных кодом, где `json.dumps` молча превратил бы ключ
+    `True` или `1` в строку.
+    """
     if depth > MAX_JSON_DEPTH:
         return False
+    if value is None or type(value) in (str, int, bool):
+        return True
     if type(value) is float:
         return math.isfinite(value)
     if type(value) is list:
-        return all(_check_tree(item, depth + 1) for item in value)
+        return all(valid_json_tree(item, depth + 1) for item in value)
     if type(value) is dict:
-        return all(_check_tree(item, depth + 1) for item in value.values())
-    return True
+        return all(type(key) is str and valid_json_tree(item, depth + 1) for key, item in value.items())
+    return False
 
 
-def parse_strict_json_object(text: str) -> dict[str, object]:
-    """Разобрать текст в объект JSON без дублей ключей, NaN, Infinity и глубоких структур."""
+def parse_strict_json_object(text: str, *, comments: bool = True) -> dict[str, object]:
+    """Разобрать текст в объект JSON без дублей ключей, NaN, Infinity и глубоких структур.
+
+    `comments=False` отклоняет комментарии как недопустимый JSON: собственный
+    формат, который потом записывается заново, не должен молча их терять.
+    """
     if type(text) is not str:
         _raise_detached(ConfigDocumentErrorCode.JSON)
+    source = strip_json_comments(text) if comments else text
     document = None
     try:
-        document = json.loads(strip_json_comments(text), object_pairs_hook=_pairs, parse_constant=_constant)
+        document = json.loads(source, object_pairs_hook=_pairs, parse_constant=_constant)
     except (ValueError, RecursionError):
         # Сообщение декодера содержит позицию и фрагмент текста: в ошибку оно не входит.
         pass
-    if type(document) is not dict or not _check_tree(document):
+    if type(document) is not dict or not valid_json_tree(document):
         _raise_detached(ConfigDocumentErrorCode.JSON)
     return document
 

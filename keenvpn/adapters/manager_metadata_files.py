@@ -201,12 +201,14 @@ class ManagerMetadataFiles:
             if info.st_uid != os.geteuid():
                 _raise(MetadataStoreFailure.UNSAFE, MetadataStoreReason.OWNER)
             if created:
-                # Права после umask; родителя закрепить на диске вместе с новым каталогом.
+                # Точные права после umask.
                 os.fchmod(descriptor, _DIRECTORY_MODE)
-                os.fsync(parent)
                 info = os.fstat(descriptor)
             if stat.S_IMODE(info.st_mode) != _DIRECTORY_MODE:
                 _raise(MetadataStoreFailure.UNSAFE, MetadataStoreReason.PERMISSIONS)
+            if create:
+                # Предыдущая попытка могла оставить каталог после отказа fsync родителя.
+                os.fsync(parent)
         except BaseException as error:
             os.close(descriptor)
             if not isinstance(error, OSError):

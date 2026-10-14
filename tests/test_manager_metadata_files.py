@@ -53,6 +53,13 @@ def failing(error: BaseException, *, after: int = 0):
     return wrap
 
 
+def sync_kind(info, directory_info):
+    """Различить fsync файла, каталога метаданных и родителя по inode."""
+    if stat.S_ISREG(info.st_mode):
+        return "file"
+    return "directory" if os.path.samestat(info, directory_info) else "parent"
+
+
 class StoreCase(unittest.TestCase):
     def setUp(self):
         # Реальный путь: на macOS временный каталог находится за ссылкой /var.
@@ -211,7 +218,14 @@ class ReadWriteTests(StoreCase):
 
     def test_lock_is_released_after_failure(self):
         _content, revision = self.write_initial()
-        with patch.object(os, "fsync", side_effect=OSError(errno.EIO, "test")):
+        original = os.fsync
+
+        def sync(descriptor):
+            if stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise OSError(errno.EIO, "test")
+            original(descriptor)
+
+        with patch.object(os, "fsync", sync):
             self.assert_failure(lambda: self.store.write_metadata(metadata("вторая"), revision),
                                 Failure.WRITE_FAILED, Reason.IO_ERROR)
         self.store.write_metadata(metadata("вторая"), revision)
@@ -240,8 +254,10 @@ class ConfirmationTests(StoreCase):
     def test_unchanged_file_changed_after_initial_read_is_not_confirmed(self):
         for action in ("replace", "delete"):
             with self.subTest(action=action):
-                store, _directory, file, revision = self.initial_store("before-" + action)
+                store, directory, file, revision = self.initial_store("before-" + action)
                 original = store._read
+                original_sync, directory_info = os.fsync, directory.stat()
+                synced = []
                 changed = False
 
                 def read(descriptor):
@@ -252,9 +268,13 @@ class ConfirmationTests(StoreCase):
                         self.change_file(file, action)
                     return current
 
-                with patch.object(store, "_read", read), patch.object(os, "fsync", wraps=os.fsync) as sync:
+                def sync(descriptor):
+                    synced.append(sync_kind(os.fstat(descriptor), directory_info))
+                    original_sync(descriptor)
+
+                with patch.object(store, "_read", read), patch.object(os, "fsync", sync):
                     self.assert_failure(lambda: store.write_metadata(metadata(), revision), Failure.CONFLICT)
-                sync.assert_not_called()
+                self.assertEqual(synced, ["parent"])
                 self.assertTrue(changed)
                 if action == "delete":
                     self.assertFalse(file.exists())
@@ -265,6 +285,8 @@ class ConfirmationTests(StoreCase):
         store, directory, _file, revision = self.initial_store("before-directory")
         old_directory = self.root / "original-directory"
         original = store._read
+        original_sync, directory_info = os.fsync, directory.stat()
+        synced = []
         changed = False
 
         def read(descriptor):
@@ -276,9 +298,13 @@ class ConfirmationTests(StoreCase):
                 directory.mkdir(mode=0o700)
             return current
 
-        with patch.object(store, "_read", read), patch.object(os, "fsync", wraps=os.fsync) as sync:
+        def sync(descriptor):
+            synced.append(sync_kind(os.fstat(descriptor), directory_info))
+            original_sync(descriptor)
+
+        with patch.object(store, "_read", read), patch.object(os, "fsync", sync):
             self.assert_failure(lambda: store.write_metadata(metadata(), revision), Failure.UNSAFE, Reason.REPLACED)
-        sync.assert_not_called()
+        self.assertEqual(synced, ["parent"])
         self.assertTrue(changed)
         self.assertEqual(list(directory.iterdir()), [])
         self.assertEqual((old_directory / METADATA_FILE_NAME).read_bytes(), encode_manager_metadata(metadata()))
@@ -287,14 +313,15 @@ class ConfirmationTests(StoreCase):
         for phase in ("file", "directory"):
             for action in ("replace", "delete"):
                 with self.subTest(phase=phase, action=action):
-                    store, _directory, file, revision = self.initial_store("during-" + phase + "-" + action)
+                    store, directory, file, revision = self.initial_store("during-" + phase + "-" + action)
+                    directory_info = directory.stat()
                     original = os.fsync
                     changed = False
 
                     def sync(descriptor):
                         nonlocal changed
                         original(descriptor)
-                        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+                        kind = sync_kind(os.fstat(descriptor), directory_info)
                         if not changed and kind == phase:
                             changed = True
                             self.change_file(file, action)
@@ -311,6 +338,7 @@ class ConfirmationTests(StoreCase):
         for phase in ("file", "directory"):
             with self.subTest(phase=phase):
                 store, directory, _file, revision = self.initial_store("during-directory-" + phase)
+                directory_info = directory.stat()
                 old_directory = self.root / ("original-directory-" + phase)
                 original = os.fsync
                 changed = False
@@ -318,7 +346,7 @@ class ConfirmationTests(StoreCase):
                 def sync(descriptor):
                     nonlocal changed
                     original(descriptor)
-                    kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+                    kind = sync_kind(os.fstat(descriptor), directory_info)
                     if not changed and kind == phase:
                         changed = True
                         directory.rename(old_directory)
@@ -378,13 +406,14 @@ class PublicationTests(StoreCase):
                 name = "fsync-" + str(foreign)
                 store, directory, _file, revision = self.initial_store(name)
                 moved = self.root / ("moved-" + name)
+                directory_info = directory.stat()
                 original = os.fsync
                 changed = False
 
                 def sync(descriptor):
                     nonlocal changed
                     original(descriptor)
-                    if not changed and stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                    if not changed and sync_kind(os.fstat(descriptor), directory_info) == "directory":
                         changed = True
                         self.replace_directory(directory, moved, foreign)
 
@@ -399,6 +428,7 @@ class PublicationTests(StoreCase):
             for action in ("replace", "delete"):
                 with self.subTest(phase=phase, action=action):
                     store, directory, file, revision = self.initial_store("file-" + phase + "-" + action)
+                    directory_info = directory.stat()
                     changed = False
 
                     def change_file():
@@ -421,7 +451,7 @@ class PublicationTests(StoreCase):
 
                     def sync(descriptor):
                         original_fsync(descriptor)
-                        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                        if sync_kind(os.fstat(descriptor), directory_info) == "directory":
                             change_file()
 
                     target, callback = ("replace", replace) if phase == "replace" else ("fsync", sync)
@@ -442,7 +472,8 @@ class DurabilityTests(StoreCase):
             for fail_directory_sync in (False, True):
                 with self.subTest(changed_content=changed_content, fail_directory_sync=fail_directory_sync):
                     name = "descriptor-" + str(changed_content) + "-" + str(fail_directory_sync)
-                    store, _directory, _file, revision = self.initial_store(name)
+                    store, directory, _file, revision = self.initial_store(name)
+                    directory_info = directory.stat()
                     requested = metadata("вторая") if changed_content else metadata()
                     original = os.fsync
                     held_descriptor = None
@@ -450,9 +481,10 @@ class DurabilityTests(StoreCase):
 
                     def sync(descriptor):
                         nonlocal held_descriptor, observed
-                        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+                        kind = sync_kind(os.fstat(descriptor), directory_info)
+                        if kind == "file":
                             held_descriptor = descriptor
-                        else:
+                        elif kind == "directory":
                             self.assertTrue(stat.S_ISREG(os.fstat(held_descriptor).st_mode))
                             observed = True
                             if fail_directory_sync:
@@ -475,6 +507,7 @@ class DurabilityTests(StoreCase):
         for changed_content in (False, True):
             with self.subTest(changed_content=changed_content):
                 store, directory, file, revision = self.initial_store("inode-" + str(changed_content))
+                directory_info = directory.stat()
                 requested = metadata("вторая") if changed_content else metadata()
                 original = os.fsync
                 synced = []
@@ -486,7 +519,7 @@ class DurabilityTests(StoreCase):
                     original(descriptor)
                     if stat.S_ISREG(info.st_mode):
                         synced.append((info.st_dev, info.st_ino))
-                    elif not replaced:
+                    elif sync_kind(info, directory_info) == "directory" and not replaced:
                         replaced = True
                         replacement = directory / "external.json"
                         replacement.write_bytes(file.read_bytes())
@@ -537,6 +570,7 @@ class DurabilityTests(StoreCase):
         for changed_content in (False, True):
             with self.subTest(changed_content=changed_content):
                 store, directory, file, revision = self.initial_store("mode-" + str(changed_content))
+                directory_info = directory.stat()
                 requested = metadata("вторая") if changed_content else metadata()
                 original = os.fsync
                 changed = False
@@ -544,7 +578,7 @@ class DurabilityTests(StoreCase):
                 def sync(descriptor):
                     nonlocal changed
                     original(descriptor)
-                    if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                    if sync_kind(os.fstat(descriptor), directory_info) == "directory":
                         changed = True
                         directory.chmod(0o777)
 
@@ -558,6 +592,7 @@ class DurabilityTests(StoreCase):
         for changed_content in (False, True):
             with self.subTest(changed_content=changed_content):
                 store, directory, file, revision = self.initial_store("owner-" + str(changed_content))
+                directory_info = directory.stat()
                 requested = metadata("вторая") if changed_content else metadata()
                 original_sync, original_stat = os.fsync, os.fstat
                 changed = False
@@ -565,12 +600,12 @@ class DurabilityTests(StoreCase):
                 def sync(descriptor):
                     nonlocal changed
                     original_sync(descriptor)
-                    if stat.S_ISDIR(original_stat(descriptor).st_mode):
+                    if sync_kind(original_stat(descriptor), directory_info) == "directory":
                         changed = True
 
                 def fstat(descriptor):
                     info = original_stat(descriptor)
-                    if changed and stat.S_ISDIR(info.st_mode):
+                    if changed and os.path.samestat(info, directory_info):
                         values = list(info)
                         values[4] = os.geteuid() + 1
                         return os.stat_result(values)
@@ -608,6 +643,79 @@ class DurabilityTests(StoreCase):
 
 
 class FailureInjectionTests(StoreCase):
+    def test_parent_sync_is_retried_after_failed_directory_creation(self):
+        parent_info = self.directory.parent.stat()
+        original_sync = os.fsync
+        attempts = 0
+
+        def sync(descriptor):
+            nonlocal attempts
+            if os.path.samestat(os.fstat(descriptor), parent_info):
+                attempts += 1
+                if attempts <= 2:
+                    raise OSError(errno.EIO, "моделируемый отказ", str(self.root))
+            original_sync(descriptor)
+
+        with patch.object(os, "fsync", sync):
+            self.assert_failure(lambda: self.store.write_metadata(metadata(), None), Failure.WRITE_FAILED, Reason.IO_ERROR)
+            directory_info = self.directory.stat()
+            self.assertFalse(self.file.exists())
+            self.assert_failure(lambda: self.store.write_metadata(metadata(), None), Failure.UNAVAILABLE, Reason.IO_ERROR)
+            self.assertFalse(self.file.exists())
+            self.assertTrue(os.path.samestat(directory_info, self.directory.stat()))
+            revision = self.store.write_metadata(metadata(), None)
+        self.assertEqual(attempts, 3)
+        self.assertTrue(os.path.samestat(directory_info, self.directory.stat()))
+        self.assertEqual(revision, metadata_revision(encode_manager_metadata(metadata())))
+        self.assertEqual(self.store.read_metadata().revision, revision)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_parent_sync_failure_blocks_existing_metadata_write(self):
+        content, revision = self.write_initial()
+        parent_info = self.directory.parent.stat()
+        original_sync = os.fsync
+        for code, reason in ((errno.EIO, Reason.IO_ERROR), (errno.ENOSPC, Reason.NO_SPACE),
+                             (errno.EROFS, Reason.READ_ONLY), (errno.EACCES, Reason.PERMISSION_DENIED)):
+            with self.subTest(reason=reason.value):
+                failed = False
+
+                def sync(descriptor):
+                    nonlocal failed
+                    if os.path.samestat(os.fstat(descriptor), parent_info):
+                        failed = True
+                        raise OSError(code, "моделируемый отказ", str(self.root))
+                    original_sync(descriptor)
+
+                with patch.object(os, "fsync", sync), patch.object(os, "write", wraps=os.write) as written:
+                    self.assert_failure(lambda: self.store.write_metadata(metadata("вторая"), revision),
+                                        Failure.UNAVAILABLE, reason)
+                self.assertTrue(failed)
+                written.assert_not_called()
+                self.assertEqual(self.file.read_bytes(), content)
+                self.assertEqual(self.store.read_metadata().revision, revision)
+                self.assertEqual(self.leftovers(), [])
+
+    def test_parent_sync_is_included_in_successful_writes(self):
+        for changed_content in (False, True):
+            with self.subTest(changed_content=changed_content):
+                store, directory, _file, revision = self.initial_store("parent-success-" + str(changed_content))
+                parent_info = directory.parent.stat()
+                original_sync = os.fsync
+                parents = []
+
+                def sync(descriptor):
+                    if os.path.samestat(os.fstat(descriptor), parent_info):
+                        parents.append(descriptor)
+                    original_sync(descriptor)
+
+                requested = metadata("вторая") if changed_content else metadata()
+                with patch.object(os, "fsync", sync):
+                    self.assertEqual(store.write_metadata(requested, revision),
+                                     metadata_revision(encode_manager_metadata(requested)))
+                    self.assertEqual(len(parents), 1)
+                    store.read_metadata()
+                    self.assertEqual(len(parents), 1)
+
     def check_walk_root_open_failure(self, *, write):
         for existing in (False, True):
             for code in (errno.EMFILE, errno.ENFILE):
@@ -664,7 +772,7 @@ class FailureInjectionTests(StoreCase):
                     def sync(descriptor):
                         nonlocal armed
                         original_sync(descriptor)
-                        if after_sync and stat.S_ISDIR(original_stat(descriptor).st_mode):
+                        if after_sync and sync_kind(original_stat(descriptor), directory_info) == "directory":
                             armed = True
 
                     def fstat(descriptor):
@@ -700,7 +808,15 @@ class FailureInjectionTests(StoreCase):
 
     def check_failed_write(self, target, error, reason, *, after=0):
         content, revision = self.write_initial()
-        wrapper = failing(error, after=after)(getattr(os, target))
+        original = getattr(os, target)
+        wrapper = failing(error, after=after)(original)
+        if target == "fsync":
+            failed_sync = wrapper
+
+            def wrapper(descriptor):
+                if stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    return failed_sync(descriptor)
+                return original(descriptor)
         with patch.object(os, target, wrapper):
             self.assert_failure(lambda: self.store.write_metadata(metadata("вторая"), revision),
                                 Failure.WRITE_FAILED, reason)
@@ -779,11 +895,12 @@ class FailureInjectionTests(StoreCase):
 
     def test_directory_fsync_failure_after_rename_is_unconfirmed(self):
         _content, revision = self.write_initial()
+        directory_info = self.directory.stat()
         directory_fsync = {"count": 0}
         original = os.fsync
 
         def fsync(descriptor):
-            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            if sync_kind(os.fstat(descriptor), directory_info) == "directory":
                 directory_fsync["count"] += 1
                 raise OSError(errno.EIO, "test")
             return original(descriptor)
@@ -798,11 +915,12 @@ class FailureInjectionTests(StoreCase):
     def test_retry_after_unconfirmed_write_confirms_durability(self):
         _content, revision = self.write_initial()
         original = os.fsync
-        calls = {"file": 0, "directory": 0}
+        directory_info = self.directory.stat()
+        calls = {"parent": 0, "file": 0, "directory": 0}
 
         def fsync(fail_directory):
             def call(descriptor):
-                kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+                kind = sync_kind(os.fstat(descriptor), directory_info)
                 calls[kind] += 1
                 if kind == "directory" and fail_directory:
                     raise OSError(errno.EIO, "test")
@@ -819,7 +937,7 @@ class FailureInjectionTests(StoreCase):
         never_rewrite = (patch.object(os, "replace", side_effect=AssertionError("повторная запись")),
                          patch.object(os, "write", side_effect=AssertionError("повторная запись")))
         for fail_directory, label in ((True, "отказ продолжается"), (False, "отказ прошёл")):
-            calls.update(file=0, directory=0)
+            calls.update(parent=0, file=0, directory=0)
             with self.subTest(case=label), never_rewrite[0], never_rewrite[1], \
                     patch.object(os, "fsync", fsync(fail_directory)):
                 if fail_directory:
@@ -827,11 +945,16 @@ class FailureInjectionTests(StoreCase):
                                         Failure.WRITE_UNCONFIRMED, Reason.IO_ERROR)
                 else:
                     self.assertEqual(self.store.write_metadata(metadata("вторая"), visible.revision), visible.revision)
-                self.assertEqual(calls, {"file": 1, "directory": 1})
+                self.assertEqual(calls, {"parent": 1, "file": 1, "directory": 1})
             current = self.file.stat()
             self.assertEqual((current.st_ino, current.st_mtime_ns), (published.st_ino, published.st_mtime_ns))
             self.assertEqual(self.file.read_bytes(), encode_manager_metadata(metadata("вторая")))
-        with patch.object(os, "fsync", side_effect=OSError(errno.EIO, "test")):
+        def fail_file(descriptor):
+            if stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise OSError(errno.EIO, "test")
+            return original(descriptor)
+
+        with patch.object(os, "fsync", fail_file):
             self.assert_failure(lambda: self.store.write_metadata(metadata("вторая"), visible.revision),
                                 Failure.WRITE_UNCONFIRMED, Reason.IO_ERROR)
 

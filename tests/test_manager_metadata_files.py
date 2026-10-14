@@ -608,6 +608,63 @@ class DurabilityTests(StoreCase):
 
 
 class FailureInjectionTests(StoreCase):
+    def check_directory_stat_failure(self, *, after_sync):
+        for changed_content in (False, True):
+            for stat_call in (1, 2):
+                with self.subTest(changed_content=changed_content, stat_call=stat_call):
+                    name = "stat-" + str(after_sync) + "-" + str(changed_content) + "-" + str(stat_call)
+                    store, directory, file, revision = self.initial_store(name)
+                    requested = metadata("вторая") if changed_content else metadata()
+                    directory_info = directory.stat()
+                    original_read, original_sync, original_stat = store._read, os.fsync, os.fstat
+                    armed = False
+                    calls = 0
+                    failed_descriptor = None
+
+                    def read(descriptor):
+                        nonlocal armed
+                        current = original_read(descriptor)
+                        if not after_sync:
+                            armed = True
+                        return current
+
+                    def sync(descriptor):
+                        nonlocal armed
+                        original_sync(descriptor)
+                        if after_sync and stat.S_ISDIR(original_stat(descriptor).st_mode):
+                            armed = True
+
+                    def fstat(descriptor):
+                        nonlocal calls, failed_descriptor
+                        info = original_stat(descriptor)
+                        if armed and os.path.samestat(info, directory_info):
+                            calls += 1
+                            if calls == stat_call:
+                                failed_descriptor = descriptor
+                                raise OSError(errno.EIO, "моделируемый отказ", str(directory))
+                        return info
+
+                    with patch.object(store, "_read", read), patch.object(os, "fsync", sync), \
+                            patch.object(os, "fstat", fstat):
+                        self.assert_failure(lambda: store.write_metadata(requested, revision),
+                                            Failure.UNAVAILABLE, Reason.IO_ERROR)
+                    self.assertIsNotNone(failed_descriptor)
+                    with self.assertRaises(OSError) as caught:
+                        original_stat(failed_descriptor)
+                    self.assertEqual(caught.exception.errno, errno.EBADF)
+                    visible = requested if after_sync else metadata()
+                    self.assertEqual(file.read_bytes(), encode_manager_metadata(visible))
+                    self.assertEqual(self.leftovers(directory), [])
+                    current = store.read_metadata()
+                    self.assertEqual(store.write_metadata(requested, current.revision),
+                                     metadata_revision(encode_manager_metadata(requested)))
+
+    def test_directory_stat_failure_before_confirmation_is_safe(self):
+        self.check_directory_stat_failure(after_sync=False)
+
+    def test_directory_stat_failure_after_fsync_is_safe(self):
+        self.check_directory_stat_failure(after_sync=True)
+
     def check_failed_write(self, target, error, reason, *, after=0):
         content, revision = self.write_initial()
         wrapper = failing(error, after=after)(getattr(os, target))

@@ -325,12 +325,17 @@ class ManagerMetadataFiles:
 
     def _check_identity(self, directory: int) -> None:
         """Каталог по настроенному пути должен оставаться тем, в котором идёт запись."""
-        expected = os.fstat(directory)
+        try:
+            expected = os.fstat(directory)
+        except OSError:
+            _raise(MetadataStoreFailure.UNAVAILABLE, MetadataStoreReason.IO_ERROR)
         replaced = False
         try:
             with _walk(self._directory) as current:
                 current_info = os.fstat(current)
                 replaced = not os.path.samestat(expected, current_info)
+        except OSError:
+            _raise(MetadataStoreFailure.UNAVAILABLE, MetadataStoreReason.IO_ERROR)
         except ManagerMetadataStoreError:
             replaced = True
         if replaced:

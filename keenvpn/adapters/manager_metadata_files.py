@@ -341,7 +341,12 @@ class ManagerMetadataFiles:
                 replaced = not os.path.samestat(expected, current_info)
         except OSError:
             _raise(MetadataStoreFailure.UNAVAILABLE, MetadataStoreReason.IO_ERROR)
-        except ManagerMetadataStoreError:
+        except ManagerMetadataStoreError as error:
+            if error.reason not in (
+                MetadataStoreReason.MISSING.value, MetadataStoreReason.SYMLINK.value,
+                MetadataStoreReason.NOT_DIRECTORY.value,
+            ):
+                raise
             replaced = True
         if replaced:
             _raise(MetadataStoreFailure.UNSAFE, MetadataStoreReason.REPLACED)

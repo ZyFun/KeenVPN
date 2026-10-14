@@ -749,6 +749,117 @@ class FailureInjectionTests(StoreCase):
     def test_write_walk_root_open_failure_is_safe(self):
         self.check_walk_root_open_failure(write=True)
 
+    def check_rewalk_open_failure(self, *, after_sync):
+        for changed_content in (False, True):
+            for component in (False, True):
+                codes = (errno.EMFILE, errno.ENFILE, errno.EIO, errno.EACCES, errno.EPERM) if component else (
+                    errno.EMFILE, errno.ENFILE, errno.EIO,
+                )
+                for code in codes:
+                    with self.subTest(changed_content=changed_content, component=component, code=code):
+                        name = "rewalk-" + str(after_sync) + "-" + str(changed_content) + "-" + str(component) + "-" + str(code)
+                        store, directory, file, revision = self.initial_store(name)
+                        requested = metadata("вторая") if changed_content else metadata()
+                        directory_info = directory.stat()
+                        original_read, original_sync, original_open = store._read, os.fsync, os.open
+                        armed = False
+                        failed = False
+                        opened = []
+
+                        def read(descriptor):
+                            nonlocal armed
+                            current = original_read(descriptor)
+                            if not after_sync:
+                                armed = True
+                            return current
+
+                        def sync(descriptor):
+                            nonlocal armed
+                            original_sync(descriptor)
+                            if after_sync and sync_kind(os.fstat(descriptor), directory_info) == "directory":
+                                armed = True
+
+                        def open_(path, flags, *args, **kwargs):
+                            nonlocal failed
+                            if armed and path == (name if component else "/"):
+                                failed = True
+                                raise OSError(code, "моделируемый отказ", str(directory))
+                            descriptor = original_open(path, flags, *args, **kwargs)
+                            opened.append(descriptor)
+                            return descriptor
+
+                        reason = Reason.PERMISSION_DENIED if component and code in (errno.EACCES, errno.EPERM) else Reason.IO_ERROR
+                        with patch.object(store, "_read", read), patch.object(os, "fsync", sync), \
+                                patch.object(os, "open", open_):
+                            self.assert_failure(lambda: store.write_metadata(requested, revision), Failure.UNAVAILABLE, reason)
+                        self.assertTrue(failed)
+                        for descriptor in opened:
+                            with self.assertRaises(OSError) as caught:
+                                os.fstat(descriptor)
+                            self.assertEqual(caught.exception.errno, errno.EBADF)
+                        self.assertEqual(file.read_bytes(), encode_manager_metadata(requested if after_sync else metadata()))
+                        self.assertEqual(self.leftovers(directory), [])
+                        current = store.read_metadata()
+                        self.assertEqual(store.write_metadata(requested, current.revision),
+                                         metadata_revision(encode_manager_metadata(requested)))
+
+    def test_rewalk_open_failure_before_confirmation_keeps_unavailable_reason(self):
+        self.check_rewalk_open_failure(after_sync=False)
+
+    def test_rewalk_open_failure_after_fsync_keeps_unavailable_reason(self):
+        self.check_rewalk_open_failure(after_sync=True)
+
+    def test_structural_rewalk_failures_remain_directory_replacement(self):
+        for after_sync in (False, True):
+            for changed_content in (False, True):
+                for replacement in ("missing", "symlink", "file"):
+                    with self.subTest(after_sync=after_sync, changed_content=changed_content, replacement=replacement):
+                        name = "structural-" + str(after_sync) + "-" + str(changed_content) + "-" + replacement
+                        store, directory, _file, revision = self.initial_store(name)
+                        moved = directory.with_name(name + "-moved")
+                        requested = metadata("вторая") if changed_content else metadata()
+                        directory_info = directory.stat()
+                        original_read, original_sync = store._read, os.fsync
+                        replaced = False
+
+                        def replace_directory():
+                            nonlocal replaced
+                            if replaced:
+                                return
+                            directory.rename(moved)
+                            if replacement == "symlink":
+                                os.symlink(moved, directory)
+                            elif replacement == "file":
+                                directory.write_text("чужой файл")
+                            replaced = True
+
+                        def read(descriptor):
+                            current = original_read(descriptor)
+                            if not after_sync:
+                                replace_directory()
+                            return current
+
+                        def sync(descriptor):
+                            original_sync(descriptor)
+                            if after_sync and sync_kind(os.fstat(descriptor), directory_info) == "directory":
+                                replace_directory()
+
+                        with patch.object(store, "_read", read), patch.object(os, "fsync", sync):
+                            self.assert_failure(lambda: store.write_metadata(requested, revision),
+                                                Failure.UNSAFE, Reason.REPLACED)
+                        self.assertTrue(replaced)
+                        self.assertEqual((moved / METADATA_FILE_NAME).read_bytes(),
+                                         encode_manager_metadata(requested if after_sync else metadata()))
+                        self.assertEqual(self.leftovers(moved), [])
+                        if replacement == "file":
+                            self.assertEqual(directory.read_text(), "чужой файл")
+                        if replacement != "missing":
+                            directory.unlink()
+                        moved.rename(directory)
+                        current = store.read_metadata()
+                        self.assertEqual(store.write_metadata(requested, current.revision),
+                                         metadata_revision(encode_manager_metadata(requested)))
+
     def check_directory_stat_failure(self, *, after_sync):
         for changed_content in (False, True):
             for stat_call in (1, 2):

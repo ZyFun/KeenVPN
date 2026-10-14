@@ -434,6 +434,179 @@ class PublicationTests(StoreCase):
                         self.assertEqual(store.read_metadata().metadata, metadata("внешняя"))
 
 
+class DurabilityTests(StoreCase):
+    """Подтверждение относится к синхронизированному файлу в приватном каталоге."""
+
+    def test_synced_descriptor_is_held_until_confirmation_and_closed_on_exit(self):
+        for changed_content in (False, True):
+            for fail_directory_sync in (False, True):
+                with self.subTest(changed_content=changed_content, fail_directory_sync=fail_directory_sync):
+                    name = "descriptor-" + str(changed_content) + "-" + str(fail_directory_sync)
+                    store, _directory, _file, revision = self.initial_store(name)
+                    requested = metadata("вторая") if changed_content else metadata()
+                    original = os.fsync
+                    held_descriptor = None
+                    observed = False
+
+                    def sync(descriptor):
+                        nonlocal held_descriptor, observed
+                        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+                            held_descriptor = descriptor
+                        else:
+                            self.assertTrue(stat.S_ISREG(os.fstat(held_descriptor).st_mode))
+                            observed = True
+                            if fail_directory_sync:
+                                raise OSError(errno.EIO, "test")
+                        original(descriptor)
+
+                    with patch.object(os, "fsync", sync):
+                        if fail_directory_sync:
+                            self.assert_failure(lambda: store.write_metadata(requested, revision),
+                                                Failure.WRITE_UNCONFIRMED, Reason.IO_ERROR)
+                        else:
+                            self.assertEqual(store.write_metadata(requested, revision),
+                                             metadata_revision(encode_manager_metadata(requested)))
+                    self.assertTrue(observed)
+                    with self.assertRaises(OSError) as caught:
+                        os.fstat(held_descriptor)
+                    self.assertEqual(caught.exception.errno, errno.EBADF)
+
+    def test_identical_replacement_after_directory_fsync_is_rejected(self):
+        for changed_content in (False, True):
+            with self.subTest(changed_content=changed_content):
+                store, directory, file, revision = self.initial_store("inode-" + str(changed_content))
+                requested = metadata("вторая") if changed_content else metadata()
+                original = os.fsync
+                synced = []
+                replaced = False
+
+                def sync(descriptor):
+                    nonlocal replaced
+                    info = os.fstat(descriptor)
+                    original(descriptor)
+                    if stat.S_ISREG(info.st_mode):
+                        synced.append((info.st_dev, info.st_ino))
+                    elif not replaced:
+                        replaced = True
+                        replacement = directory / "external.json"
+                        replacement.write_bytes(file.read_bytes())
+                        replacement.chmod(0o600)
+                        os.replace(replacement, file)
+
+                with patch.object(os, "fsync", sync):
+                    self.assert_failure(lambda: store.write_metadata(requested, revision), Failure.UNSAFE, Reason.REPLACED)
+                self.assertTrue(replaced)
+                self.assertNotIn((file.stat().st_dev, file.stat().st_ino), synced)
+                self.assertEqual(file.read_bytes(), encode_manager_metadata(requested))
+                self.assertEqual(self.leftovers(directory), [])
+
+    def test_identical_replacement_after_file_fsync_or_rename_is_rejected(self):
+        for changed_content in (False, True):
+            with self.subTest(changed_content=changed_content):
+                store, directory, file, revision = self.initial_store("early-inode-" + str(changed_content))
+                requested = metadata("вторая") if changed_content else metadata()
+                original_sync = os.fsync
+                original_replace = os.replace
+                replaced = False
+
+                def replace_identical():
+                    nonlocal replaced
+                    replaced = True
+                    replacement = directory / "external.json"
+                    replacement.write_bytes(file.read_bytes())
+                    replacement.chmod(0o600)
+                    original_replace(replacement, file)
+
+                def sync(descriptor):
+                    original_sync(descriptor)
+                    if not replaced and stat.S_ISREG(os.fstat(descriptor).st_mode):
+                        replace_identical()
+
+                def replace(*args, **kwargs):
+                    original_replace(*args, **kwargs)
+                    replace_identical()
+
+                target, callback = ("replace", replace) if changed_content else ("fsync", sync)
+                with patch.object(os, target, callback):
+                    self.assert_failure(lambda: store.write_metadata(requested, revision), Failure.UNSAFE, Reason.REPLACED)
+                self.assertTrue(replaced)
+                self.assertEqual(file.read_bytes(), encode_manager_metadata(requested))
+                self.assertEqual(self.leftovers(directory), [])
+
+    def test_directory_permissions_changed_after_fsync_are_rejected(self):
+        for changed_content in (False, True):
+            with self.subTest(changed_content=changed_content):
+                store, directory, file, revision = self.initial_store("mode-" + str(changed_content))
+                requested = metadata("вторая") if changed_content else metadata()
+                original = os.fsync
+                changed = False
+
+                def sync(descriptor):
+                    nonlocal changed
+                    original(descriptor)
+                    if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                        changed = True
+                        directory.chmod(0o777)
+
+                with patch.object(os, "fsync", sync):
+                    self.assert_failure(lambda: store.write_metadata(requested, revision), Failure.UNSAFE, Reason.PERMISSIONS)
+                self.assertTrue(changed)
+                self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o777)
+                self.assertEqual(file.read_bytes(), encode_manager_metadata(requested))
+
+    def test_directory_owner_changed_after_fsync_is_rejected(self):
+        for changed_content in (False, True):
+            with self.subTest(changed_content=changed_content):
+                store, directory, file, revision = self.initial_store("owner-" + str(changed_content))
+                requested = metadata("вторая") if changed_content else metadata()
+                original_sync, original_stat = os.fsync, os.fstat
+                changed = False
+
+                def sync(descriptor):
+                    nonlocal changed
+                    original_sync(descriptor)
+                    if stat.S_ISDIR(original_stat(descriptor).st_mode):
+                        changed = True
+
+                def fstat(descriptor):
+                    info = original_stat(descriptor)
+                    if changed and stat.S_ISDIR(info.st_mode):
+                        values = list(info)
+                        values[4] = os.geteuid() + 1
+                        return os.stat_result(values)
+                    return info
+
+                # Владельца меняет управляемый ответ fstat; chown на машине не выполняется.
+                with patch.object(os, "fsync", sync), patch.object(os, "fstat", fstat):
+                    self.assert_failure(lambda: store.write_metadata(requested, revision), Failure.UNSAFE, Reason.OWNER)
+                self.assertTrue(changed)
+                self.assertEqual(directory.stat().st_uid, os.geteuid())
+                self.assertEqual(file.read_bytes(), encode_manager_metadata(requested))
+
+    def test_directory_permissions_changed_before_publication_are_rejected(self):
+        for changed_content in (False, True):
+            with self.subTest(changed_content=changed_content):
+                store, directory, file, revision = self.initial_store("early-mode-" + str(changed_content))
+                requested = metadata("вторая") if changed_content else metadata()
+                original = store._read
+                changed = False
+
+                def read(descriptor):
+                    nonlocal changed
+                    current = original(descriptor)
+                    if not changed:
+                        changed = True
+                        directory.chmod(0o777)
+                    return current
+
+                with patch.object(store, "_read", read):
+                    self.assert_failure(lambda: store.write_metadata(requested, revision), Failure.UNSAFE, Reason.PERMISSIONS)
+                self.assertTrue(changed)
+                self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o777)
+                self.assertEqual(file.read_bytes(), encode_manager_metadata(metadata()))
+                self.assertEqual(self.leftovers(directory), [])
+
+
 class FailureInjectionTests(StoreCase):
     def check_failed_write(self, target, error, reason, *, after=0):
         content, revision = self.write_initial()

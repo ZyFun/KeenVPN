@@ -268,14 +268,39 @@ class ManagerMetadataFiles:
         try:
             descriptor = os.open(METADATA_FILE_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
             try:
+                self._check_file_identity(directory, descriptor)
                 os.fsync(descriptor)
+                os.fsync(directory)
+                self._check_identity(directory)
+                self._check_revision(directory, expected_revision)
+                self._check_file_identity(directory, descriptor)
             finally:
                 os.close(descriptor)
-            os.fsync(directory)
         except OSError:
             _raise(MetadataStoreFailure.WRITE_UNCONFIRMED, MetadataStoreReason.IO_ERROR)
-        self._check_identity(directory)
-        self._check_revision(directory, expected_revision)
+
+    def _check_file_identity(self, directory: int, descriptor: int) -> None:
+        """Итоговый путь должен указывать на удерживаемый и синхронизированный файл.
+
+        Дескриптор остаётся открытым до этой проверки, поэтому inode исходного
+        файла не может быть повторно использован после внешней замены.
+        """
+        try:
+            expected = os.fstat(descriptor)
+            current = os.stat(METADATA_FILE_NAME, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            _raise(MetadataStoreFailure.CONFLICT)
+        except OSError:
+            _raise(MetadataStoreFailure.UNAVAILABLE, MetadataStoreReason.IO_ERROR)
+        if not os.path.samestat(expected, current):
+            _raise(MetadataStoreFailure.UNSAFE, MetadataStoreReason.REPLACED)
+        for info in (expected, current):
+            if not stat.S_ISREG(info.st_mode):
+                _raise(MetadataStoreFailure.UNSAFE, MetadataStoreReason.NOT_REGULAR_FILE)
+            if info.st_uid != os.geteuid():
+                _raise(MetadataStoreFailure.UNSAFE, MetadataStoreReason.OWNER)
+            if stat.S_IMODE(info.st_mode) != _FILE_MODE:
+                _raise(MetadataStoreFailure.UNSAFE, MetadataStoreReason.PERMISSIONS)
 
     def _remove_stale(self, directory: int) -> None:
         """Удалить временные файлы прерванной записи; под блокировкой живых записей нет.
@@ -304,11 +329,17 @@ class ManagerMetadataFiles:
         replaced = False
         try:
             with _walk(self._directory) as current:
-                replaced = not os.path.samestat(expected, os.fstat(current))
+                current_info = os.fstat(current)
+                replaced = not os.path.samestat(expected, current_info)
         except ManagerMetadataStoreError:
             replaced = True
         if replaced:
             _raise(MetadataStoreFailure.UNSAFE, MetadataStoreReason.REPLACED)
+        for info in (expected, current_info):
+            if info.st_uid != os.geteuid():
+                _raise(MetadataStoreFailure.UNSAFE, MetadataStoreReason.OWNER)
+            if stat.S_IMODE(info.st_mode) != _DIRECTORY_MODE:
+                _raise(MetadataStoreFailure.UNSAFE, MetadataStoreReason.PERMISSIONS)
 
     def _replace(self, directory: int, content: bytes, expected_revision: str | None) -> None:
         name = _TEMPORARY_PREFIX + os.urandom(8).hex()
@@ -328,8 +359,6 @@ class ManagerMetadataFiles:
                     raise OSError(errno.EIO, "short write")
                 view = view[written:]
             os.fsync(descriptor)
-            os.close(descriptor)
-            descriptor = None
             self._check_identity(directory)
             # Писатели через адаптер исключены блокировкой. Правку в обход неё, сделанную
             # во время записи временного файла, ловит повторное сравнение; остаётся только
@@ -355,10 +384,16 @@ class ManagerMetadataFiles:
         if reason is not None:
             _raise(MetadataStoreFailure.WRITE_FAILED, reason)
         try:
-            os.fsync(directory)
-        except OSError:
-            _raise(MetadataStoreFailure.WRITE_UNCONFIRMED, MetadataStoreReason.IO_ERROR)
-        # После публикации дескриптор мог остаться у переименованного каталога.
-        # Успех подтверждает файл по настроенному пути, а не только завершённый fsync.
-        self._check_identity(directory)
-        self._check_revision(directory, metadata_revision(content))
+            try:
+                os.fsync(directory)
+            except OSError:
+                _raise(MetadataStoreFailure.WRITE_UNCONFIRMED, MetadataStoreReason.IO_ERROR)
+            # Удерживаем дескриптор синхронизированного файла до проверки итогового пути.
+            self._check_identity(directory)
+            self._check_revision(directory, metadata_revision(content))
+            self._check_file_identity(directory, descriptor)
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                _raise(MetadataStoreFailure.WRITE_UNCONFIRMED, MetadataStoreReason.IO_ERROR)

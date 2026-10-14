@@ -103,7 +103,7 @@
 
 | `failure` | Когда | `reason` |
 |---|---|---|
-| `metadata_store_unavailable` | Родитель отсутствует, каталог или файл не читается | `missing`, `permission_denied`, `io_error` |
+| `metadata_store_unavailable` | Не удалось открыть корень пути, например исчерпан лимит файловых дескрипторов; родитель отсутствует, каталог или файл не читается | `missing`, `permission_denied`, `io_error` |
 | `metadata_store_unsafe` | Недопустимый или защищённый каталог, ссылка, не каталог или не обычный файл, чужой владелец, неверные права, подмена каталога или синхронизированного файла во время записи | `invalid_directory`, `protected_directory`, `symlink`, `not_directory`, `not_regular_file`, `owner`, `permissions`, `replaced` |
 | `metadata_store_busy` | Блокировку держит другая запись | — |
 | `metadata_revision_conflict` | Ревизия не совпала с ожидаемой до записи или с опубликованной после неё; внешние изменения не перезаписываются, состояние нужно перечитать | — |

@@ -90,7 +90,10 @@ def _open_failed(parent: int, name: str, error: OSError, *, directory: bool) -> 
 @contextmanager
 def _walk(path: str) -> Iterator[int]:
     """Открыть каталог по абсолютному пути, не проходя по ссылкам ни в одном компоненте."""
-    descriptor = os.open("/", _DIRECTORY_FLAGS)
+    try:
+        descriptor = os.open("/", _DIRECTORY_FLAGS)
+    except OSError:
+        _raise(MetadataStoreFailure.UNAVAILABLE, MetadataStoreReason.IO_ERROR)
     try:
         for name in (part for part in path.split("/") if part):
             try:

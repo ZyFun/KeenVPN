@@ -608,6 +608,39 @@ class DurabilityTests(StoreCase):
 
 
 class FailureInjectionTests(StoreCase):
+    def check_walk_root_open_failure(self, *, write):
+        for existing in (False, True):
+            for code in (errno.EMFILE, errno.ENFILE):
+                with self.subTest(existing=existing, code=code):
+                    directory = self.root / ("root-open-" + str(write) + "-" + str(existing) + "-" + str(code))
+                    store = ManagerMetadataFiles(str(directory))
+                    file = directory / METADATA_FILE_NAME
+                    revision = store.write_metadata(metadata(), None) if existing else None
+                    call = (lambda: store.write_metadata(metadata("вторая"), revision)) if write else store.read_metadata
+                    error = OSError(code, "моделируемый отказ", str(self.root))
+                    with patch.object(os, "open", side_effect=error) as opened, \
+                            patch.object(os, "close", wraps=os.close) as closed:
+                        self.assert_failure(call, Failure.UNAVAILABLE, Reason.IO_ERROR)
+                    opened.assert_called_once()
+                    self.assertEqual(opened.call_args.args[0], "/")
+                    closed.assert_not_called()
+                    if existing:
+                        self.assertEqual(file.read_bytes(), encode_manager_metadata(metadata()))
+                        self.assertEqual(self.leftovers(directory), [])
+                        self.assertEqual(store.read_metadata().revision, revision)
+                    else:
+                        self.assertFalse(directory.exists())
+                        self.assertIsNone(store.read_metadata())
+                    requested = metadata("вторая")
+                    self.assertEqual(store.write_metadata(requested, revision),
+                                     metadata_revision(encode_manager_metadata(requested)))
+
+    def test_read_walk_root_open_failure_is_safe(self):
+        self.check_walk_root_open_failure(write=False)
+
+    def test_write_walk_root_open_failure_is_safe(self):
+        self.check_walk_root_open_failure(write=True)
+
     def check_directory_stat_failure(self, *, after_sync):
         for changed_content in (False, True):
             for stat_call in (1, 2):

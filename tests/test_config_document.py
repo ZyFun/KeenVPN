@@ -11,7 +11,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.domain.config_document import (
     MAX_JSON_DEPTH, ConfigDocument, ConfigDocumentError, ConfigDocumentErrorCode, parse_strict_json_object,
-    strip_json_comments, valid_document_name, validate_config_document,
+    strip_json_comments, valid_document_name, valid_json_tree, validate_config_document,
 )
 from tests.support.isolation import forbid_external_effects
 from tests.support.snapshot import SNAPSHOT_ROOT, XRAY_SNAPSHOT_ROOT
@@ -88,6 +88,30 @@ class StrictJsonTests(unittest.TestCase):
         with self.assertRaises(ConfigDocumentError):
             parse_strict_json_object(b'{"a": 1}')
         self.assertEqual(set(parse_strict_json_object('{"a": %s}' % ("[" * MAX_JSON_DEPTH + "]" * MAX_JSON_DEPTH))), {"a"})
+
+    def test_comments_can_be_rejected_as_invalid_json(self):
+        self.assertEqual(parse_strict_json_object('{"a": "//не комментарий", "b": "/* и это */"}', comments=False), {
+            "a": "//не комментарий", "b": "/* и это */",
+        })
+        for text in ('{"a": 1} // хвост', '{/* x */"a": 1}', '{"a": 1 /* незакрыт'):
+            with self.subTest(text=text), self.assertRaises(ConfigDocumentError) as caught:
+                parse_strict_json_object(text, comments=False)
+            self.assertIs(caught.exception.code, ConfigDocumentErrorCode.JSON)
+
+    def test_json_tree_checks_exact_types_keys_numbers_and_depth(self):
+        valid = {"": [None, True, 0, -1.5, "текст", {"Ключ": {}, "ключ": []}]}
+        self.assertTrue(valid_json_tree(valid))
+        self.assertTrue(valid_json_tree([[]] * 3))
+        nested: object = []
+        for _ in range(MAX_JSON_DEPTH):
+            nested = [nested]
+        self.assertTrue(valid_json_tree(nested))
+        for label, value in {
+            "int_key": {1: "a"}, "bool_key": {True: "a"}, "none_key": {None: 1}, "tuple": (1,), "set": {1},
+            "bytes": b"a", "nan": float("nan"), "inf": [float("inf")], "object": object(), "too_deep": [nested],
+        }.items():
+            with self.subTest(case=label):
+                self.assertFalse(valid_json_tree(value))
 
 
 class ConfigDocumentTests(unittest.TestCase):

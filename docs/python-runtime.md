@@ -37,6 +37,7 @@ python3 -I -S -B scripts/check_python.py
 ## Дополнительные проверки
 
 - Наличие файловых API `replace`, `fsync`, `chmod`, `fchmod`, `open` и флагов `O_NOFOLLOW`, `O_DIRECTORY`.
+- Поддержка `dir_fd` у `open`, `mkdir`, `rename`, `unlink` и `stat`, `listdir` по дескриптору каталога и `stat` без перехода по ссылке: на них опирается [хранилище метаданных менеджера](manager-metadata.md).
 - Наличие `flock` и флагов блокировки, `subprocess.run` и `TimeoutExpired`.
 - Создание клиентского TLS-контекста с проверкой имени и обязательной проверкой сертификата.
 - Результат SHA-256, преобразование JSON с Unicode, IDNA-кодирование и сжатие/распаковка gzip в памяти.

@@ -242,6 +242,92 @@ class ReadWriteTests(StoreCase):
 class ConfirmationTests(StoreCase):
     """Совпадающий файл не подтверждается после внешней правки в обход блокировки."""
 
+    def check_confirmation_open_failure(self, action, failure, reason=None, code=None):
+        store, directory, file, revision = self.initial_store("confirmation-open-" + action + "-" + str(code))
+        content = file.read_bytes()
+        directory_info = directory.stat()
+        outside = self.root / (directory.name + "-foreign.json")
+        outside.write_bytes(encode_manager_metadata(metadata("внешняя")))
+        original_open, original_sync = os.open, os.fsync
+        calls = 0
+        changed = False
+        opened, synced = [], []
+
+        def open_(path, flags, *args, **kwargs):
+            nonlocal calls, changed
+            if path == METADATA_FILE_NAME:
+                calls += 1
+                # Начальное чтение и повторная проверка ревизии уже прошли.
+                if calls == 3:
+                    changed = True
+                    if action in ("missing", "symlink", "directory", "fifo"):
+                        file.unlink()
+                        if action == "symlink":
+                            os.symlink(outside, file)
+                        elif action == "directory":
+                            file.mkdir()
+                        elif action == "fifo":
+                            os.mkfifo(file)
+                    if code is not None:
+                        raise OSError(code, "моделируемый отказ", str(file))
+            descriptor = original_open(path, flags, *args, **kwargs)
+            opened.append(descriptor)
+            return descriptor
+
+        def sync(descriptor):
+            synced.append(sync_kind(os.fstat(descriptor), directory_info))
+            original_sync(descriptor)
+
+        with patch.object(os, "open", open_), patch.object(os, "fsync", sync), \
+                patch.object(os, "write", wraps=os.write) as written:
+            self.assert_failure(lambda: store.write_metadata(metadata(), revision), failure, reason)
+        self.assertTrue(changed)
+        self.assertEqual(synced, ["parent"])
+        written.assert_not_called()
+        for descriptor in opened:
+            with self.assertRaises(OSError) as caught:
+                os.fstat(descriptor)
+            self.assertEqual(caught.exception.errno, errno.EBADF)
+        self.assertEqual(outside.read_bytes(), encode_manager_metadata(metadata("внешняя")))
+        self.assertEqual(self.leftovers(directory), [])
+        if action == "missing":
+            self.assertFalse(file.exists())
+        elif action == "unavailable":
+            self.assertEqual(file.read_bytes(), content)
+        else:
+            if action == "symlink":
+                self.assertTrue(file.is_symlink())
+                self.assertEqual(os.readlink(file), str(outside))
+            elif action == "directory":
+                self.assertTrue(file.is_dir())
+            else:
+                self.assertTrue(stat.S_ISFIFO(file.stat().st_mode))
+            if action == "directory":
+                file.rmdir()
+            else:
+                file.unlink()
+        if action != "unavailable":
+            file.write_bytes(content)
+            file.chmod(0o600)
+        self.assertEqual(store.write_metadata(metadata(), revision), revision)
+
+    def test_missing_confirmation_file_is_a_revision_conflict(self):
+        for code in (None, errno.EIO):
+            with self.subTest(code=code):
+                self.check_confirmation_open_failure("missing", Failure.CONFLICT, code=code)
+
+    def test_unsafe_confirmation_target_keeps_structural_reason(self):
+        for action, reason in (("symlink", Reason.SYMLINK), ("directory", Reason.NOT_REGULAR_FILE),
+                               ("fifo", Reason.NOT_REGULAR_FILE)):
+            with self.subTest(action=action):
+                self.check_confirmation_open_failure(action, Failure.UNSAFE, reason)
+
+    def test_unavailable_confirmation_open_keeps_safe_reason(self):
+        for code in (errno.EMFILE, errno.ENFILE, errno.EIO, errno.EACCES, errno.EPERM):
+            with self.subTest(code=code):
+                reason = Reason.PERMISSION_DENIED if code in (errno.EACCES, errno.EPERM) else Reason.IO_ERROR
+                self.check_confirmation_open_failure("unavailable", Failure.UNAVAILABLE, reason, code)
+
     def change_file(self, file, action):
         if action == "delete":
             file.unlink()

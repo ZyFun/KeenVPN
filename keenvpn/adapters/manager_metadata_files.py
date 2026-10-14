@@ -64,16 +64,21 @@ def _write_reason(error: OSError) -> MetadataStoreReason:
     return MetadataStoreReason.IO_ERROR
 
 
-def _open_failed(parent: int, name: str, error: OSError, *, directory: bool) -> NoReturn:
+def _open_failed(
+    parent: int, name: str, error: OSError, *, directory: bool,
+    missing_failure: MetadataStoreFailure = MetadataStoreFailure.UNAVAILABLE,
+) -> NoReturn:
     """Объяснить отказ открытия по типу объекта без перехода по ссылке.
 
     Коды ошибок `O_NOFOLLOW` для ссылки различаются между системами,
-    поэтому тип определяется отдельным `lstat`.
+    поэтому тип определяется отдельным `lstat`. При подтверждении файла
+    его отсутствие означает конфликт ревизии, а не недоступность хранилища.
     """
     try:
         info = os.stat(name, dir_fd=parent, follow_symlinks=False)
     except FileNotFoundError:
-        _raise(MetadataStoreFailure.UNAVAILABLE, MetadataStoreReason.MISSING)
+        reason = MetadataStoreReason.MISSING if missing_failure is MetadataStoreFailure.UNAVAILABLE else None
+        _raise(missing_failure, reason)
     except OSError:
         _raise(MetadataStoreFailure.UNAVAILABLE, MetadataStoreReason.IO_ERROR)
     if stat.S_ISLNK(info.st_mode):
@@ -272,6 +277,13 @@ class ManagerMetadataFiles:
         self._check_revision(directory, expected_revision)
         try:
             descriptor = os.open(METADATA_FILE_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            _raise(MetadataStoreFailure.CONFLICT)
+        except OSError as error:
+            _open_failed(
+                directory, METADATA_FILE_NAME, error, directory=False, missing_failure=MetadataStoreFailure.CONFLICT,
+            )
+        try:
             try:
                 self._check_file_identity(directory, descriptor)
                 os.fsync(descriptor)

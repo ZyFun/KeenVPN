@@ -29,7 +29,7 @@ METADATA_SCHEMA_VERSION = 1
 MAX_METADATA_SIZE = 1024 * 1024
 """Предел размера файла в байтах при чтении и записи."""
 MAX_PATH_LENGTH = 4096
-"""Предел длины пути, как `PATH_MAX` Linux."""
+"""Предел длины пути в байтах UTF-8, включая разделители `/`."""
 MAX_PATH_COMPONENT = 255
 """Предел длины одного компонента пути в байтах UTF-8, как `NAME_MAX` ext4."""
 MAX_LIMIT_VALUE = 2**63 - 1
@@ -144,7 +144,7 @@ def valid_storage_path(value: object) -> bool:
     """Проверить абсолютный нормализованный путь каталога.
 
     Без `.`/`..`, двойных и конечной `/`, управляющих символов и NUL,
-    в пределах длины пути и компонента; корень `/` не допускается.
+    в пределах длины пути и компонента в байтах UTF-8; корень `/` не допускается.
     Существование и отсутствие ссылок проверяет адаптер хранилища.
     """
     if (
@@ -154,10 +154,12 @@ def valid_storage_path(value: object) -> bool:
     ):
         return False
     try:
-        encoded = [part.encode("utf-8") for part in value[1:].split("/")]
+        encoded = value.encode("utf-8")
     except UnicodeEncodeError:
         return False
-    return all(0 < len(part) <= MAX_PATH_COMPONENT for part in encoded)
+    return len(encoded) <= MAX_PATH_LENGTH and all(
+        0 < len(part) <= MAX_PATH_COMPONENT for part in encoded[1:].split(b"/")
+    )
 
 
 def _valid_limit(value: object) -> bool:

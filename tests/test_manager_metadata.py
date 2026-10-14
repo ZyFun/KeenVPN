@@ -25,6 +25,7 @@ DATA_ID = "0000abcd-0000-4000-8000-00000000000a"
 BACKUP_ID = "0000abcd-0000-4000-8000-00000000000c"
 DATA_PATH = "/tmp/mnt/test-data/keenvpn-private"
 BACKUP_PATH = "/tmp/mnt/test-backup/keenvpn-copies"
+LONG_UTF8_PATH = "/" + "/".join(["я" * 120] * 18)
 KNOWN, UNKNOWN, ABSENT = ValueState.KNOWN, ValueState.UNKNOWN, ValueState.ABSENT
 
 
@@ -84,6 +85,15 @@ def raw(text: str) -> bytes:
 
 
 class ModelTests(unittest.TestCase):
+    def test_construction_rejects_overlong_utf8_path(self):
+        for verified in (False, True):
+            with self.subTest(verified=verified):
+                with self.assertRaises(ManagerMetadataError) as caught:
+                    location(path=LONG_UTF8_PATH, verified=verified)
+                self.assertIs(caught.exception.code, Code.PATH)
+                self.assertEqual(caught.exception.field, "path")
+                self.assertNotIn(LONG_UTF8_PATH, str(caught.exception))
+
     def test_round_trip_is_canonical_and_revision_is_sha256_of_bytes(self):
         metadata = ManagerMetadata(placement())
         content = encode_manager_metadata(metadata)
@@ -229,6 +239,15 @@ class FormatTests(unittest.TestCase):
         self.assertIs(caught.exception.code, code)
         self.assertEqual(caught.exception.field, field)
         return caught.exception
+
+    def test_decoding_rejects_overlong_utf8_path(self):
+        for verified in (False, True):
+            with self.subTest(verified=verified):
+                source = document()
+                source["storage"]["roles"]["data"]["path"]["value"] = LONG_UTF8_PATH
+                source["storage"]["roles"]["data"]["verified"] = verified
+                error = self.assert_rejected(encoded(source), Code.PATH, "storage.roles.data.path")
+                self.assertNotIn(LONG_UTF8_PATH, str(error))
 
     def test_rejects_non_utf8_oversized_and_non_bytes_content(self):
         for content in ("{}", bytearray(b"{}"), None, b"\xff{}", b'{"a": "\xc3"}'):
@@ -396,6 +415,11 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(ManagerMetadataError):
             encode_manager_metadata(metadata)
 
+    def test_encoding_rejects_tampered_overlong_utf8_path(self):
+        metadata = ManagerMetadata(placement())
+        self.tampered(metadata.storage.roles.data.path, "value", LONG_UTF8_PATH)
+        self.assert_invalid(metadata, Code.PATH, "storage.roles.data.path")
+
     def test_valid_models_pass_and_foreign_types_fail(self):
         validate_manager_metadata(ManagerMetadata(placement()))
         validate_manager_metadata(ManagerMetadata())
@@ -488,6 +512,20 @@ class ValidationTests(unittest.TestCase):
 
 
 class HelperTests(unittest.TestCase):
+    def test_storage_path_limit_uses_utf8_bytes_including_separators(self):
+        for character in ("a", "я", "😀"):
+            width = len(character.encode("utf-8"))
+            prefix = ("/" + character * (240 // width)) * 16
+            for extra in (-1, 0, 1):
+                with self.subTest(character=character, extra=extra):
+                    size = manager_metadata.MAX_PATH_LENGTH + extra
+                    count, tail = divmod(size - len(prefix.encode("utf-8")) - 1, width)
+                    path = prefix + "/" + character * count + "a" * tail
+                    self.assertEqual(len(path.encode("utf-8")), size)
+                    self.assertTrue(all(len(part.encode("utf-8")) <= manager_metadata.MAX_PATH_COMPONENT
+                                        for part in path[1:].split("/")))
+                    self.assertEqual(valid_storage_path(path), extra <= 0)
+
     def test_storage_id_and_path_formats(self):
         self.assertTrue(valid_storage_id(DATA_ID))
         for value in (DATA_ID.upper(), DATA_ID + "\n", "/dev/sda1", "sda1", "ENTWARE", "1234-ABCD", None, 1):

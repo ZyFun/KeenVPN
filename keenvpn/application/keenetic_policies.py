@@ -8,10 +8,15 @@ from keenvpn.application.contract import (
     check_contract_version, failed, invalid_command, new_operation_id, succeeded,
 )
 from keenvpn.application.ports import KeeneticPolicySource
+from keenvpn.application.source_checks import unavailable
 from keenvpn.domain.keenetic_policy import (
     KeeneticPolicyError, KeeneticPolicyErrorCode, KeeneticPolicySet, PolicyResolution,
     resolve_policy, validate_policy_description, validate_policy_id, validate_policy_set,
 )
+
+
+POLICIES_UNAVAILABLE = unavailable("keenetic_policies_unavailable", "Не удалось прочитать политики Keenetic.")
+"""Отказ источника политик; один для всех сценариев, которые их читают."""
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -136,10 +141,7 @@ class ResolveKeeneticPolicyHandler:
             policies = self._policies.current_policies()
         except Exception:
             # Текст и цепочка исключения адаптера могут содержать описания политик.
-            return failed(operation_id, name, ErrorDetail(
-                ErrorCategory.SOURCE_FAILED, "keenetic_policies_unavailable",
-                "Не удалось прочитать политики Keenetic.",
-            ))
+            return failed(operation_id, name, POLICIES_UNAVAILABLE)
         error = check_policies(policies)
         if error is not None:
             return failed(operation_id, name, error)

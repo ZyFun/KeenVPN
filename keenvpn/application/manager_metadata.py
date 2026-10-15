@@ -25,6 +25,7 @@ from keenvpn.application.ports import (
     ManagerMetadataStore, ManagerMetadataStoreError, MetadataStoreFailure, MetadataStoreReason,
     StoragePlacementSource,
 )
+from keenvpn.application.views import view_dict, view_fields
 from keenvpn.domain.manager_metadata import (
     ManagerMetadata, ManagerMetadataError, ManagerMetadataErrorCode, StoragePlacement, StoredManagerMetadata,
     UnknownFields, encode_manager_metadata, metadata_revision, valid_metadata_revision, validate_manager_metadata,
@@ -47,15 +48,6 @@ class ImportStoragePlacement:
     name: ClassVar[str] = "import_storage_placement"
 
     contract_version: int = CONTRACT_VERSION
-
-
-def _fields(view_type: type, values: dict[str, object]) -> dict[str, object]:
-    return {name: values[name] for name in view_type.__dataclass_fields__}
-
-
-def _view_dict(view: object) -> dict[str, object]:
-    """Снять поля frozen dataclass со слотами, у которого нет `__dict__`."""
-    return {name: getattr(view, name) for name in view.__dataclass_fields__}
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,9 +107,9 @@ class ManagerMetadataView:
             storage=None if storage is None else StoragePlacementView(
                 variant_state=storage["variant_state"],
                 variant=storage["variant"],
-                roles=tuple(StorageRoleView(**_fields(StorageRoleView, item)) for item in storage["roles"]),
+                roles=tuple(StorageRoleView(**view_fields(StorageRoleView, item)) for item in storage["roles"]),
                 distinct_storage_count=storage["distinct_storage_count"],
-                history_limits=HistoryLimitsView(**_fields(HistoryLimitsView, storage["history_limits"])),
+                history_limits=HistoryLimitsView(**view_fields(HistoryLimitsView, storage["history_limits"])),
             ),
             unknown_field_count=diagnostic["unknown_field_count"],
         )
@@ -127,11 +119,11 @@ class ManagerMetadataView:
         storage = None
         if self.storage is not None:
             storage = {
-                **_view_dict(self.storage),
-                "roles": [_view_dict(role) for role in self.storage.roles],
-                "history_limits": _view_dict(self.storage.history_limits),
+                **view_dict(self.storage),
+                "roles": [view_dict(role) for role in self.storage.roles],
+                "history_limits": view_dict(self.storage.history_limits),
             }
-        return {**_view_dict(self), "storage": storage}
+        return {**view_dict(self), "storage": storage}
 
 
 @dataclass(frozen=True, slots=True)

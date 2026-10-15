@@ -8,6 +8,8 @@ from keenvpn.application.contract import (
     check_contract_version, failed, invalid_command, new_operation_id, succeeded,
 )
 from keenvpn.application.ports import XKeenInitSource, XKeenListSource, XKeenSettingsSource, XrayConfigSource
+from keenvpn.application.source_checks import SourceCheck, check_source_model, unavailable
+from keenvpn.application.views import view_dict, view_fields
 from keenvpn.domain.config_document import ConfigDocumentError
 from keenvpn.domain.xkeen_config import (
     XKeenConfig, XKeenConfigError, XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings,
@@ -23,15 +25,6 @@ class InspectProxyConfig:
     name: ClassVar[str] = "inspect_proxy_config"
 
     contract_version: int = CONTRACT_VERSION
-
-
-def _fields(view_type: type, values: dict[str, object]) -> dict[str, object]:
-    return {name: values[name] for name in view_type.__dataclass_fields__}
-
-
-def _view_dict(view: object) -> dict[str, object]:
-    """Снять поля frozen dataclass со слотами, у которого нет `__dict__`."""
-    return {name: getattr(view, name) for name in view.__dataclass_fields__}
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,37 +137,37 @@ class XrayConfigView:
         return cls(
             part_count=diagnostic["part_count"],
             parts=tuple(
-                XrayPartView(**{**_fields(XrayPartView, item), "sections": tuple(item["sections"])})
+                XrayPartView(**{**view_fields(XrayPartView, item), "sections": tuple(item["sections"])})
                 for item in diagnostic["parts"]
             ),
             sections=tuple(XraySectionView(name, tuple(parts)) for name, parts in diagnostic["sections"].items()),
             duplicate_sections=tuple(diagnostic["duplicate_sections"]),
             dns_tags=tuple(diagnostic["dns_tags"]),
             domain_strategies=tuple(diagnostic["domain_strategies"]),
-            inbounds=tuple(XrayEndpointView(**_fields(XrayEndpointView, item)) for item in diagnostic["inbounds"]),
-            outbounds=tuple(XrayEndpointView(**_fields(XrayEndpointView, item)) for item in diagnostic["outbounds"]),
+            inbounds=tuple(XrayEndpointView(**view_fields(XrayEndpointView, item)) for item in diagnostic["inbounds"]),
+            outbounds=tuple(XrayEndpointView(**view_fields(XrayEndpointView, item)) for item in diagnostic["outbounds"]),
             duplicate_inbound_tags=tuple(diagnostic["duplicate_inbound_tags"]),
             duplicate_outbound_tags=tuple(diagnostic["duplicate_outbound_tags"]),
             duplicate_balancer_tags=tuple(diagnostic["duplicate_balancer_tags"]),
             rule_count=diagnostic["rule_count"],
             rules=tuple(
                 XrayRuleView(**{
-                    **_fields(XrayRuleView, item),
+                    **view_fields(XrayRuleView, item),
                     "inbound_tags": tuple(item["inbound_tags"]),
                     "conditions": tuple(XrayConditionView(key, count) for key, count in item["conditions"].items()),
                 })
                 for item in diagnostic["rules"]
             ),
             balancers=tuple(
-                XrayBalancerView(**{**_fields(XrayBalancerView, item), "selector": tuple(item["selector"])})
+                XrayBalancerView(**{**view_fields(XrayBalancerView, item), "selector": tuple(item["selector"])})
                 for item in diagnostic["balancers"]
             ),
             observatory_subjects=tuple(
-                XrayObservatorySubjectView(**_fields(XrayObservatorySubjectView, item))
+                XrayObservatorySubjectView(**view_fields(XrayObservatorySubjectView, item))
                 for item in diagnostic["observatory_subjects"]
             ),
             unsupported_paths=tuple(
-                XrayUnsupportedPathView(**_fields(XrayUnsupportedPathView, item))
+                XrayUnsupportedPathView(**view_fields(XrayUnsupportedPathView, item))
                 for item in diagnostic["unsupported_paths"]
             ),
         )
@@ -183,28 +176,28 @@ class XrayConfigView:
         """Вернуть JSON-совместимое представление."""
         return {
             "part_count": self.part_count,
-            "parts": [{**_view_dict(part), "sections": list(part.sections)} for part in self.parts],
+            "parts": [{**view_dict(part), "sections": list(part.sections)} for part in self.parts],
             "sections": {section.name: list(section.parts) for section in self.sections},
             "duplicate_sections": list(self.duplicate_sections),
             "dns_tags": list(self.dns_tags),
             "domain_strategies": list(self.domain_strategies),
-            "inbounds": [_view_dict(item) for item in self.inbounds],
-            "outbounds": [_view_dict(item) for item in self.outbounds],
+            "inbounds": [view_dict(item) for item in self.inbounds],
+            "outbounds": [view_dict(item) for item in self.outbounds],
             "duplicate_inbound_tags": list(self.duplicate_inbound_tags),
             "duplicate_outbound_tags": list(self.duplicate_outbound_tags),
             "duplicate_balancer_tags": list(self.duplicate_balancer_tags),
             "rule_count": self.rule_count,
             "rules": [
                 {
-                    **_view_dict(rule),
+                    **view_dict(rule),
                     "inbound_tags": list(rule.inbound_tags),
                     "conditions": {condition.key: condition.value_count for condition in rule.conditions},
                 }
                 for rule in self.rules
             ],
-            "balancers": [{**_view_dict(item), "selector": list(item.selector)} for item in self.balancers],
-            "observatory_subjects": [_view_dict(item) for item in self.observatory_subjects],
-            "unsupported_paths": [_view_dict(item) for item in self.unsupported_paths],
+            "balancers": [{**view_dict(item), "selector": list(item.selector)} for item in self.balancers],
+            "observatory_subjects": [view_dict(item) for item in self.observatory_subjects],
+            "unsupported_paths": [view_dict(item) for item in self.unsupported_paths],
         }
 
 
@@ -302,20 +295,20 @@ class XKeenConfigView:
         port_53 = diagnostic["port_53"]
         return cls(
             settings=XKeenSettingsView(**{
-                **_fields(XKeenSettingsView, {**settings, "killswitch": XKeenFlagView(**settings["killswitch"])}),
+                **view_fields(XKeenSettingsView, {**settings, "killswitch": XKeenFlagView(**settings["killswitch"])}),
                 "sections": tuple(settings["sections"]),
                 "settings_keys": tuple(settings["settings_keys"]),
             }),
             init=XKeenInitView(**{
-                **_fields(XKeenInitView, {**init, "flags": ()}),
+                **view_fields(XKeenInitView, {**init, "flags": ()}),
                 "duplicate_names": tuple(init["duplicate_names"]),
                 "flags": tuple(XKeenInitFlagView(name=name, **flag) for name, flag in init["flags"].items()),
             }),
-            port_exclude=XKeenListView(**_fields(XKeenListView, lists["port_exclude"])),
-            port_proxying=XKeenListView(**_fields(XKeenListView, lists["port_proxying"])),
-            ip_exclude=XKeenListView(**_fields(XKeenListView, lists["ip_exclude"])),
+            port_exclude=XKeenListView(**view_fields(XKeenListView, lists["port_exclude"])),
+            port_proxying=XKeenListView(**view_fields(XKeenListView, lists["port_proxying"])),
+            ip_exclude=XKeenListView(**view_fields(XKeenListView, lists["ip_exclude"])),
             port_53=Port53View(**{
-                **_fields(Port53View, {**port_53, "proxy_dns": None, "proxy_router": None}),
+                **view_fields(Port53View, {**port_53, "proxy_dns": None, "proxy_router": None}),
                 "proxy_dns": XKeenFlagView(**port_53["proxy_dns"]),
                 "proxy_router": XKeenFlagView(**port_53["proxy_router"]),
             }),
@@ -325,26 +318,26 @@ class XKeenConfigView:
         """Вернуть JSON-совместимое представление."""
         return {
             "settings": {
-                **_view_dict(self.settings),
+                **view_dict(self.settings),
                 "sections": list(self.settings.sections),
                 "settings_keys": list(self.settings.settings_keys),
-                "killswitch": _view_dict(self.settings.killswitch),
+                "killswitch": view_dict(self.settings.killswitch),
             },
             "init": {
-                **_view_dict(self.init),
+                **view_dict(self.init),
                 "duplicate_names": list(self.init.duplicate_names),
                 "flags": {flag.name: {name: getattr(flag, name) for name in ("status", "value", "indented_count")}
                           for flag in self.init.flags},
             },
             "lists": {
-                "port_exclude": _view_dict(self.port_exclude),
-                "port_proxying": _view_dict(self.port_proxying),
-                "ip_exclude": _view_dict(self.ip_exclude),
+                "port_exclude": view_dict(self.port_exclude),
+                "port_proxying": view_dict(self.port_proxying),
+                "ip_exclude": view_dict(self.ip_exclude),
             },
             "port_53": {
-                **_view_dict(self.port_53),
-                "proxy_dns": _view_dict(self.port_53.proxy_dns),
-                "proxy_router": _view_dict(self.port_53.proxy_router),
+                **view_dict(self.port_53),
+                "proxy_dns": view_dict(self.port_53.proxy_dns),
+                "proxy_router": view_dict(self.port_53.proxy_router),
             },
         }
 
@@ -387,6 +380,8 @@ _LIST_FIELDS = {
     XKeenListName.PORT_PROXYING: "port_proxying",
     XKeenListName.IP_EXCLUDE: "ip_exclude",
 }
+_LIST_NAME = {field_name: name for name, field_name in _LIST_FIELDS.items()}
+_DOMAIN_ERRORS = (XrayConfigError, XKeenConfigError, ConfigDocumentError)
 _UNAVAILABLE = {
     "xray": ("xray_config_unavailable", "Не удалось прочитать части конфигурации Xray."),
     "settings": ("xkeen_settings_unavailable", "Не удалось прочитать настройки XKeen."),
@@ -395,65 +390,51 @@ _UNAVAILABLE = {
     "port_proxying": ("xkeen_port_proxying_unavailable", "Не удалось прочитать список перехватываемых портов XKeen."),
     "ip_exclude": ("xkeen_ip_exclude_unavailable", "Не удалось прочитать список исключённых адресов XKeen."),
 }
-_INVALID = {
-    "xray": (
+_CHECKS = {
+    "xray": SourceCheck(
         "invalid_xray_config", XrayConfigSet, validate_xray_config_set,
         "Источник вернул части конфигурации Xray в неподдерживаемом формате.",
-        "Источник вернул некорректные части конфигурации Xray.",
+        "Источник вернул некорректные части конфигурации Xray.", _DOMAIN_ERRORS,
     ),
-    "settings": (
+    "settings": SourceCheck(
         "invalid_xkeen_settings", XKeenSettings, validate_xkeen_settings,
         "Источник вернул настройки XKeen в неподдерживаемом формате.",
-        "Источник вернул некорректные настройки XKeen.",
+        "Источник вернул некорректные настройки XKeen.", _DOMAIN_ERRORS,
     ),
-    "init": (
+    "init": SourceCheck(
         "invalid_xkeen_init", XKeenInitParameters, validate_xkeen_init,
         "Источник вернул параметры init XKeen в неподдерживаемом формате.",
-        "Источник вернул некорректные параметры init XKeen.",
+        "Источник вернул некорректные параметры init XKeen.", _DOMAIN_ERRORS,
     ),
-    "port_exclude": (
+    "port_exclude": SourceCheck(
         "invalid_xkeen_port_exclude", XKeenList, validate_xkeen_list,
         "Источник вернул список исключённых портов XKeen в неподдерживаемом формате.",
-        "Источник вернул некорректный список исключённых портов XKeen.",
+        "Источник вернул некорректный список исключённых портов XKeen.", _DOMAIN_ERRORS,
     ),
-    "port_proxying": (
+    "port_proxying": SourceCheck(
         "invalid_xkeen_port_proxying", XKeenList, validate_xkeen_list,
         "Источник вернул список перехватываемых портов XKeen в неподдерживаемом формате.",
-        "Источник вернул некорректный список перехватываемых портов XKeen.",
+        "Источник вернул некорректный список перехватываемых портов XKeen.", _DOMAIN_ERRORS,
     ),
-    "ip_exclude": (
+    "ip_exclude": SourceCheck(
         "invalid_xkeen_ip_exclude", XKeenList, validate_xkeen_list,
         "Источник вернул список исключённых адресов XKeen в неподдерживаемом формате.",
-        "Источник вернул некорректный список исключённых адресов XKeen.",
+        "Источник вернул некорректный список исключённых адресов XKeen.", _DOMAIN_ERRORS,
     ),
 }
-_DOMAIN_ERRORS = (XrayConfigError, XKeenConfigError, ConfigDocumentError)
 LIST_NAME_MISMATCH = "xkeen_list_name_mismatch"
 """Причина отказа, когда источник вернул список с другим именем."""
 
 
-def _unavailable(source: str) -> ErrorDetail:
-    code, message = _UNAVAILABLE[source]
-    return ErrorDetail(ErrorCategory.SOURCE_FAILED, code, message)
-
-
 def _check_model(source: str, value: object) -> ErrorDetail | None:
-    """Проверить тип ответа и повторно проверить модель по её данным."""
-    code, model_type, validate, type_message, data_message = _INVALID[source]
-    if type(value) is not model_type:
-        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, code, type_message)
-    try:
-        validate(value)
-    except _DOMAIN_ERRORS as error:
-        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, code, data_message, reason=error.code.value)
-    except Exception:
-        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, code, type_message)
-    if model_type is XKeenList and value.name is not _LIST_NAME[source]:
-        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, code, data_message, reason=LIST_NAME_MISMATCH)
+    """Проверить ответ источника; у списка дополнительно сверить имя с запрошенным."""
+    check = _CHECKS[source]
+    error = check_source_model(check, value)
+    if error is not None:
+        return error
+    if check.model_type is XKeenList and value.name is not _LIST_NAME[source]:
+        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, check.code, check.data_message, reason=LIST_NAME_MISMATCH)
     return None
-
-
-_LIST_NAME = {field_name: name for name, field_name in _LIST_FIELDS.items()}
 
 
 class InspectProxyConfigHandler:
@@ -517,7 +498,7 @@ class InspectProxyConfigHandler:
                 value = read()
             except Exception:
                 # Текст и цепочка исключения источника могут содержать пароли, адреса и пути.
-                return _unavailable(source)
+                return unavailable(*_UNAVAILABLE[source])
             error = _check_model(source, value)
             if error is not None:
                 return error

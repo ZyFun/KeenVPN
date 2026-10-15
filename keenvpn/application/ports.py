@@ -12,7 +12,7 @@ from keenvpn.domain.connection import TrojanConnection
 from keenvpn.domain.geodata import GeoDatabaseInventory
 from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
 from keenvpn.domain.keenetic_policy import KeeneticPolicySet
-from keenvpn.domain.manager_metadata import ManagerMetadata, StoredManagerMetadata
+from keenvpn.domain.manager_metadata import ManagerMetadata, StoragePlacement, StoredManagerMetadata
 from keenvpn.domain.profile import ConnectionProfile
 from keenvpn.domain.routing import GeoIPCondition, GeoSiteCondition
 from keenvpn.domain.routing_explanation import GeoMatch
@@ -151,6 +151,19 @@ class GeoDataSource(Protocol):
 
     def match(self, condition: GeoIPCondition | GeoSiteCondition, values: tuple[str, ...]) -> GeoMatch:
         """Вернуть результат и метаданные фактически использованной базы."""
+        ...
+
+
+class StoragePlacementSource(Protocol):
+    """Чтение обнаруженного размещения собственных данных, истории и копий и лимитов истории.
+
+    Источник только читает: не создаёт каталоги, не выбирает значения
+    по умолчанию и не выводит лимиты из размера или свободного места раздела.
+    Значение, которое не удалось определить, — `unknown`, которого нет — `absent`.
+    """
+
+    def current_storage_placement(self) -> StoragePlacement:
+        """Вернуть размещение без неизвестных полей; при сбое — вызвать исключение."""
         ...
 
 

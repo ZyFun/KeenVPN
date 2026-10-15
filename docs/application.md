@@ -5,7 +5,7 @@
 не читают терминал и не запрашивают подтверждение: отображение результата
 и диалог с пользователем остаются на стороне вызывающего кода.
 
-Доступны сценарии только для чтения:
+Доступны сценарии:
 
 | Команда | Обработчик | Что делает |
 | --- | --- | --- |
@@ -19,10 +19,15 @@
 | `InspectProxyConfig` | `InspectProxyConfigHandler` | Читает [конфигурацию Xray и XKeen](proxy-config.md): части Xray, `xkeen.json`, параметры init и три списка через раздельные источники и возвращает структурную сводку без доменов, адресов, путей и паролей |
 | `InspectInstallation` | `InspectInstallationHandler` | Читает [существующую установку](installation.md) поверх двух сценариев выше и двух портов: состояние Keenetic, конфигурацию Xray и XKeen, инвентарь геобаз со ссылками правил на наборы и наблюдение процесса Xray; отказ любого источника завершает чтение его кодом без частичного результата |
 | `ImportRoutingScheme` | `ImportRoutingSchemeHandler` | Переводит действующие [правила Xray в модель маршрутизации](routing-import.md) поверх `InspectProxyConfigHandler.read()`: группы условий в порядке файла, явные действия, неизвестные значения и поля только для просмотра, политика без выдуманного финального правила |
+| `InspectManagerMetadata` | `InspectManagerMetadataHandler` | Читает [метаданные менеджера](manager-metadata.md) из хранилища и показывает вариант хранения, состояния ролей и лимиты истории без путей, идентификаторов хранилищ и ревизии |
+| `ImportStoragePlacement` | `ImportStoragePlacementHandler` | Сохраняет обнаруженное размещение хранилищ и лимиты истории в метаданных менеджера как есть: создаёт или дописывает раздел размещения, совпадение не записывает, расхождение отклоняет без перезаписи |
 
 Сценарии работают в памяти. Они не устанавливают соединения, не выполняют DNS,
 не запускают Xray, не записывают файлы и не меняют конфигурацию роутера.
-Успешный результат не подтверждает работоспособность сервера или VPN.
+Единственная запись — `ImportStoragePlacement`: он сохраняет собственные метаданные
+менеджера через порт хранилища, а active configs Xray и XKeen, настройки Keenetic
+и процессы не затрагивает. Успешный результат не подтверждает работоспособность
+сервера или VPN.
 
 ## Граница с интерфейсом
 
@@ -35,7 +40,8 @@ application импортирует доменные модели и собств
 контракты, domain не зависит от application, адаптеров или интерфейса.
 
 `ConnectionLinkView`, `ConnectionProfileView`, `ProtocolSupportView`, `RouteExplanationView`,
-`KeeneticPolicyResolutionView`, `KeeneticStateView`, `ProxyConfigView`, `InstallationView`, `RoutingSchemeView` и `ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
+`KeeneticPolicyResolutionView`, `KeeneticStateView`, `ProxyConfigView`, `InstallationView`, `RoutingSchemeView`,
+`ManagerMetadataStatusView`, `StoragePlacementImportView` и `ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
 ошибки и преобразование `to_dict()` относятся к контракту результата: они не добавляют ANSI-оформление,
 заголовки меню или выравнивание для терминала. Отображение и сериализация одного
 результата не требуют повторного выполнения сценария или чтения его источников.
@@ -50,7 +56,7 @@ application импортирует доменные модели и собств
 | --- | --- |
 | `contract_version` | Версия формата команд и результатов, сейчас `1` (`CONTRACT_VERSION`) |
 | `operation_id` | Идентификатор вызова; по умолчанию случайная hex-строка |
-| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_installation` или `import_routing_scheme` |
+| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_installation`, `import_routing_scheme`, `inspect_manager_metadata` или `import_storage_placement` |
 | `status` | `OperationStatus.SUCCEEDED` или `OperationStatus.FAILED` |
 | `data` | Безопасное представление при успехе, иначе `None` |
 | `error` | `ErrorDetail` при отказе, иначе `None` |
@@ -69,7 +75,7 @@ application импортирует доменные модели и собств
 | --- | --- |
 | `invalid_request` | Команда неверного типа или с полями неверных типов (`invalid_command`), либо другой версии контракта (`unsupported_contract_version`) |
 | `invalid_input` | Введённое значение некорректно: ссылка, селектор протокола (`invalid_protocol_selector`) или движка (`invalid_engine_selector`), домен, IP, сочетание источников, идентификатор профиля, описание или выбранный ID политики; либо профиль с указанным ID отсутствует, либо выбранная политика не входит в текущие совпадения |
-| `unsupported` | Значение корректно по форме, но не поддерживается: протокол, схема, режим безопасности, транспорт, параметр, версия формата профиля, движок или операция |
+| `unsupported` | Значение корректно по форме, но не поддерживается: протокол, схема, режим безопасности, транспорт, параметр, версия формата профиля, движок или операция; смена уже записанного размещения хранилищ импортом |
 | `source_failed` | Источник данных не смог выполнить запрос |
 | `invalid_source_data` | Источник вернул данные, противоречащие контракту или модели |
 
@@ -460,10 +466,43 @@ outbound и балансировщиков показываются только
 Правила перевода, причины режима только для просмотра и пример
 с искусственными источниками описаны в [импорте правил маршрутизации](routing-import.md).
 
+## Метаданные менеджера и первичный импорт размещения
+
+Оба сценария работают с портом `ManagerMetadataStore` — собственными
+[метаданными менеджера](manager-metadata.md), например через файловое
+хранилище `ManagerMetadataFiles`. `InspectManagerMetadataHandler(store)` только
+читает их; `ImportStoragePlacementHandler(source, store)` дополнительно получает
+порт `StoragePlacementSource.current_storage_placement() -> StoragePlacement` —
+обнаруженное размещение собственных данных, истории и копий и лимиты истории.
+Источник только читает, не выбирает значения по умолчанию и сообщает об
+отказе исключением.
+
+Импорт вызывает источник один раз, затем один раз читает хранилище
+и сравнивает; записей не больше одной. Размещение и лимиты сохраняются как
+есть: неизвестное не заменяется отсутствующим, лимиты не меняются. Повторный
+импорт без изменений ничего не записывает, а смену уже записанного размещения
+не выполняет. Подробности поведения, сравнения и представлений — в разделе
+[прикладных сценариев метаданных](manager-metadata.md#прикладные-сценарии).
+
+| Ситуация | Категория и код |
+| --- | --- |
+| Неверный тип команды или версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
+| Источник размещения вызвал исключение | `source_failed` / `storage_placement_unavailable` |
+| Источник вернул не `StoragePlacement`, повреждённую модель или модель с неизвестными полями | `invalid_source_data` / `invalid_storage_placement`; доменная причина в `reason` |
+| Отказ хранилища | код `MetadataStoreFailure` без изменения: `source_failed` / `metadata_store_unavailable`, `metadata_store_unsafe`, `metadata_store_busy`, `metadata_revision_conflict`, `metadata_write_failed`, `metadata_write_unconfirmed`; `invalid_source_data` / `invalid_stored_metadata` |
+| Непредвиденное исключение хранилища | `source_failed` / `metadata_store_failed` |
+| Хранилище вернуло ответ не по контракту | `invalid_source_data` / `invalid_metadata_store_result` |
+| Размещение не удалось объединить с прочитанными метаданными | `invalid_source_data` / `manager_metadata_inconsistent`; доменная причина в `reason` |
+| Обнаруженное размещение отличается от записанного | `unsupported` / `storage_placement_mismatch` |
+
+`reason` отказа хранилища передаётся, только если входит в известный набор
+причин `MetadataStoreReason` или кодов домена для `invalid_stored_metadata`.
+Отсутствие метаданных при просмотре — успешный результат с `present=False`.
+
 ## Тестовые адаптеры в памяти
 
 Модуль [`tests/support/in_memory.py`](../tests/support/in_memory.py) содержит
-управляемые реализации четырнадцати используемых портов. Это средства тестов:
+управляемые реализации шестнадцати используемых портов. Это средства тестов:
 application получает их через конструкторы обработчиков и не импортирует
 `tests`. Адаптеры не используют файлы, сеть, SSH или процессы.
 
@@ -483,6 +522,8 @@ application получает их через конструкторы обраб
 | `InMemoryGeoDatabaseSource` | `outcome` — ответ источника инвентаря геобаз, `calls` — число обращений; каталог и файлы не читаются |
 | `InMemoryXrayProcessSource` | `outcome` — ответ источника наблюдения процесса Xray, `calls` — число обращений; `pidof`, файлы и команды XKeen не вызываются |
 | `InMemoryGeoDataSource` | `set_response(condition, values, outcome)` — ответ точного запроса; `calls` — неизменяемый снимок истории `GeoDataCall` |
+| `InMemoryStoragePlacementSource` | `outcome` — обнаруженное размещение, `calls` — число обращений; монтирования, UUID и файлы не читаются |
+| `InMemoryManagerMetadataStore` | `content` — байты файла метаданных или `None`; `read_failure`, `write_failure`, `publish_before_failure` и `before_revision_check` — отказы и внешняя правка; `read_calls`, `write_calls` (tuple `MetadataWriteCall`) и `publications` — наблюдение |
 
 Ответы повторяются до явной замены. `outcome` возвращается как есть, а экземпляр
 `BaseException` вызывается как отказ, включая `KeyboardInterrupt`/`SystemExit`.
@@ -514,6 +555,19 @@ IP — к стандартной записи. Значения, которые 
 `outcome` или `set_response` для того же запроса. Замена сбрасывает traceback
 и `__context__` прежнего исключения, даже если тест хранит его в переменной.
 Не выводите его traceback с локальными переменными.
+
+`InMemoryManagerMetadataStore` повторяет семантику ревизии файлового хранилища
+штатными функциями формата: чтение отсутствующего файла даёт `None`, повреждённые
+байты и другая версия схемы — `invalid_stored_metadata` с кодом домена; запись
+кодирует модель (некорректная — `ManagerMetadataError`), сверяет текущую
+ревизию с ожидаемой и при расхождении отказывает `metadata_revision_conflict`
+без изменения байтов, совпадающие байты повторно не публикует и возвращает
+SHA-256 байтов. `write_failure` срабатывает до сверки без изменения байтов,
+а при `publish_before_failure=True` — после публикации, как неподтверждённая
+запись. `before_revision_check` вызывается непосредственно перед сверкой
+ревизии и позволяет имитировать внешнюю правку. Отказ задаётся экземпляром
+исключения, байты — `bytes` или `None`; иное значение — `AdapterSetupError`.
+`repr()` адаптера и `MetadataWriteCall` не показывает модели и байты.
 
 `InMemoryConnectionProfileSource` следует тем же правилам отказов и очистки
 кадров. Незаданный UUID вызывает `UnconfiguredResponseError`, а ответ `None`

@@ -4,19 +4,29 @@ from dataclasses import FrozenInstanceError, replace
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
+import tempfile
 import traceback
 import types
 import unittest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from keenvpn.adapters.manager_metadata_files import METADATA_FILE_NAME, ManagerMetadataFiles
 from keenvpn.adapters.trojan_uri import TrojanLinkParser
 from keenvpn.application.connections import InspectConnectionLink, InspectConnectionLinkHandler
 from keenvpn.application.contract import ErrorCategory
-from keenvpn.application.ports import ConnectionLinkRejected, LinkRejection
+from keenvpn.application.ports import (
+    ConnectionLinkRejected, LinkRejection, ManagerMetadataStoreError, MetadataStoreFailure,
+)
 from keenvpn.application.routing import ExplainRoute, ExplainRouteHandler
 from keenvpn.domain.connection import SecretValue, TrojanConnection
+from keenvpn.domain.manager_metadata import (
+    METADATA_FORMAT, HistoryLimits, ManagerMetadata, ManagerMetadataError, RoleLocation, StoragePlacement,
+    StorageRoles, StorageVariant, StoredManagerMetadata, TrackedValue, UnknownFields, ValueState,
+    encode_manager_metadata, metadata_revision,
+)
 from keenvpn.domain.routing import (
     DomainCondition, GeoDatabase, GeoDatabaseKind, GeoIPCondition, GeoSiteCondition,
     RoutingAction, RoutingRule, RoutingValidationError,
@@ -26,8 +36,9 @@ from keenvpn.domain.routing_policy import FinalRoutingRule, MatchResult, Routing
 from keenvpn.domain.xkeen_config import XKeenList, XKeenListName
 from tests.support.in_memory import (
     AdapterSetupError, GeoDataCall, InMemoryConnectionLinkParser, InMemoryGeoDatabaseSource, InMemoryGeoDataSource,
-    InMemoryRoutingPolicySource, InMemoryXKeenInitSource, InMemoryXKeenListSource, InMemoryXKeenSettingsSource,
-    InMemoryXrayConfigSource, InMemoryXrayProcessSource, UnconfiguredResponseError,
+    InMemoryManagerMetadataStore, InMemoryRoutingPolicySource, InMemoryStoragePlacementSource,
+    InMemoryXKeenInitSource, InMemoryXKeenListSource, InMemoryXKeenSettingsSource, InMemoryXrayConfigSource,
+    InMemoryXrayProcessSource, UnconfiguredResponseError,
 )
 from tests.support.isolation import forbid_external_effects
 from tests.support.privacy import frame_locals, reachable
@@ -439,6 +450,204 @@ class ProxyConfigSourceTests(unittest.TestCase):
         self.assertIsNotNone(failure.__traceback__)
         lists.set_response(XKeenListName.PORT_EXCLUDE, XKeenList(XKeenListName.PORT_EXCLUDE, b""))
         self.assertIsNone(failure.__traceback__)
+
+
+STORAGE_ID = "0000abcd-0000-4000-8000-00000000000a"
+STORAGE_PATH = "/tmp/mnt/test-data/keenvpn-private"
+
+
+def stored_metadata(variant: StorageVariant = StorageVariant.SIMPLE) -> ManagerMetadata:
+    known = lambda value: TrackedValue(ValueState.KNOWN, value)
+    data = RoleLocation(ValueState.KNOWN, known(STORAGE_ID), known(STORAGE_PATH), True)
+    roles = StorageRoles(data, RoleLocation(ValueState.UNKNOWN), RoleLocation(ValueState.ABSENT))
+    limits = HistoryLimits(known(1024), TrackedValue(ValueState.ABSENT))
+    return ManagerMetadata(StoragePlacement(known(variant), roles, limits), UnknownFields({"note": "private-note"}))
+
+
+class ManagerMetadataAdapterTests(unittest.TestCase):
+    def test_placement_source_answers_counts_and_releases_failures(self):
+        placement = stored_metadata().storage
+        source = InMemoryStoragePlacementSource()
+        with self.assertRaises(UnconfiguredResponseError):
+            source.current_storage_placement()
+        source.outcome = placement
+        self.assertIs(source.current_storage_placement(), placement)
+        failure = OSError("Искусственный отказ " + STORAGE_PATH)
+        source.outcome = failure
+        # assertRaises очищает traceback пойманного исключения: ловим его вручную.
+        try:
+            source.current_storage_placement()
+        except OSError as caught:
+            self.assertIs(caught, failure)
+        else:
+            self.fail("Ожидался настроенный отказ источника.")
+        self.assertIsNotNone(failure.__traceback__)
+        source.outcome = placement
+        self.assertIsNone(failure.__traceback__)
+        self.assertEqual(source.calls, 3)
+        self.assertNotIn(STORAGE_PATH, repr(source))
+
+    def test_store_reads_writes_and_compares_revisions_with_standard_codec(self):
+        store = InMemoryManagerMetadataStore()
+        self.assertIsNone(store.read_metadata())
+        first, second = stored_metadata(), stored_metadata(StorageVariant.EXTENDED)
+        revision = store.write_metadata(first, None)
+        self.assertEqual(store.content, encode_manager_metadata(first))
+        self.assertEqual(revision, metadata_revision(store.content))
+        stored = store.read_metadata()
+        self.assertIsInstance(stored, StoredManagerMetadata)
+        self.assertEqual(stored.revision, revision)
+        content = store.content
+        self.assertEqual(store.write_metadata(first, revision), revision)
+        self.assertIs(store.content, content)
+        self.assertEqual(store.publications, 1)
+        for expected in (None, "0" * 64):
+            with self.assertRaises(ManagerMetadataStoreError) as caught:
+                store.write_metadata(second, expected)
+            self.assertEqual((caught.exception.failure, caught.exception.reason), (MetadataStoreFailure.CONFLICT, None))
+            self.assertIsNone(caught.exception.__context__)
+        self.assertIs(store.content, content)
+        self.assertNotEqual(store.write_metadata(second, revision), revision)
+        self.assertEqual(store.publications, 2)
+        self.assertEqual([call.expected_revision for call in store.write_calls], [None, revision, None, "0" * 64, revision])
+        self.assertIsInstance(store.write_calls, tuple)
+
+    def test_store_rejects_invalid_model_and_keeps_invalid_file(self):
+        store = InMemoryManagerMetadataStore()
+        broken = ManagerMetadata()
+        object.__setattr__(broken, "storage", "garbage")
+        with self.assertRaises(ManagerMetadataError):
+            store.write_metadata(broken, None)
+        self.assertIsNone(store.content)
+        store.content = b"{"
+        for call in (store.read_metadata, lambda: store.write_metadata(stored_metadata(), None)):
+            with self.assertRaises(ManagerMetadataStoreError) as caught:
+                call()
+            self.assertEqual(
+                (caught.exception.failure, caught.exception.reason),
+                (MetadataStoreFailure.INVALID, "invalid_metadata_json"),
+            )
+            self.assertIsNone(caught.exception.__context__)
+        self.assertEqual(store.content, b"{")
+
+    def test_store_failures_publication_and_last_moment_change(self):
+        store = InMemoryManagerMetadataStore()
+        busy = ManagerMetadataStoreError(MetadataStoreFailure.BUSY)
+        store.write_failure = busy
+        with self.assertRaises(ManagerMetadataStoreError):
+            store.write_metadata(stored_metadata(), None)
+        self.assertIsNone(store.content)
+        store.write_failure = ManagerMetadataStoreError(MetadataStoreFailure.WRITE_UNCONFIRMED, reason="io_error")
+        store.publish_before_failure = True
+        with self.assertRaises(ManagerMetadataStoreError):
+            store.write_metadata(stored_metadata(), None)
+        self.assertEqual(store.content, encode_manager_metadata(stored_metadata()))
+        revision = metadata_revision(store.content)
+        # Повтор с теми же байтами тоже отказывает без изменения: как подтверждение fsync.
+        with self.assertRaises(ManagerMetadataStoreError):
+            store.write_metadata(stored_metadata(), revision)
+        self.assertEqual(store.publications, 1)
+        store.write_failure = None
+        external = encode_manager_metadata(stored_metadata(StorageVariant.EXTENDED))
+        store.before_revision_check = lambda: setattr(store, "content", external)
+        with self.assertRaises(ManagerMetadataStoreError) as caught:
+            store.write_metadata(stored_metadata(), revision)
+        self.assertEqual(caught.exception.failure, MetadataStoreFailure.CONFLICT)
+        self.assertIs(store.content, external)
+        store.read_failure = ManagerMetadataStoreError(MetadataStoreFailure.UNAVAILABLE, reason="io_error")
+        with self.assertRaises(ManagerMetadataStoreError):
+            store.read_metadata()
+        self.assertEqual(store.read_calls, 1)
+
+    def test_store_setup_errors_and_hidden_representations(self):
+        for value in ("text", bytearray(b"{}"), 1):
+            with self.subTest(content=type(value).__name__), self.assertRaises(AdapterSetupError):
+                InMemoryManagerMetadataStore(value)
+        store = InMemoryManagerMetadataStore(encode_manager_metadata(stored_metadata()))
+        for outcome in (OSError, "отказ", 1):
+            with self.subTest(failure=repr(outcome)):
+                with self.assertRaises(AdapterSetupError):
+                    store.read_failure = outcome
+                with self.assertRaises(AdapterSetupError):
+                    store.write_failure = outcome
+        store.write_metadata(stored_metadata(), metadata_revision(store.content))
+        text = repr(store) + repr(store.write_calls)
+        for marker in (STORAGE_ID, STORAGE_PATH, "private-note", "simple"):
+            self.assertNotIn(marker, text)
+
+
+class ManagerMetadataStoreParityTests(unittest.TestCase):
+    """Одна последовательность на хранилище в памяти и на файловом хранилище даёт одинаковые ответы."""
+
+    def setUp(self):
+        # Реальный путь: на macOS временный каталог находится за ссылкой /var.
+        self.root = Path(os.path.realpath(tempfile.mkdtemp(prefix="keenvpn-parity-")))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        (self.root / "parent").mkdir()
+
+    def run_sequence(self, store, set_content, get_content):
+        first, second = stored_metadata(), stored_metadata(StorageVariant.EXTENDED)
+        first_revision = metadata_revision(encode_manager_metadata(first))
+        second_revision = metadata_revision(encode_manager_metadata(second))
+        broken = ManagerMetadata()
+        object.__setattr__(broken, "storage", "garbage")
+        compact = json.dumps(json.loads(encode_manager_metadata(second)), separators=(",", ":")).encode("ascii")
+        version_two = json.dumps({"format": METADATA_FORMAT, "schema_version": 2}).encode("ascii")
+        steps = (
+            lambda: store.read_metadata(),
+            lambda: store.write_metadata(first, "0" * 64),
+            lambda: store.write_metadata(first, None),
+            lambda: store.read_metadata(),
+            lambda: store.write_metadata(first, None),
+            lambda: store.write_metadata(first, first_revision),
+            lambda: store.write_metadata(second, first_revision),
+            lambda: store.write_metadata(first, first_revision),
+            lambda: store.write_metadata(broken, second_revision),
+            lambda: set_content(compact),
+            lambda: store.read_metadata(),
+            lambda: store.write_metadata(second, second_revision),
+            lambda: store.write_metadata(second, metadata_revision(compact)),
+            lambda: store.read_metadata(),
+            lambda: set_content(b"{"),
+            lambda: store.read_metadata(),
+            lambda: store.write_metadata(first, second_revision),
+            lambda: set_content(version_two),
+            lambda: store.read_metadata(),
+            lambda: store.write_metadata(first, metadata_revision(version_two)),
+        )
+        outcomes = []
+        for step in steps:
+            try:
+                value = step()
+            except ManagerMetadataStoreError as error:
+                value = ("store", error.failure.value, error.reason)
+            except ManagerMetadataError as error:
+                value = ("model", error.code.value)
+            if isinstance(value, StoredManagerMetadata):
+                value = ("stored", value.revision, encode_manager_metadata(value.metadata))
+            outcomes.append((value, get_content()))
+        return outcomes
+
+    def test_in_memory_store_matches_file_store(self):
+        memory = InMemoryManagerMetadataStore()
+        directory = self.root / "parent" / "keenvpn"
+        file = directory / METADATA_FILE_NAME
+
+        def set_file(content):
+            descriptor = os.open(file, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+            try:
+                os.write(descriptor, content)
+            finally:
+                os.close(descriptor)
+
+        expected = self.run_sequence(
+            ManagerMetadataFiles(str(directory)), set_file, lambda: file.read_bytes() if file.exists() else None,
+        )
+        actual = self.run_sequence(memory, lambda content: setattr(memory, "content", content), lambda: memory.content)
+        self.assertEqual(actual, expected)
+        # Последовательность покрывает отсутствие файла, конфликт, совпадение, замену и отказы.
+        kinds = {value[0] if isinstance(value, tuple) else type(value).__name__ for value, _ in expected}
+        self.assertEqual(kinds, {"NoneType", "store", "str", "stored", "model"})
 
 
 class ForbidExternalEffectsTests(unittest.TestCase):

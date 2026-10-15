@@ -6,19 +6,25 @@
 Используйте только искусственные данные, в том числе в исключениях.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 from uuid import UUID
 
 from keenvpn.application.ports import (
     ConnectionLinkParser, ConnectionProfileSource, GeoDatabaseSource, GeoDataSource, KeeneticHotspotRuntimeSource,
-    KeeneticHotspotSettingsSource, KeeneticPolicySource, KeeneticRegistrationSource, RoutingPolicySource,
-    XKeenInitSource, XKeenListSource, XKeenSettingsSource, XrayConfigSource, XrayProcessSource,
+    KeeneticHotspotSettingsSource, KeeneticPolicySource, KeeneticRegistrationSource, ManagerMetadataStore,
+    ManagerMetadataStoreError, MetadataStoreFailure, RoutingPolicySource, StoragePlacementSource, XKeenInitSource,
+    XKeenListSource, XKeenSettingsSource, XrayConfigSource, XrayProcessSource,
 )
 from keenvpn.domain.connection import TrojanConnection
 from keenvpn.domain.geodata import GeoDatabaseInventory
 from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
 from keenvpn.domain.keenetic_policy import KeeneticPolicySet
+from keenvpn.domain.manager_metadata import (
+    ManagerMetadata, ManagerMetadataError, StoragePlacement, StoredManagerMetadata, decode_manager_metadata,
+    encode_manager_metadata, metadata_revision,
+)
 from keenvpn.domain.profile import ConnectionProfile
 from keenvpn.domain.routing import DomainCondition, GeoIPCondition, GeoSiteCondition
 from keenvpn.domain.routing_explanation import GeoMatch, IPSource, RoutingContext
@@ -163,6 +169,159 @@ class InMemoryXrayProcessSource(_ScriptedPort, XrayProcessSource):
 
     def current_xray_process(self) -> XrayProcessObservation:
         return self._respond()
+
+
+class InMemoryStoragePlacementSource(_ScriptedPort, StoragePlacementSource):
+    """Заданное обнаруженное размещение; монтирования, UUID, каталоги и файлы не читаются."""
+
+    def current_storage_placement(self) -> StoragePlacement:
+        return self._respond()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class MetadataWriteCall:
+    """Запрос записи метаданных: модель и ожидаемая ревизия.
+
+    Поля доступны тесту явно; `repr` показывает только, ожидалось ли отсутствие файла.
+    """
+
+    metadata: Any
+    expected_revision: Any
+
+    def __repr__(self) -> str:
+        expected = "None" if self.expected_revision is None else "ревизия"
+        return f"MetadataWriteCall(expected={expected})"
+
+
+def _store_failure(failure: MetadataStoreFailure, reason: str | None = None) -> NoReturn:
+    """Отказ хранилища без активного чужого исключения в цепочке, как у файлового адаптера."""
+    try:
+        raise ManagerMetadataStoreError(failure, reason=reason) from None
+    except ManagerMetadataStoreError as error:
+        error.__context__ = None
+        raise
+
+
+def _checked_content(content: Any) -> bytes | None:
+    if content is not None and type(content) is not bytes:
+        raise AdapterSetupError("Содержимое файла метаданных задаётся bytes или None.")
+    return content
+
+
+def _checked_failure(outcome: Any) -> BaseException | None:
+    if outcome is None or isinstance(outcome, BaseException):
+        return outcome
+    raise AdapterSetupError("Отказ хранилища задаётся экземпляром исключения или None.")
+
+
+class InMemoryManagerMetadataStore(ManagerMetadataStore):
+    """Файл метаданных в памяти с семантикой ревизии `ManagerMetadataFiles`.
+
+    `content` — байты файла или `None`, если его нет. Чтение разбирает их
+    штатным `decode_manager_metadata`: повреждённые байты и другая версия
+    схемы дают `invalid_stored_metadata` с кодом домена в `reason`. Запись
+    сначала кодирует модель штатным `encode_manager_metadata` (некорректная —
+    `ManagerMetadataError` без изменений), затем сверяет текущую ревизию
+    с ожидаемой: `None` — файла быть не должно, расхождение —
+    `metadata_revision_conflict`, повреждённый файл не перезаписывается.
+    Совпадающие байты не публикуются повторно. Возвращается SHA-256 байтов.
+
+    Отказы задаются экземплярами исключений и повторяются до замены:
+    `read_failure` — при чтении; `write_failure` — при записи до сверки
+    ревизии без изменения байтов, а при `publish_before_failure=True` — после
+    сверки и публикации, как `metadata_write_unconfirmed` файлового хранилища.
+    `before_revision_check` вызывается при записи непосредственно перед
+    сверкой ревизии: так тест имитирует внешнюю правку в последний момент.
+    Каталоги, файлы и блокировки не используются.
+    """
+
+    def __init__(self, content: bytes | None = None) -> None:
+        self._content = _checked_content(content)
+        self._read_failure: BaseException | None = None
+        self._write_failure: BaseException | None = None
+        self.publish_before_failure = False
+        self.before_revision_check: Callable[[], None] | None = None
+        self.read_calls = 0
+        self.publications = 0
+        self._write_calls: list[MetadataWriteCall] = []
+
+    @property
+    def content(self) -> bytes | None:
+        """Текущие байты файла или None."""
+        return self._content
+
+    @content.setter
+    def content(self, content: bytes | None) -> None:
+        # Замена байтов тестом — внешняя правка файла в обход хранилища.
+        self._content = _checked_content(content)
+
+    @property
+    def read_failure(self) -> BaseException | None:
+        """Настроенный отказ чтения."""
+        return self._read_failure
+
+    @read_failure.setter
+    def read_failure(self, outcome: BaseException | None) -> None:
+        checked = _checked_failure(outcome)
+        _release(self._read_failure)
+        self._read_failure = checked
+
+    @property
+    def write_failure(self) -> BaseException | None:
+        """Настроенный отказ записи."""
+        return self._write_failure
+
+    @write_failure.setter
+    def write_failure(self, outcome: BaseException | None) -> None:
+        checked = _checked_failure(outcome)
+        _release(self._write_failure)
+        self._write_failure = checked
+
+    @property
+    def write_calls(self) -> tuple[MetadataWriteCall, ...]:
+        """Неизменяемая история запросов записи, включая отклонённые."""
+        return tuple(self._write_calls)
+
+    def read_metadata(self) -> StoredManagerMetadata | None:
+        self.read_calls += 1
+        if self._read_failure is not None:
+            _resolve(self._read_failure)
+        return self._current()
+
+    def write_metadata(self, metadata: ManagerMetadata, expected_revision: str | None) -> str:
+        self._write_calls.append(MetadataWriteCall(metadata, expected_revision))
+        content = encode_manager_metadata(metadata)
+        revision = metadata_revision(content)
+        failure = self._write_failure
+        if failure is not None and not self.publish_before_failure:
+            _resolve(failure)
+        if self.before_revision_check is not None:
+            self.before_revision_check()
+        current = self._current()
+        if (None if current is None else current.revision) != expected_revision:
+            _store_failure(MetadataStoreFailure.CONFLICT)
+        if current is None or current.revision != revision:
+            self._content = content
+            self.publications += 1
+        if failure is not None:
+            _resolve(failure)
+        return revision
+
+    def _current(self) -> StoredManagerMetadata | None:
+        if self._content is None:
+            return None
+        code = None
+        try:
+            return decode_manager_metadata(self._content)
+        except ManagerMetadataError as error:
+            code = error.code
+        _store_failure(MetadataStoreFailure.INVALID, code.value)
+
+    def __repr__(self) -> str:
+        return (
+            f"InMemoryManagerMetadataStore(present={self._content is not None}, read_calls={self.read_calls}, "
+            f"write_calls={len(self._write_calls)}, publications={self.publications})"
+        )
 
 
 class InMemoryXKeenListSource(XKeenListSource):

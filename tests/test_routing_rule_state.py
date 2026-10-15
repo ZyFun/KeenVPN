@@ -305,6 +305,7 @@ class RoutingRuleStateTests(unittest.TestCase):
         self.assertFalse(disabled.to_diagnostic()["enabled"])
         self.assertEqual(policy.to_diagnostic(), {
             "rule_count": 2, "active_rule_count": 1, "protected_rule_count": 1,
+            "identified_rule_count": 0, "named_rule_count": 0,
             "final_action": "BLOCK", "read_only": False,
         })
 

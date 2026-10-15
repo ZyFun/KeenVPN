@@ -8,6 +8,12 @@ from typing import NoReturn
 import unicodedata
 
 
+MAX_RULE_NAME_LENGTH = 64
+"""Предел длины названия правила в символах Unicode; в UTF-8 это не больше 256 байт."""
+
+_RULE_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
 class RoutingAction(str, Enum):
     """Направление трафика; VPN не подразумевает прямого резерва."""
 
@@ -58,6 +64,9 @@ class RoutingErrorCode(str, Enum):
     MATCH_UNKNOWN = "unknown_rule_match"
     MATCHER = "rule_matcher_failed"
     RULE_STATE = "invalid_rule_state"
+    RULE_ID = "invalid_rule_id"
+    RULE_NAME = "invalid_rule_name"
+    DUPLICATE_RULE_ID = "duplicate_rule_id"
     PROTECTED_RULE = "protected_rule"
     PROTECTED_ORDER = "invalid_protected_rule_order"
     CONTEXT = "invalid_routing_context"
@@ -73,6 +82,12 @@ class RoutingValidationError(ValueError):
         self.code = code
         messages = {
             RoutingErrorCode.RULE_STATE: "Состояние и защита правила должны быть bool.",
+            RoutingErrorCode.RULE_ID: "Идентификатор правила должен быть UUID в нижнем регистре либо None.",
+            RoutingErrorCode.RULE_NAME: (
+                f"Название правила должно быть строкой от 1 до {MAX_RULE_NAME_LENGTH} печатных символов "
+                "без пробелов по краям либо None."
+            ),
+            RoutingErrorCode.DUPLICATE_RULE_ID: "Идентификаторы правил в пределах политики должны быть уникальными.",
             RoutingErrorCode.PROTECTED_RULE: (
                 "Служебное правило должно быть включено; обычный редактор "
                 "не может добавлять, удалять, перемещать или переключать его."
@@ -158,6 +173,28 @@ def _normalize_ip(value: object) -> str | None:
 
 def _is_text(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip()) and value.isprintable()
+
+
+def valid_rule_id(value: object) -> bool:
+    """Проверить формат идентификатора правила: UUID 8-4-4-4-12 в нижнем регистре.
+
+    Регистр не нормализуется, версия UUID не проверяется. Формат не доказывает,
+    что правило с таким идентификатором существует в политике или метаданных.
+    """
+    return type(value) is str and _RULE_ID.fullmatch(value) is not None
+
+
+def valid_rule_name(value: object) -> bool:
+    """Проверить название правила: от 1 до `MAX_RULE_NAME_LENGTH` символов Unicode.
+
+    Только печатные символы по `str.isprintable()`: управляющие, форматирующие,
+    невидимые и неразрывные пробелы отклоняются. Пробелы по краям не обрезаются,
+    а отклоняются; содержимое не нормализуется. Дубли названий здесь не проверяются.
+    """
+    return (
+        type(value) is str and 1 <= len(value) <= MAX_RULE_NAME_LENGTH
+        and value.isprintable() and value == value.strip()
+    )
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -311,12 +348,20 @@ RoutingCondition = (
 
 @dataclass(frozen=True, slots=True, repr=False)
 class RoutingRule(_PrivateRepresentation):
-    """Условие, действие и метаданные состояния, без применения к трафику."""
+    """Условие, действие и метаданные состояния, без применения к трафику.
+
+    `rule_id` и `name` — метаданные менеджера, не поля Xray JSON и не `ruleTag`.
+    Оба необязательны: импортированное правило их не имеет. Идентификатор
+    присваивает доверенный код; название — произвольная строка пользователя,
+    которая не попадает в `repr`, диагностику и ошибки.
+    """
 
     condition: RoutingCondition
     action: RoutingAction
     enabled: bool = field(default=True, kw_only=True)
     protected: bool = field(default=False, kw_only=True)
+    rule_id: str | None = field(default=None, kw_only=True)
+    name: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.condition, RoutingCondition):
@@ -327,19 +372,31 @@ class RoutingRule(_PrivateRepresentation):
             raise RoutingValidationError(RoutingErrorCode.RULE_STATE) from None
         if self.protected and not self.enabled:
             raise RoutingValidationError(RoutingErrorCode.PROTECTED_RULE) from None
+        if self.rule_id is not None and not valid_rule_id(self.rule_id):
+            raise RoutingValidationError(RoutingErrorCode.RULE_ID) from None
+        if self.name is not None and not valid_rule_name(self.name):
+            raise RoutingValidationError(RoutingErrorCode.RULE_NAME) from None
 
     @property
     def read_only(self) -> bool:
         """Неизвестную ссылку и неподдержанное правило нельзя безопасно редактировать как известные."""
         return isinstance(self.condition, (UnknownCondition, UnsupportedRuleCondition))
 
-    def to_diagnostic(self) -> dict[str, str | bool]:
-        """Описание структуры без доменов, адресов, ссылок и метаданных."""
+    def to_diagnostic(self) -> dict[str, str | bool | int | None]:
+        """Описание структуры без доменов, адресов, ссылок и названия.
+
+        Идентификатор выводится: он прошёл проверку формата и нужен для ссылок
+        меню и Web. От названия остаются только признак наличия и длина в символах.
+        """
         return {
             "condition_type": type(self.condition).__name__,
             "action": self.action.value,
             "read_only": self.read_only,
             "enabled": self.enabled,
             "protected": self.protected,
+            "has_id": self.rule_id is not None,
+            "rule_id": self.rule_id,
+            "has_name": self.name is not None,
+            "name_length": None if self.name is None else len(self.name),
             "parameters": "<скрыто>",
         }

@@ -11,6 +11,7 @@ from keenvpn.domain.routing import (
     RoutingRule,
     RoutingValidationError,
     _raise_detached,
+    valid_rule_id,
 )
 
 
@@ -69,7 +70,9 @@ class RoutingPolicy:
     """Обычные правила в явном порядке и ровно одно финальное в конце.
 
     Список копируется в tuple. Все операции возвращают новую модель;
-    индексы начинаются с нуля. Здесь нет DNS, чтения геобаз или Xray JSON.
+    индексы начинаются с нуля. Идентификаторы правил, если заданы, уникальны
+    в пределах политики и сохраняются всеми операциями порядка и состояния.
+    Здесь нет DNS, чтения геобаз или Xray JSON.
     """
 
     rules: tuple[RoutingRule, ...]
@@ -84,11 +87,16 @@ class RoutingPolicy:
         if not isinstance(self.final_rule, FinalRoutingRule):
             raise RoutingValidationError(RoutingErrorCode.FINAL_RULE) from None
         user_rule_seen = False
+        seen_ids: set[str] = set()
         for rule in rules:
             if rule.protected and user_rule_seen:
                 raise RoutingValidationError(RoutingErrorCode.PROTECTED_ORDER) from None
             if not rule.protected:
                 user_rule_seen = True
+            if rule.rule_id is not None:
+                if rule.rule_id in seen_ids:
+                    raise RoutingValidationError(RoutingErrorCode.DUPLICATE_RULE_ID) from None
+                seen_ids.add(rule.rule_id)
         object.__setattr__(self, "rules", rules)
 
     def __repr__(self) -> str:
@@ -118,12 +126,23 @@ class RoutingPolicy:
         """Не менять приоритеты, пока смысл импортированного условия или правила неизвестен."""
         return any(rule.read_only for rule in self.rules)
 
+    def index_of(self, rule_id: str) -> int | None:
+        """Найти позицию правила по идентификатору в сохранённом порядке; `None` — нет такого."""
+        if not valid_rule_id(rule_id):
+            raise RoutingValidationError(RoutingErrorCode.RULE_ID) from None
+        for index, rule in enumerate(self.rules):
+            if rule.rule_id == rule_id:
+                return index
+        return None
+
     def to_diagnostic(self) -> dict[str, int | str | bool]:
-        """Вернуть только число правил, финальное действие и ограничение редактирования."""
+        """Вернуть только счётчики правил, финальное действие и ограничение редактирования."""
         return {
             "rule_count": len(self.rules),
             "active_rule_count": sum(rule.enabled for rule in self.rules),
             "protected_rule_count": self.protected_rule_count,
+            "identified_rule_count": sum(rule.rule_id is not None for rule in self.rules),
+            "named_rule_count": sum(rule.name is not None for rule in self.rules),
             "final_action": self.final_rule.action.value,
             "read_only": self.read_only,
         }
@@ -180,6 +199,17 @@ class RoutingPolicy:
         if self.rules[index].protected:
             raise RoutingValidationError(RoutingErrorCode.PROTECTED_RULE) from None
         changed = replace(self.rules[index], enabled=enabled)
+        return RoutingPolicy(self.rules[:index] + (changed,) + self.rules[index + 1:], self.final_rule)
+
+    def with_name(self, index: int, name: str | None) -> "RoutingPolicy":
+        """Переименовать правило или снять название, не меняя порядок, условие, действие и состояние.
+
+        Название — метаданные менеджера: операция допустима для служебного правила
+        и для политики только для просмотра, потому что не меняет приоритеты
+        и смысл условий. Защита и состояние правила не затрагиваются.
+        """
+        self._validate_index(index)
+        changed = replace(self.rules[index], name=name)
         return RoutingPolicy(self.rules[:index] + (changed,) + self.rules[index + 1:], self.final_rule)
 
     def with_final_action(self, action: RoutingAction) -> "RoutingPolicy":

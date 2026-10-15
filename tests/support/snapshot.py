@@ -3,8 +3,9 @@
 Фикстуры `tests/fixtures/router_snapshot` преобразуются в модели функциями
 адаптеров, а затем передаются управляемым источникам в памяти. Это не
 чтение роутера: транспорт, таймауты и ошибки чтения здесь не воспроизводятся.
-Снимок обезличен; реальные данные здесь не появляются. Файлов геобаз и
-состояния процессов в снимке нет: их дают искусственные значения ниже.
+Снимок обезличен; реальные данные здесь не появляются. Файлов геобаз,
+состояния процессов и размещения хранилищ в снимке нет: их дают искусственные
+значения ниже.
 """
 
 from dataclasses import dataclass
@@ -22,6 +23,9 @@ from keenvpn.adapters.xray_configs import xray_config_from_files
 from keenvpn.domain.geodata import GEOIP_FILE_NAME, GEOSITE_FILE_NAME, GeoDatabaseInventory
 from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
 from keenvpn.domain.keenetic_policy import KeeneticPolicySet
+from keenvpn.domain.manager_metadata import (
+    HistoryLimits, RoleLocation, StoragePlacement, StorageRoles, StorageVariant, TrackedValue, ValueState,
+)
 from keenvpn.domain.xkeen_config import XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings
 from keenvpn.domain.xray_config import XrayConfigSet
 from keenvpn.domain.xray_process import XrayProcessObservation
@@ -42,15 +46,24 @@ SYNTHETIC_GEOIP_SOURCE = "fixture-geo-source"
 """Искусственный известный источник geoip.dat; версия намеренно неизвестна."""
 SYNTHETIC_XRAY_PID = 4242
 """Искусственный PID процесса Xray."""
+SYNTHETIC_STORAGE_ID = "0000abcd-0000-4000-8000-000000000066"
+"""Искусственный UUID раздела хранения; носителю не соответствует."""
+SYNTHETIC_STORAGE_ROOT = "/tmp/mnt/test-storage"
+"""Искусственный каталог раздела хранения по умолчанию; тест с файлами передаёт свой временный каталог."""
+SYNTHETIC_HISTORY_SIZE = 64 * 1024 * 1024
+"""Искусственный размер истории в байтах; не значение по умолчанию и не рекомендация."""
+SYNTHETIC_HISTORY_RETENTION = 14 * 24 * 3600
+"""Искусственный срок истории в секундах; не значение по умолчанию и не рекомендация."""
 
 __all__ = [
-    "SNAPSHOT_ROOT", "SYNTHETIC_GEOIP_SHA256", "SYNTHETIC_GEOIP_SIZE", "SYNTHETIC_GEOIP_SOURCE", "SYNTHETIC_XRAY_PID",
-    "XRAY_SNAPSHOT_ROOT", "SnapshotInstallationSources", "SnapshotKeeneticSources", "SnapshotProxySources",
-    "load_keenetic_snapshot", "load_xkeen_snapshot", "load_xray_snapshot_files", "policies_from_rci",
-    "snapshot_hotspot_runtime", "snapshot_hotspot_settings", "snapshot_installation_sources",
+    "SNAPSHOT_ROOT", "SYNTHETIC_GEOIP_SHA256", "SYNTHETIC_GEOIP_SIZE", "SYNTHETIC_GEOIP_SOURCE",
+    "SYNTHETIC_HISTORY_RETENTION", "SYNTHETIC_HISTORY_SIZE", "SYNTHETIC_STORAGE_ID", "SYNTHETIC_STORAGE_ROOT",
+    "SYNTHETIC_XRAY_PID", "XRAY_SNAPSHOT_ROOT", "SnapshotInstallationSources", "SnapshotKeeneticSources",
+    "SnapshotProxySources", "load_keenetic_snapshot", "load_xkeen_snapshot", "load_xray_snapshot_files",
+    "policies_from_rci", "snapshot_hotspot_runtime", "snapshot_hotspot_settings", "snapshot_installation_sources",
     "snapshot_keenetic_sources", "snapshot_policies", "snapshot_proxy_sources", "snapshot_registrations",
     "snapshot_xkeen_init", "snapshot_xkeen_list", "snapshot_xkeen_settings", "snapshot_xray_config",
-    "synthetic_geo_inventory", "synthetic_xray_process",
+    "synthetic_geo_inventory", "synthetic_storage_placement", "synthetic_xray_process",
 ]
 
 
@@ -194,6 +207,30 @@ def synthetic_geo_inventory() -> GeoDatabaseInventory:
 def synthetic_xray_process() -> XrayProcessObservation:
     """Искусственное наблюдение: один процесс и маркер готовности; расхождения задают тесты."""
     return xray_process_from_pidof(f"{SYNTHETIC_XRAY_PID}\n".encode("ascii"), True)
+
+
+def synthetic_storage_placement(root: str = SYNTHETIC_STORAGE_ROOT) -> StoragePlacement:
+    """Искусственное обнаруженное размещение: в снимке его нет.
+
+    Простой вариант: собственные данные, история и копии — отдельные
+    проверенные каталоги одного раздела под `root`; размер и срок истории
+    известны. Формат реального источника размещения снимок не описывает,
+    поэтому это не значения роутера и не значения по умолчанию.
+    """
+    def location(name: str) -> RoleLocation:
+        return RoleLocation(
+            ValueState.KNOWN, TrackedValue(ValueState.KNOWN, SYNTHETIC_STORAGE_ID),
+            TrackedValue(ValueState.KNOWN, f"{root}/{name}"), True,
+        )
+
+    return StoragePlacement(
+        TrackedValue(ValueState.KNOWN, StorageVariant.SIMPLE),
+        StorageRoles(location("keenvpn-data"), location("keenvpn-history"), location("keenvpn-backups")),
+        HistoryLimits(
+            TrackedValue(ValueState.KNOWN, SYNTHETIC_HISTORY_SIZE),
+            TrackedValue(ValueState.KNOWN, SYNTHETIC_HISTORY_RETENTION),
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)

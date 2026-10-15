@@ -18,6 +18,8 @@ from keenvpn.application.contract import (
 from keenvpn.application.keenetic_state import InspectKeeneticStateHandler, KeeneticStateView
 from keenvpn.application.ports import GeoDatabaseSource, XrayProcessSource
 from keenvpn.application.proxy_config import InspectProxyConfigHandler, ProxyConfigView
+from keenvpn.application.source_checks import SourceCheck, check_source_model, unavailable
+from keenvpn.application.views import view_dict, view_fields
 from keenvpn.domain.geodata import (
     GeoDatabaseInventory, GeoDataError, GeoDataState, assemble_geodata_state, validate_geo_inventory,
 )
@@ -31,15 +33,6 @@ class InspectInstallation:
     name: ClassVar[str] = "inspect_installation"
 
     contract_version: int = CONTRACT_VERSION
-
-
-def _fields(view_type: type, values: dict[str, object]) -> dict[str, object]:
-    return {name: values[name] for name in view_type.__dataclass_fields__}
-
-
-def _view_dict(view: object) -> dict[str, object]:
-    """Снять поля frozen dataclass со слотами, у которого нет `__dict__`."""
-    return {name: getattr(view, name) for name in view.__dataclass_fields__}
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,16 +101,16 @@ class GeoDataView:
         """Построить представление из безопасной диагностики домена."""
         diagnostic = state.to_diagnostic()
         return cls(
-            files=tuple(GeoDatabaseFileView(**_fields(GeoDatabaseFileView, item)) for item in diagnostic["files"]),
+            files=tuple(GeoDatabaseFileView(**view_fields(GeoDatabaseFileView, item)) for item in diagnostic["files"]),
             present_count=diagnostic["present_count"],
             missing_count=diagnostic["missing_count"],
             extra_count=diagnostic["extra_count"],
-            references=tuple(GeoReferenceView(**_fields(GeoReferenceView, item)) for item in diagnostic["references"]),
+            references=tuple(GeoReferenceView(**view_fields(GeoReferenceView, item)) for item in diagnostic["references"]),
             reference_count=diagnostic["reference_count"],
             resolved_count=diagnostic["resolved_count"],
             unresolved_count=diagnostic["unresolved_count"],
             unsupported_references=tuple(
-                UnsupportedGeoReferenceView(**_fields(UnsupportedGeoReferenceView, item))
+                UnsupportedGeoReferenceView(**view_fields(UnsupportedGeoReferenceView, item))
                 for item in diagnostic["unsupported_references"]
             ),
         )
@@ -125,10 +118,10 @@ class GeoDataView:
     def to_dict(self) -> dict[str, object]:
         """Вернуть JSON-совместимое представление."""
         return {
-            **_view_dict(self),
-            "files": [_view_dict(item) for item in self.files],
-            "references": [_view_dict(item) for item in self.references],
-            "unsupported_references": [_view_dict(item) for item in self.unsupported_references],
+            **view_dict(self),
+            "files": [view_dict(item) for item in self.files],
+            "references": [view_dict(item) for item in self.references],
+            "unsupported_references": [view_dict(item) for item in self.unsupported_references],
         }
 
 
@@ -146,11 +139,11 @@ class XrayProcessView:
     def from_observation(cls, observation: XrayProcessObservation) -> "XrayProcessView":
         """Построить представление из диагностики наблюдения."""
         diagnostic = observation.to_diagnostic()
-        return cls(**{**_fields(XrayProcessView, diagnostic), "pids": tuple(diagnostic["pids"])})
+        return cls(**{**view_fields(XrayProcessView, diagnostic), "pids": tuple(diagnostic["pids"])})
 
     def to_dict(self) -> dict[str, object]:
         """Вернуть JSON-совместимое представление."""
-        return {**_view_dict(self), "pids": list(self.pids)}
+        return {**view_dict(self), "pids": list(self.pids)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,42 +169,23 @@ class InstallationView:
         }
 
 
+_DOMAIN_ERRORS = (GeoDataError, XrayProcessError)
 _UNAVAILABLE = {
     "geodata": ("geo_databases_unavailable", "Не удалось прочитать инвентарь файлов геобаз."),
     "process": ("xray_process_unavailable", "Не удалось наблюдать процесс Xray и маркер готовности."),
 }
-_INVALID = {
-    "geodata": (
+_CHECKS = {
+    "geodata": SourceCheck(
         "invalid_geo_databases", GeoDatabaseInventory, validate_geo_inventory,
         "Источник вернул инвентарь геобаз в неподдерживаемом формате.",
-        "Источник вернул некорректный инвентарь геобаз.",
+        "Источник вернул некорректный инвентарь геобаз.", _DOMAIN_ERRORS,
     ),
-    "process": (
+    "process": SourceCheck(
         "invalid_xray_process", XrayProcessObservation, validate_xray_process_observation,
         "Источник вернул наблюдение процесса Xray в неподдерживаемом формате.",
-        "Источник вернул некорректное наблюдение процесса Xray.",
+        "Источник вернул некорректное наблюдение процесса Xray.", _DOMAIN_ERRORS,
     ),
 }
-_DOMAIN_ERRORS = (GeoDataError, XrayProcessError)
-
-
-def _unavailable(source: str) -> ErrorDetail:
-    code, message = _UNAVAILABLE[source]
-    return ErrorDetail(ErrorCategory.SOURCE_FAILED, code, message)
-
-
-def _check_model(source: str, value: object) -> ErrorDetail | None:
-    """Проверить тип ответа и повторно проверить модель вместе с вложенными записями."""
-    code, model_type, validate, type_message, data_message = _INVALID[source]
-    if type(value) is not model_type:
-        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, code, type_message)
-    try:
-        validate(value)
-    except _DOMAIN_ERRORS as error:
-        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, code, data_message, reason=error.code.value)
-    except Exception:
-        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, code, type_message)
-    return None
 
 
 class InspectInstallationHandler:
@@ -264,8 +238,8 @@ class InspectInstallationHandler:
                 value = read()
             except Exception:
                 # Текст и цепочка исключения источника могут содержать пути и вывод команд.
-                return failed(operation_id, name, _unavailable(source))
-            error = _check_model(source, value)
+                return failed(operation_id, name, unavailable(*_UNAVAILABLE[source]))
+            error = check_source_model(_CHECKS[source], value)
             if error is not None:
                 return failed(operation_id, name, error)
             models[source] = value

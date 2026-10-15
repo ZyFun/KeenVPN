@@ -38,6 +38,11 @@
 `application.ports`, реестры возможностей — через конструктор обработчика;
 application импортирует доменные модели и собственные
 контракты, domain не зависит от application, адаптеров или интерфейса.
+Представления собираются из безопасной диагностики доменных моделей общими
+помощниками `keenvpn.application.views`; ответы источников чтения состояния
+Keenetic, конфигурации Xray и XKeen и существующей установки проверяются общим
+`keenvpn.application.source_checks`: точный тип модели, повторная доменная
+проверка и отдельные коды отказа без текста и цепочки исключения.
 
 `ConnectionLinkView`, `ConnectionProfileView`, `ProtocolSupportView`, `RouteExplanationView`,
 `KeeneticPolicyResolutionView`, `KeeneticStateView`, `ProxyConfigView`, `InstallationView`, `RoutingSchemeView`,

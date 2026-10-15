@@ -15,6 +15,7 @@ from keenvpn.application.contract import (
     check_contract_version, failed, invalid_command, new_operation_id, succeeded,
 )
 from keenvpn.application.proxy_config import InspectProxyConfigHandler
+from keenvpn.application.views import view_dict, view_fields
 from keenvpn.domain.config_document import ConfigDocumentError
 from keenvpn.domain.geodata import GeoDataError
 from keenvpn.domain.routing import RoutingValidationError
@@ -29,15 +30,6 @@ class ImportRoutingScheme:
     name: ClassVar[str] = "import_routing_scheme"
 
     contract_version: int = CONTRACT_VERSION
-
-
-def _fields(view_type: type, values: dict[str, object]) -> dict[str, object]:
-    return {name: values[name] for name in view_type.__dataclass_fields__}
-
-
-def _view_dict(view: object) -> dict[str, object]:
-    """Снять поля frozen dataclass со слотами, у которого нет `__dict__`."""
-    return {name: getattr(view, name) for name in view.__dataclass_fields__}
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,10 +134,10 @@ class RoutingSchemeView:
             final_action=diagnostic["final_action"],
             read_only=diagnostic["read_only"],
             reasons=tuple(diagnostic["reasons"]),
-            policy=None if policy is None else RoutingPolicyView(**_fields(RoutingPolicyView, policy)),
+            policy=None if policy is None else RoutingPolicyView(**view_fields(RoutingPolicyView, policy)),
             groups=tuple(
                 RuleGroupView(**{
-                    **_fields(RuleGroupView, item),
+                    **view_fields(RuleGroupView, item),
                     "condition_types": tuple(
                         ConditionTypeView(name, count) for name, count in item["condition_types"].items()
                     ),
@@ -153,10 +145,10 @@ class RoutingSchemeView:
                     "unsupported_fields": tuple(item["unsupported_fields"]),
                     "reasons": tuple(item["reasons"]),
                     "value_reasons": tuple(
-                        ValueReasonView(**_fields(ValueReasonView, value)) for value in item["value_reasons"]
+                        ValueReasonView(**view_fields(ValueReasonView, value)) for value in item["value_reasons"]
                     ),
                     "target": RuleTargetView(**{
-                        **_fields(RuleTargetView, item["target"]),
+                        **view_fields(RuleTargetView, item["target"]),
                         "outbound_tags": tuple(item["target"]["outbound_tags"]),
                         "reasons": tuple(item["target"]["reasons"]),
                     }),
@@ -168,20 +160,20 @@ class RoutingSchemeView:
     def to_dict(self) -> dict[str, object]:
         """Вернуть JSON-совместимое представление."""
         return {
-            **_view_dict(self),
+            **view_dict(self),
             "routing_parts": list(self.routing_parts),
             "reasons": list(self.reasons),
-            "policy": None if self.policy is None else _view_dict(self.policy),
+            "policy": None if self.policy is None else view_dict(self.policy),
             "groups": [
                 {
-                    **_view_dict(group),
+                    **view_dict(group),
                     "condition_types": {item.name: item.count for item in group.condition_types},
                     "fields": list(group.fields),
                     "unsupported_fields": list(group.unsupported_fields),
                     "reasons": list(group.reasons),
-                    "value_reasons": [_view_dict(item) for item in group.value_reasons],
+                    "value_reasons": [view_dict(item) for item in group.value_reasons],
                     "target": {
-                        **_view_dict(group.target),
+                        **view_dict(group.target),
                         "outbound_tags": list(group.target.outbound_tags),
                         "reasons": list(group.target.reasons),
                     },

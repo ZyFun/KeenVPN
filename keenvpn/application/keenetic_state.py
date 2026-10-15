@@ -7,10 +7,12 @@ from keenvpn.application.contract import (
     CONTRACT_VERSION, ErrorCategory, ErrorDetail, OperationIdFactory, Result,
     check_contract_version, failed, invalid_command, new_operation_id, succeeded,
 )
-from keenvpn.application.keenetic_policies import check_policies
+from keenvpn.application.keenetic_policies import POLICIES_UNAVAILABLE, check_policies
 from keenvpn.application.ports import (
     KeeneticHotspotRuntimeSource, KeeneticHotspotSettingsSource, KeeneticPolicySource, KeeneticRegistrationSource,
 )
+from keenvpn.application.source_checks import SourceCheck, check_source_model, unavailable
+from keenvpn.application.views import view_dict, view_fields
 from keenvpn.domain.keenetic_device import KeeneticDeviceError
 from keenvpn.domain.keenetic_native import (
     KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticNativeError, KeeneticNativeState, KeeneticRegistrations,
@@ -85,10 +87,6 @@ class KeeneticRuntimeCountsView:
     without_device_count: int
 
 
-def _fields(view_type: type, values: dict[str, object]) -> dict[str, object]:
-    return {name: values[name] for name in view_type.__dataclass_fields__}
-
-
 @dataclass(frozen=True, slots=True)
 class KeeneticStateView:
     """Безопасное представление прочитанного состояния.
@@ -112,13 +110,13 @@ class KeeneticStateView:
         return cls(
             policy_count=diagnostic["policy_count"],
             policy_ids=tuple(diagnostic["policy_ids"]),
-            segments=tuple(KeeneticSegmentView(**_fields(KeeneticSegmentView, item)) for item in diagnostic["segments"]),
+            segments=tuple(KeeneticSegmentView(**view_fields(KeeneticSegmentView, item)) for item in diagnostic["segments"]),
             segment_missing_policy_count=diagnostic["segment_missing_policy_count"],
-            devices=KeeneticDeviceCountsView(**_fields(KeeneticDeviceCountsView, diagnostic["devices"])),
+            devices=KeeneticDeviceCountsView(**view_fields(KeeneticDeviceCountsView, diagnostic["devices"])),
             registrations=KeeneticRegistrationCountsView(
-                **_fields(KeeneticRegistrationCountsView, diagnostic["registrations"]),
+                **view_fields(KeeneticRegistrationCountsView, diagnostic["registrations"]),
             ),
-            runtime=KeeneticRuntimeCountsView(**_fields(KeeneticRuntimeCountsView, diagnostic["runtime"])),
+            runtime=KeeneticRuntimeCountsView(**view_fields(KeeneticRuntimeCountsView, diagnostic["runtime"])),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -126,62 +124,37 @@ class KeeneticStateView:
         return {
             "policy_count": self.policy_count,
             "policy_ids": list(self.policy_ids),
-            "segments": [_view_dict(segment) for segment in self.segments],
+            "segments": [view_dict(segment) for segment in self.segments],
             "segment_missing_policy_count": self.segment_missing_policy_count,
-            "devices": _view_dict(self.devices),
-            "registrations": _view_dict(self.registrations),
-            "runtime": _view_dict(self.runtime),
+            "devices": view_dict(self.devices),
+            "registrations": view_dict(self.registrations),
+            "runtime": view_dict(self.runtime),
         }
 
 
-def _view_dict(view: object) -> dict[str, object]:
-    """Снять поля frozen dataclass со слотами, у которого нет `__dict__`."""
-    return {name: getattr(view, name) for name in view.__dataclass_fields__}
-
-
+_DOMAIN_ERRORS = (KeeneticNativeError, KeeneticDeviceError, KeeneticPolicyError)
 _UNAVAILABLE = {
-    "policies": ("keenetic_policies_unavailable", "Не удалось прочитать политики Keenetic."),
     "hotspot": ("keenetic_hotspot_unavailable", "Не удалось прочитать настройки hotspot Keenetic."),
     "registrations": ("keenetic_registrations_unavailable", "Не удалось прочитать реестр регистраций Keenetic."),
     "runtime": ("keenetic_runtime_unavailable", "Не удалось прочитать наблюдаемое состояние клиентов Keenetic."),
 }
-_INVALID = {
-    "hotspot": (
+_CHECKS = {
+    "hotspot": SourceCheck(
         "invalid_keenetic_hotspot", KeeneticHotspotSettings, validate_hotspot_settings,
         "Источник вернул настройки hotspot Keenetic в неподдерживаемом формате.",
-        "Источник вернул некорректные настройки hotspot Keenetic.",
+        "Источник вернул некорректные настройки hotspot Keenetic.", _DOMAIN_ERRORS,
     ),
-    "registrations": (
+    "registrations": SourceCheck(
         "invalid_keenetic_registrations", KeeneticRegistrations, validate_registrations,
         "Источник вернул реестр регистраций Keenetic в неподдерживаемом формате.",
-        "Источник вернул некорректный реестр регистраций Keenetic.",
+        "Источник вернул некорректный реестр регистраций Keenetic.", _DOMAIN_ERRORS,
     ),
-    "runtime": (
+    "runtime": SourceCheck(
         "invalid_keenetic_runtime", KeeneticHotspotRuntime, validate_hotspot_runtime,
         "Источник вернул наблюдаемое состояние Keenetic в неподдерживаемом формате.",
-        "Источник вернул некорректное наблюдаемое состояние Keenetic.",
+        "Источник вернул некорректное наблюдаемое состояние Keenetic.", _DOMAIN_ERRORS,
     ),
 }
-_DOMAIN_ERRORS = (KeeneticNativeError, KeeneticDeviceError, KeeneticPolicyError)
-
-
-def _unavailable(source: str) -> ErrorDetail:
-    code, message = _UNAVAILABLE[source]
-    return ErrorDetail(ErrorCategory.SOURCE_FAILED, code, message)
-
-
-def _check_model(source: str, value: object) -> ErrorDetail | None:
-    """Проверить тип ответа и повторно проверить модель по её снимку."""
-    code, model_type, validate, type_message, data_message = _INVALID[source]
-    if type(value) is not model_type:
-        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, code, type_message)
-    try:
-        validate(value)
-    except _DOMAIN_ERRORS as error:
-        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, code, data_message, reason=error.code.value)
-    except Exception:
-        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, code, type_message)
-    return None
 
 
 class InspectKeeneticStateHandler:
@@ -233,7 +206,7 @@ class InspectKeeneticStateHandler:
             policies = self._policies.current_policies()
         except Exception:
             # Текст и цепочка исключения адаптера могут содержать описания политик.
-            return _unavailable("policies")
+            return POLICIES_UNAVAILABLE
         error = check_policies(policies)
         if error is not None:
             return error
@@ -248,8 +221,8 @@ class InspectKeeneticStateHandler:
                 value = read()
             except Exception:
                 # Ответ и исключение источника могут содержать MAC, имена и адреса.
-                return _unavailable(source)
-            error = _check_model(source, value)
+                return unavailable(*_UNAVAILABLE[source])
+            error = check_source_model(_CHECKS[source], value)
             if error is not None:
                 return error
             models[source] = value

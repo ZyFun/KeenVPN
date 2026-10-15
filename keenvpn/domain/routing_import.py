@@ -539,7 +539,10 @@ def _rebuild_policy(policy: RoutingPolicy) -> RoutingPolicy:
     try:
         return RoutingPolicy(
             tuple(
-                RoutingRule(_rebuild_condition(rule.condition), rule.action, enabled=rule.enabled, protected=rule.protected)
+                RoutingRule(
+                    _rebuild_condition(rule.condition), rule.action, enabled=rule.enabled, protected=rule.protected,
+                    rule_id=rule.rule_id, name=rule.name,
+                )
                 for rule in rules
             ),
             FinalRoutingRule(final.action),

@@ -42,15 +42,19 @@ DYNAMIC_BUILTINS = frozenset({"__import__", "exec", "eval", "compile"})
 DYNAMIC_MODULES = frozenset({"importlib", "pkgutil", "runpy"})
 # Прямой ввод-вывод в обход print/input: дескрипторы и открытие /dev/tty.
 RAW_IO = frozenset({"os.read", "os.write", "os.open", "builtins.open", "io.open"})
+# Единственный модуль интерфейса, которому разрешены конкретные адаптеры.
+COMPOSITION_MODULE = "keenvpn.interfaces.cli.composition"
 
 
 def boundary_violations(source: str, module: str, *, package: bool = False) -> list[str]:
     """Проверить обычные импорты, терминальные builtins и ANSI в исходнике.
 
     Проверка не исполняет код и не пытается анализировать произвольную динамику.
-    Динамическая загрузка модулей внутри domain/application/adapters также
-    запрещена. Прямой ввод-вывод запрещён только domain/application: адаптерам
-    файлы и дескрипторы понадобятся для работы с роутером.
+    Динамическая загрузка модулей внутри domain/application/adapters/interfaces
+    также запрещена. Прямой ввод-вывод запрещён domain, application и interfaces:
+    интерфейс получает потоки внедрением, а адаптерам файлы и дескрипторы
+    понадобятся для работы с роутером. Интерфейс импортирует application и свой
+    пакет; конкретные адаптеры разрешены только модулю сборки `composition`.
     """
     tree = ast.parse(source)
     allowed = ("keenvpn.domain",)
@@ -60,6 +64,10 @@ def boundary_violations(source: str, module: str, *, package: bool = False) -> l
     elif module.startswith("keenvpn.adapters"):
         allowed += ("keenvpn.application", "keenvpn.adapters")
         raw_io = frozenset()
+    elif module.startswith("keenvpn.interfaces"):
+        allowed = ("keenvpn.application", "keenvpn.interfaces")
+        if module == COMPOSITION_MODULE:
+            allowed += ("keenvpn.adapters",)
     builtins = {"input", "print", *DYNAMIC_BUILTINS} | ({"open"} if raw_io else set())
     # `compile` и `open` как атрибуты не проверяются: иначе `re.compile` и
     # методы моделей считались бы нарушением. `os.open` ловится через raw_io.
@@ -108,7 +116,7 @@ class ApplicationDependencyTests(unittest.TestCase):
         # Domain и adapters проверяются вместе с application: иначе UI можно
         # внести транзитивно через доменную модель или адаптер за портом.
         paths = [ROOT / "keenvpn/__init__.py"]
-        for layer in ("application", "domain", "adapters"):
+        for layer in ("application", "domain", "adapters", "interfaces"):
             modules = sorted((ROOT / "keenvpn" / layer).rglob("*.py"))
             self.assertTrue(modules)
             paths.extend(modules)
@@ -162,6 +170,24 @@ class ApplicationDependencyTests(unittest.TestCase):
         ):
             with self.subTest(adapter=source):
                 self.assertTrue(boundary_violations(source, "keenvpn.adapters.example"))
+        for source in (
+            "from keenvpn.adapters.manager_metadata_files import ManagerMetadataFiles",
+            "from keenvpn.domain.routing import RoutingRule",
+            "from ...domain import routing",
+            "import sys",
+            "from tests.support.in_memory import InMemoryRoutingPolicySource",
+            "print('меню')",
+            "answer = input('> ')",
+            "import os\nos.write(1, b'x')",
+            "open('/dev/tty')",
+            "text = '\\x1b[1mМеню\\x1b[0m'",
+        ):
+            with self.subTest(interface=source):
+                self.assertTrue(boundary_violations(source, "keenvpn.interfaces.cli.menu"))
+        # Домен и тесты запрещены и модулю сборки: ему разрешены только адаптеры.
+        for source in ("from keenvpn.domain.routing import RoutingRule", "import sys"):
+            with self.subTest(composition=source):
+                self.assertTrue(boundary_violations(source, COMPOSITION_MODULE))
 
     def test_dependency_check_allows_ports_models_and_safe_messages(self):
         source = (
@@ -181,6 +207,18 @@ class ApplicationDependencyTests(unittest.TestCase):
             "import re\nfrom ..application.ports import ConnectionLinkParser\n"
             "PATTERN = re.compile('x')\nwith open('config.json') as source:\n    pass\n",
             "keenvpn.adapters.example",
+        ), [])
+        # Интерфейс использует контракты application и свой пакет; адаптеры — только сборка.
+        self.assertEqual(boundary_violations(
+            "from keenvpn.application.contract import Result\n"
+            "from keenvpn.interfaces.cli.menu import Menu\n"
+            "from .terminal import run_menu\n",
+            "keenvpn.interfaces.cli.example",
+        ), [])
+        self.assertEqual(boundary_violations(
+            "from keenvpn.adapters.manager_metadata_files import ManagerMetadataFiles\n"
+            "from keenvpn.application.ports import ManagerMetadataStore\n",
+            COMPOSITION_MODULE,
         ), [])
 
 

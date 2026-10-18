@@ -6,7 +6,9 @@ import unittest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from keenvpn.application.contract import CONTRACT_VERSION, ErrorCategory, ErrorDetail, Result, failed, succeeded
+from keenvpn.application.contract import (
+    CONTRACT_VERSION, NEXT_STEP_MESSAGES, ErrorCategory, ErrorCode, ErrorDetail, NextStepCode, Result, failed, succeeded,
+)
 from dataclasses import replace
 
 from keenvpn.application.installation import GeoDatabaseFileView, InspectInstallation, InspectInstallationHandler
@@ -206,6 +208,7 @@ class SnapshotPresenterTests(PresenterAssertions):
         self.assertEqual(failure, [
             "Отказ: source_failed / xray_config_unavailable", "Уточнение: io_error",
             "Причина: Не удалось прочитать части.",
+            f"Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.CHECK_SOURCE]}",
         ])
         with self.assertRaises(TypeError):
             present_result(installation.to_dict(), present_installation)
@@ -449,13 +452,41 @@ class SafeValueTests(unittest.TestCase):
 
     def test_error_presenter_hides_malformed_codes_and_texts(self):
         error = ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, "bad code!", "Текст\x1b[31m", reason="..")
+        # Код и текст вне формата скрываются, а шаг категории из каталога остаётся: его текст задан заранее.
         self.assertEqual(present_error(error), [
             f"Отказ: invalid_source_data / {HIDDEN}", f"Уточнение: {HIDDEN}", f"Причина: {HIDDEN}",
+            f"Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.INSPECT_SOURCE_DATA]}",
         ])
         plain = ErrorDetail(ErrorCategory.UNSUPPORTED, "storage_placement_mismatch", "Текст.")
-        self.assertEqual(present_error(plain), ["Отказ: unsupported / storage_placement_mismatch", "Причина: Текст."])
+        self.assertEqual(present_error(plain), [
+            "Отказ: unsupported / storage_placement_mismatch", "Причина: Текст.",
+            f"Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.OPEN_VIEW]}",
+        ])
         with self.assertRaises(TypeError):
             present_error({"code": "x"})
+
+    def test_error_presenter_shows_step_only_when_application_gives_one(self):
+        # Шаг берётся из ErrorDetail как есть: без шага строки нет, меню его не вычисляет.
+        without_step = ErrorDetail(ErrorCategory.INVALID_REQUEST, "invalid_command", "Команда сформирована некорректно.")
+        self.assertEqual(present_error(without_step), [
+            "Отказ: invalid_request / invalid_command", "Причина: Команда сформирована некорректно.",
+        ])
+        for category, code, step in (
+            (ErrorCategory.INVALID_INPUT, "invalid_domain", NextStepCode.RETRY_INPUT),
+            (ErrorCategory.SOURCE_FAILED, "metadata_store_busy", NextStepCode.RETRY_LATER),
+            (ErrorCategory.INVALID_SOURCE_DATA, "invalid_stored_metadata", NextStepCode.PRESERVE_FILE),
+            (ErrorCategory.INVALID_REQUEST, "unsupported_contract_version", NextStepCode.UPDATE_INTERFACE),
+        ):
+            with self.subTest(code=code):
+                lines = present_error(ErrorDetail(category, code, "Текст."))
+                self.assertEqual(len(lines), 3)
+                self.assertEqual(lines[-1], f"Следующий шаг: {NEXT_STEP_MESSAGES[step]}")
+                self.assertTrue(lines[-1].isprintable())
+                self.assertLessEqual(len(NEXT_STEP_MESSAGES[step]), presenters.MAX_TEXT_LENGTH)
+        # Регрессия review 227-R01: код-перечисление допустим в ErrorDetail и не должен ронять показ отказа.
+        enum_coded = ErrorDetail(ErrorCategory.INVALID_REQUEST, ErrorCode.UNSUPPORTED_CONTRACT_VERSION, "Текст.")
+        self.assertEqual(present_error(enum_coded)[-1], f"Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.UPDATE_INTERFACE]}")
+        self.assertEqual(len(present_error(ErrorDetail(ErrorCategory.INVALID_REQUEST, ErrorCode.INVALID_COMMAND, "Текст."))), 2)
         # Успешный результат любого сценария отдаётся переданному представлению как есть.
         data = _Data()
         self.assertEqual(present_result(succeeded("op", "cmd", data), lambda view: [repr(view is data)]), ["True"])

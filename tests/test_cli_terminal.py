@@ -7,7 +7,8 @@ import unittest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from keenvpn.application.contract import new_operation_id
+from keenvpn.application.contract import NEXT_STEP_MESSAGES, NextStepCode, new_operation_id
+from keenvpn.application.ports import ManagerMetadataStoreError, MetadataStoreFailure
 from keenvpn.interfaces.cli.composition import (
     MenuAssembly, MenuSources, assemble_main_menu, assemble_setup_menu, default_sources,
 )
@@ -359,7 +360,46 @@ class SnapshotFlowTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(output.count("Отказ: source_failed / xray_config_unavailable"), 2)
         self.assertIn("Причина: Не удалось прочитать части конфигурации Xray.", output)
+        self.assertEqual(output.count(f"Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.CHECK_SOURCE]}"), 2)
         self.assertNotIn("05_routing.json: ", output)
+
+    def test_routing_list_failure_shows_error_with_next_step_instead_of_list(self):
+        # Отказ при выборе 4 → 1: строки отказа с безопасным шагом вместо списка, положение в меню прежнее.
+        self.sources.proxy.xray.outcome = OSError("/opt/etc/xray/configs/05_routing.json: fixture-password")
+        code, output, navigator = self.flow("4\n1\n0\n0\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(navigator.depth, 0)
+        self.assertIn(
+            "Отказ: source_failed / xray_config_unavailable\nПричина: Не удалось прочитать части конфигурации Xray.\n"
+            f"Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.CHECK_SOURCE]}\n\nГлавное меню KeenVPN / Правила маршрутизации\n",
+            output,
+        )
+        self.assertNotIn("Группы правил", output)
+        self.assertNotIn("Номер — карточка", output)
+        self.assertEqual(output.count("Следующий шаг:"), 1)
+
+    def test_metadata_store_failures_show_their_own_steps(self):
+        store = InMemoryManagerMetadataStore()
+        _, menu_sources = snapshot_menu_sources(store)
+        assembly = assemble_main_menu(menu_sources, operation_ids=new_operation_id)
+        for failure, step in (
+            (MetadataStoreFailure.BUSY, NextStepCode.RETRY_LATER),
+            (MetadataStoreFailure.CONFLICT, NextStepCode.OPEN_VIEW),
+            (MetadataStoreFailure.UNSAFE, NextStepCode.PRESERVE_FILE),
+            (MetadataStoreFailure.UNAVAILABLE, NextStepCode.CHECK_SOURCE),
+        ):
+            with self.subTest(failure=failure.value):
+                store.read_failure = ManagerMetadataStoreError(failure)
+                stdout = io.StringIO()
+                with forbid_external_effects():
+                    code = run_menu(MenuNavigator(assembly.menu), assembly.actions, io.StringIO("10\n1\n0\n0\n"), stdout)
+                output = stdout.getvalue()
+                self.assertEqual(code, 0)
+                self.assertIn(f"Отказ: source_failed / {failure.value}\n", output)
+                self.assertIn(f"Следующий шаг: {NEXT_STEP_MESSAGES[step]}\n", output)
+                for marker in PRIVATE_MARKERS:
+                    self.assertNotIn(marker, output)
+        self.assertEqual(store.write_calls, ())
 
     def test_user_tags_shaped_like_private_values_do_not_reach_the_terminal(self):
         # Регрессия review 71-R01: `dns.tag` и стратегию задаёт пользователь, сводка показывает их только как теги.

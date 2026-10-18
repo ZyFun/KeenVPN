@@ -157,13 +157,20 @@ def _indent(lines: Iterable[str], level: int = 1) -> Lines:
 
 
 def present_error(error: ErrorDetail) -> Lines:
-    """Показать отказ сценария: категорию, код, уточнение и заранее заданный текст."""
+    """Показать отказ сценария: категорию, код, уточнение, текст и безопасный следующий шаг.
+
+    Шаг берётся из `error.next_step` как есть: меню его не выбирает и не выполняет.
+    Без шага строка не выводится.
+    """
     if type(error) is not ErrorDetail:
         raise TypeError("Ожидается ErrorDetail.")
     lines = [f"Отказ: {identifier(error.category.value)} / {identifier(error.code)}"]
     if error.reason is not None:
         lines.append(f"Уточнение: {identifier(error.reason)}")
     lines.append(f"Причина: {safe_text(error.message)}")
+    step = error.next_step
+    if step is not None:
+        lines.append(f"Следующий шаг: {safe_text(step.message)}")
     return lines
 
 

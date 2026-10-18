@@ -11,9 +11,11 @@
 показанных элементов, не трогая сам список.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 import re
+from types import MappingProxyType
 
 from keenvpn.interfaces.cli.search import SearchQuery, matches, normalize
 
@@ -45,7 +47,7 @@ class UnavailableReason(StrEnum):
     """Сценарий есть, но пункту нужен ввод значений, которого это меню не принимает."""
 
 
-REASON_MESSAGES = {
+REASON_MESSAGES: Mapping[UnavailableReason, str] = MappingProxyType({
     UnavailableReason.NOT_IMPLEMENTED: (
         "Пункт не реализован в этой версии меню: действие не выполняется, настройки не меняются."
     ),
@@ -55,8 +57,8 @@ REASON_MESSAGES = {
     UnavailableReason.INPUT_REQUIRED: (
         "Пункт требует ввода значений, который это меню не принимает: действие не выполняется."
     ),
-}
-"""Заранее заданные тексты причин; введённые значения и строки источников сюда не попадают."""
+})
+"""Заранее заданные тексты причин; введённые значения и строки источников сюда не попадают. Таблица только для чтения."""
 
 
 def valid_action_id(value: object) -> bool:

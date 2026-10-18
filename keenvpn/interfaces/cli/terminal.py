@@ -1,36 +1,55 @@
-"""Терминальный цикл меню: чтение строк, показ пунктов и вызов доступных действий.
+"""Терминальный цикл меню: чтение строк, показ уровней и вызов доступных действий.
 
 Потоки ввода и вывода внедряются, поэтому цикл одинаково работает с терминалом
 и тестовыми потоками. В вывод попадают только фиксированные тексты, заголовки
-дерева и строки, которые вернуло действие; введённые строки не повторяются.
-Цвет, поиск, выбор в списках и запросы значений здесь отсутствуют.
+дерева и строки, которые вернуло действие; введённые строки, в том числе
+запросы поиска, не повторяются. Один цикл обслуживает все уровни: подменю,
+список, результаты поиска и карточку элемента. Цвет и запросы значений здесь
+отсутствуют.
 """
 
 from collections.abc import Callable, Mapping
 import re
 from typing import Protocol
 
-from keenvpn.interfaces.cli.menu import REASON_MESSAGES, MenuError, MenuNavigator, SelectionKind
+from keenvpn.interfaces.cli.menu import (
+    REASON_MESSAGES, CardLevel, ListLevel, MenuError, MenuList, MenuNavigator, SelectionKind,
+)
+from keenvpn.interfaces.cli.search import MAX_QUERY_CHARS, MAX_QUERY_WORDS, is_number_like, parse_query
 
 
-Action = Callable[[], list[str]]
-"""Доступное действие пункта: возвращает строки для вывода, ничего не печатает само."""
+Action = Callable[[], list[str] | MenuList]
+"""Доступное действие пункта: возвращает строки для вывода или список элементов, ничего не печатает само."""
 
 UNAVAILABLE_MARK = "[недоступно]"
 """Пометка пункта, который показан, но не выполняется."""
 PROMPT = "> "
 HINT = "Введите номер пункта из списка или 0."
+LIST_HINT = "Введите номер элемента из списка, текст для поиска или 0."
+QUERY_HINT = (
+    f"Запрос для поиска — до {MAX_QUERY_CHARS} символов и {MAX_QUERY_WORDS} слов из печатных символов и пробелов."
+)
+NO_MATCHES = "Совпадений нет: показанный список не изменился."
+CARD_HINT = "Введите 0, чтобы вернуться к списку."
+LIST_USAGE = "Номер — карточка элемента, текст — поиск по показанным строкам, 0 — назад."
+EMPTY_LIST = "Список пуст."
 BACK_LABEL = "Назад"
 EXIT_LABEL = "Выход"
 EXIT_OK = 0
+
+MAX_INPUT_LENGTH = 1024
+"""Предел строки ввода в символах без перевода строки; более длинная строка отбрасывается целиком."""
+LINE_TOO_LONG = f"Строка длиннее {MAX_INPUT_LENGTH} символов не обработана."
+MAX_SHOWN = 50
+"""Сколько элементов списка показывается за раз; остальные выбираются по номеру или поиском."""
 
 _CHOICE = re.compile(r"\A(0|[1-9][0-9]{0,2})\Z")
 
 
 class TextInput(Protocol):
-    """Источник строк ввода: пустая строка означает конец ввода."""
+    """Источник строк ввода: не больше `size` символов за вызов, пустая строка означает конец ввода."""
 
-    def readline(self) -> str: ...
+    def readline(self, size: int = -1, /) -> str: ...
 
 
 class TextOutput(Protocol):
@@ -49,6 +68,30 @@ def parse_choice(line: str) -> int | None:
     return int(text)
 
 
+def _chunk(stdin: TextInput) -> str:
+    chunk = stdin.readline(MAX_INPUT_LENGTH + 1)
+    if type(chunk) is not str:
+        raise TypeError("Поток ввода меню должен возвращать строки.")
+    return chunk
+
+
+def read_line(stdin: TextInput) -> tuple[str | None, bool]:
+    """Прочитать строку; вернуть её и признак превышения предела, а в конце ввода — None.
+
+    Строка длиннее предела дочитывается до перевода строки и отбрасывается,
+    чтобы её хвост не был принят за следующую команду; память при этом
+    ограничена пределом.
+    """
+    chunk = _chunk(stdin)
+    if chunk == "":
+        return None, False
+    if chunk.endswith("\n") or len(chunk) <= MAX_INPUT_LENGTH:
+        return chunk, False
+    while chunk != "" and not chunk.endswith("\n"):
+        chunk = _chunk(stdin)
+    return "", True
+
+
 def render_menu(navigator: MenuNavigator) -> list[str]:
     """Собрать строки текущего уровня: путь, все пункты с пометками и `0`."""
     lines = [" / ".join(navigator.titles)]
@@ -59,50 +102,133 @@ def render_menu(navigator: MenuNavigator) -> list[str]:
     return lines
 
 
+def render_list(navigator: MenuNavigator) -> list[str]:
+    """Собрать строки открытого списка или результатов поиска: не больше `MAX_SHOWN` элементов."""
+    level = navigator.current
+    if type(level) is not ListLevel:
+        raise MenuError("Открытый уровень — не список.")
+    lines = [" / ".join(navigator.titles)]
+    if level.filtered:
+        lines.append(f"Найдено: {len(level.entries)} из {len(level.source.entries)}.")
+    else:
+        lines.extend(level.source.header)
+    entries = level.entries
+    if not entries:
+        lines.append(EMPTY_LIST)
+    for entry in entries[:MAX_SHOWN]:
+        lines.append(f"{entry.number:>3}. {entry.label}")
+    if len(entries) > MAX_SHOWN:
+        lines.append(f"Показаны первые {MAX_SHOWN} из {len(entries)}: уточните поиск или введите номер.")
+    lines += [LIST_USAGE, f"  0. {BACK_LABEL}"]
+    return lines
+
+
+def render_card(navigator: MenuNavigator) -> list[str]:
+    """Собрать строки карточки элемента и `0`."""
+    level = navigator.current
+    if type(level) is not CardLevel:
+        raise MenuError("Открытый уровень — не карточка.")
+    return [" / ".join(navigator.titles), *level.entry.card, f"  0. {BACK_LABEL}"]
+
+
+def render_level(navigator: MenuNavigator) -> list[str]:
+    """Собрать строки открытого уровня любого вида."""
+    level = navigator.current
+    if type(level) is ListLevel:
+        return render_list(navigator)
+    if type(level) is CardLevel:
+        return render_card(navigator)
+    return render_menu(navigator)
+
+
 def _flush(stream: TextOutput) -> None:
     flush = getattr(stream, "flush", None)
     if callable(flush):
         flush()
 
 
+def _menu_step(navigator: MenuNavigator, actions: Mapping[str, Action], line: str) -> list[str] | None:
+    choice = parse_choice(line)
+    if choice is None:
+        return [HINT, "", *render_menu(navigator)]
+    selection = navigator.select(choice)
+    if selection.kind is SelectionKind.EXIT:
+        return None
+    if selection.kind is SelectionKind.UNKNOWN:
+        return [HINT, "", *render_menu(navigator)]
+    if selection.kind is SelectionKind.UNAVAILABLE:
+        return [REASON_MESSAGES[selection.reason], "", *render_menu(navigator)]
+    if selection.kind is SelectionKind.ACTION:
+        action = actions.get(selection.action_id)
+        if action is None:
+            raise MenuError("Для доступного действия не задан обработчик.")
+        result = action()
+        if type(result) is MenuList:
+            navigator.open_list(result)
+            return ["", *render_list(navigator)]
+        return ["", *result, "", *render_menu(navigator)]
+    return render_level(navigator)
+
+
+def _list_step(navigator: MenuNavigator, line: str) -> list[str]:
+    choice = parse_choice(line)
+    if choice is not None:
+        selection = navigator.select(choice)
+        if selection.kind is SelectionKind.UNKNOWN:
+            return [LIST_HINT, "", *render_list(navigator)]
+        return render_level(navigator)
+    text = line.strip()
+    if not text or is_number_like(text):
+        return [LIST_HINT, "", *render_list(navigator)]
+    query = parse_query(text)
+    if query is None:
+        return [QUERY_HINT, "", *render_list(navigator)]
+    if navigator.search(query).kind is SelectionKind.NO_MATCHES:
+        return [NO_MATCHES, "", *render_list(navigator)]
+    return render_list(navigator)
+
+
+def _card_step(navigator: MenuNavigator, line: str) -> list[str]:
+    if parse_choice(line) == 0:
+        navigator.back()
+        return render_level(navigator)
+    return [CARD_HINT, "", *render_card(navigator)]
+
+
 def run_menu(navigator: MenuNavigator, actions: Mapping[str, Action], stdin: TextInput, stdout: TextOutput) -> int:
     """Выполнять цикл до `0` в корне или конца ввода; вернуть код завершения.
 
-    Нераспознанная строка, включая пустую, и неизвестный номер дают подсказку
-    и повторный показ меню без смены состояния. Недоступный пункт показывает
-    заранее заданную причину. `KeyboardInterrupt` не перехватывается: его
-    обрабатывает точка входа.
+    В подменю нераспознанная строка, включая пустую, и неизвестный номер дают
+    подсказку и повторный показ без смены состояния; недоступный пункт
+    показывает заранее заданную причину. В списке номер открывает карточку,
+    другой текст — поиск по показанным строкам, `0` возвращает на один уровень;
+    пустая строка и ошибочный ввод ничего не меняют. Строка длиннее предела
+    отбрасывается на любом уровне. `KeyboardInterrupt` не перехватывается:
+    его обрабатывает точка входа.
     """
     def show(lines: list[str]) -> None:
         stdout.write("\n".join(lines) + "\n")
         _flush(stdout)
 
-    show(render_menu(navigator))
+    show(render_level(navigator))
     while True:
         stdout.write(PROMPT)
         _flush(stdout)
-        line = stdin.readline()
-        if type(line) is not str:
-            raise TypeError("Поток ввода меню должен возвращать строки.")
-        if line == "":
+        line, too_long = read_line(stdin)
+        if line is None:
             stdout.write("\n")
             _flush(stdout)
             return EXIT_OK
-        choice = parse_choice(line)
-        if choice is None:
-            show([HINT, "", *render_menu(navigator)])
+        if too_long:
+            show([LINE_TOO_LONG, "", *render_level(navigator)])
             continue
-        selection = navigator.select(choice)
-        if selection.kind is SelectionKind.EXIT:
-            return EXIT_OK
-        if selection.kind is SelectionKind.UNKNOWN:
-            show([HINT, "", *render_menu(navigator)])
-        elif selection.kind is SelectionKind.UNAVAILABLE:
-            show([REASON_MESSAGES[selection.reason], "", *render_menu(navigator)])
-        elif selection.kind is SelectionKind.ACTION:
-            action = actions.get(selection.action_id)
-            if action is None:
-                raise MenuError("Для доступного действия не задан обработчик.")
-            show(["", *action(), "", *render_menu(navigator)])
+        level = navigator.current
+        if type(level) is ListLevel:
+            show(_list_step(navigator, line))
+        elif type(level) is CardLevel:
+            show(_card_step(navigator, line))
         else:
-            show(render_menu(navigator))
+            lines = _menu_step(navigator, actions, line)
+            if lines is None:
+                return EXIT_OK
+            show(lines)

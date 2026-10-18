@@ -7,7 +7,9 @@
 `.`, `:`, `/` и `@`, поэтому домены, адреса, MAC, пути и URL, записанные в тег,
 не выводятся. Значение вне формата заменяется пометкой. Управляющие символы и ANSI
 не используются, данные не вычисляются и не дополняются: показывается лишь то,
-что вернул сценарий.
+что вернул сценарий. Группы правил показываются списком с карточками: строка
+списка и карточка собраны из тех же отфильтрованных значений, а поиск по списку
+видит только строку.
 """
 
 from collections.abc import Callable, Iterable
@@ -18,12 +20,13 @@ from keenvpn.application.installation import GeoDataView, InstallationView, Xray
 from keenvpn.application.keenetic_state import KeeneticStateView
 from keenvpn.application.manager_metadata import ManagerMetadataStatusView
 from keenvpn.application.proxy_config import ProxyConfigView, XKeenFlagView, XKeenListView
-from keenvpn.application.routing_import import RoutingSchemeView
+from keenvpn.application.routing_import import RuleGroupView, RoutingSchemeView
+from keenvpn.interfaces.cli.menu import MAX_ITEM_NUMBER, ListEntry, MenuList
 from keenvpn.interfaces.cli.terminal import UNAVAILABLE_MARK
 
 
 Lines = list[str]
-Presenter = Callable[[object], Lines]
+Presenter = Callable[[object], Lines | MenuList]
 
 HIDDEN = "<скрыто>"
 """Пометка вместо строки, не прошедшей проверку формата."""
@@ -164,7 +167,7 @@ def present_error(error: ErrorDetail) -> Lines:
     return lines
 
 
-def present_result(result: Result, present: Presenter) -> Lines:
+def present_result(result: Result, present: Presenter) -> Lines | MenuList:
     """Показать результат: данные через переданное представление, отказ — общим способом."""
     if type(result) is not Result:
         raise TypeError("Ожидается Result сценария.")
@@ -316,11 +319,90 @@ def present_installation(view: InstallationView) -> Lines:
     ]
 
 
-def present_routing_scheme(view: RoutingSchemeView) -> Lines:
-    """Показать импортированные группы правил без доменов, адресов и кодов наборов."""
+ROUTING_LIST_TITLE = "Группы правил"
+ROUTING_ITEM_NAME = "Группа правил"
+OUTBOUND_TAGS_PER_LINE = 10
+"""Сколько тегов outbound в строке карточки: тег после фильтра не длиннее 64 символов, строка остаётся в пределе."""
+
+
+def _value_reasons(group: RuleGroupView) -> str:
+    # Пути значений не выводятся: они ведут к условиям, а для диагностики достаточно кодов.
+    counts: dict[str, int] = {}
+    for item in group.value_reasons:
+        code = identifier(item.reason)
+        counts[code] = counts.get(code, 0) + 1
+    return ", ".join(f"{code} ×{number}" for code, number in counts.items())
+
+
+def _condition_types(group: RuleGroupView) -> str:
+    return ", ".join(f"{identifier(item.name)} {count(item.count)}" for item in group.condition_types) or "нет"
+
+
+def _group_label(group: RuleGroupView) -> str:
+    target = group.target
+    line = (
+        f"{identifier(group.kind)}: условий {count(group.condition_count)} ({_condition_types(group)}), "
+        f"значений {count(group.value_count)}, действие "
+        f"{'нет' if group.action is None else identifier(group.action)}, назначение "
+        f"{identifier(target.kind)} {known_value(target.tag_known, target.tag, identifier, 'без тега')}, "
+        f"только просмотр {flag(group.read_only)}"
+    )
+    if group.reasons:
+        line += f", причины: {identifiers(group.reasons)}"
+    if target.reasons:
+        line += f", причины назначения: {identifiers(target.reasons)}"
+    if group.value_reasons:
+        line += f", причины значений: {_value_reasons(group)}"
+    if group.unknown_field_count:
+        line += f", неизвестных полей {count(group.unknown_field_count)}"
+    return line
+
+
+def _rule_tag(has_rule_tag: object) -> str:
+    if has_rule_tag is True:
+        return "задан, значение не показывается"
+    return "не задан" if has_rule_tag is False else HIDDEN
+
+
+def _outbound_lines(tags: tuple[object, ...]) -> list[str]:
+    # Число outbound задаёт конфигурация, поэтому теги идут строками по OUTBOUND_TAGS_PER_LINE.
+    lines = [f"Outbound назначения: {count(len(tags))}"]
+    for start in range(0, len(tags), OUTBOUND_TAGS_PER_LINE):
+        lines.append(_INDENT + identifiers(tags[start:start + OUTBOUND_TAGS_PER_LINE]))
+    return lines
+
+
+def _group_card(group: RuleGroupView) -> tuple[str, ...]:
+    target = group.target
+    return (
+        f"Часть: {file_name(group.part)}; индекс правила Xray: {count(group.index)} (счёт с нуля)",
+        f"Вид: {identifier(group.kind)}; только просмотр: {flag(group.read_only)}; "
+        f"причины: {identifiers(group.reasons)}",
+        f"Условий: {count(group.condition_count)} ({_condition_types(group)}); значений: {count(group.value_count)}; "
+        "сами значения не показываются",
+        f"Причины значений: {_value_reasons(group) or 'нет'}",
+        f"Поля правила: {identifiers(group.fields)}; неподдержанные: {identifiers(group.unsupported_fields)}; "
+        f"неизвестных: {count(group.unknown_field_count)}",
+        f"Тег правила: {_rule_tag(group.has_rule_tag)}",
+        f"Действие: {'нет' if group.action is None else identifier(group.action)}",
+        f"Назначение: {identifier(target.kind)} {known_value(target.tag_known, target.tag, identifier, 'без тега')}; "
+        f"запасной: {known_value(target.fallback_known, target.fallback_tag, identifier, 'не задан')}; "
+        f"стратегия: {known_value(target.strategy_known, target.strategy, identifier, 'не задана')}; "
+        f"действие назначения: {'нет' if target.action is None else identifier(target.action)}",
+        *_outbound_lines(target.outbound_tags),
+        f"Причины назначения: {identifiers(target.reasons)}",
+    )
+
+
+def present_routing_scheme(view: RoutingSchemeView) -> MenuList:
+    """Показать импортированные группы правил списком без доменов, адресов и кодов наборов.
+
+    Номер группы — её позиция в схеме, начиная с 1: он не меняется при поиске.
+    Строка списка и карточка собираются из тех же отфильтрованных значений.
+    """
     if type(view) is not RoutingSchemeView:
         raise TypeError("Ожидается RoutingSchemeView.")
-    lines = [
+    header = [
         "Правила маршрутизации по конфигурации Xray",
         f"Часть с маршрутизацией: {optional_file_name(view.routing_part)}; частей с разделом routing: "
         f"{count(len(view.routing_parts))}",
@@ -330,37 +412,20 @@ def present_routing_scheme(view: RoutingSchemeView) -> Lines:
     ]
     policy = view.policy
     if policy is None:
-        lines.append("Политика маршрутизации не собрана: схема доступна только для просмотра.")
+        header.append("Политика маршрутизации не собрана: схема доступна только для просмотра.")
     else:
-        lines.append(
+        header.append(
             f"Политика: правил {count(policy.rule_count)}, включено {count(policy.active_rule_count)}, "
             f"служебных {count(policy.protected_rule_count)}, финальное действие {identifier(policy.final_action)}, "
             f"только просмотр {flag(policy.read_only)}"
         )
-    for group in view.groups:
-        types = ", ".join(f"{identifier(item.name)} {count(item.count)}" for item in group.condition_types) or "нет"
-        line = (
-            f"{count(group.index)}. {identifier(group.kind)}: условий {count(group.condition_count)} ({types}), "
-            f"значений {count(group.value_count)}, действие "
-            f"{'нет' if group.action is None else identifier(group.action)}, назначение "
-            f"{identifier(group.target.kind)} {known_value(group.target.tag_known, group.target.tag, identifier, 'без тега')}, "
-            f"только просмотр {flag(group.read_only)}"
-        )
-        if group.reasons:
-            line += f", причины: {identifiers(group.reasons)}"
-        if group.target.reasons:
-            line += f", причины назначения: {identifiers(group.target.reasons)}"
-        if group.value_reasons:
-            # Пути значений не выводятся: они ведут к условиям, а для диагностики достаточно кодов.
-            counts: dict[str, int] = {}
-            for item in group.value_reasons:
-                code = identifier(item.reason)
-                counts[code] = counts.get(code, 0) + 1
-            line += ", причины значений: " + ", ".join(f"{code} ×{number}" for code, number in counts.items())
-        if group.unknown_field_count:
-            line += f", неизвестных полей {count(group.unknown_field_count)}"
-        lines.append(_INDENT + line)
-    return lines
+    groups = view.groups[:MAX_ITEM_NUMBER]
+    if len(view.groups) > MAX_ITEM_NUMBER:
+        header.append(f"Групп больше {MAX_ITEM_NUMBER}: в списке первые {MAX_ITEM_NUMBER}, остальные не показываются.")
+    entries = tuple(
+        ListEntry(number, _group_label(group), _group_card(group)) for number, group in enumerate(groups, start=1)
+    )
+    return MenuList(ROUTING_LIST_TITLE, ROUTING_ITEM_NAME, tuple(header), entries)
 
 
 def present_manager_metadata(view: ManagerMetadataStatusView) -> Lines:
@@ -403,6 +468,7 @@ def present_about() -> Lines:
         "Справка по меню KeenVPN",
         "Выберите пункт, введя его номер и Enter. 0 возвращает на уровень выше, в корневом меню — завершает работу.",
         f"Пункты с пометкой {UNAVAILABLE_MARK} не выполняются: при выборе показывается причина, настройки не меняются.",
+        "В списках номер открывает карточку элемента, другой текст ищет по показанным строкам, 0 возвращает назад.",
         "Меню только показывает данные подключённых источников чтения; конфигурация роутера, Xray и XKeen не изменяется.",
         f"Версия контракта результатов прикладных сценариев: {CONTRACT_VERSION}",
     ]

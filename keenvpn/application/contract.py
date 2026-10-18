@@ -2,12 +2,15 @@
 
 Сценарий не печатает, не читает терминал и не запрашивает подтверждение:
 он получает типизированную команду и возвращает структурированный результат.
-Интерфейс сам решает, как показать данные и сообщение об ошибке.
+Интерфейс сам решает, как показать данные и сообщение об ошибке. Безопасный
+следующий шаг отказа задаёт каталог этого модуля по категории и коду ошибки:
+интерфейсы только показывают его и ничего не выполняют.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Protocol
 import uuid
 
@@ -49,13 +52,126 @@ class ErrorCode(StrEnum):
     UNSUPPORTED_CONTRACT_VERSION = "unsupported_contract_version"
 
 
+class NextStepCode(StrEnum):
+    """Стабильные коды безопасного следующего шага после отказа.
+
+    Шаг только предлагает действие пользователю и ничего не выполняет.
+    Ни один шаг не предлагает прямой маршрут, отключение защиты, kill-switch
+    или автозапуска как исправление.
+    """
+
+    RETRY_INPUT = "retry_input"
+    """Исправить введённое значение и повторить ввод."""
+    CONSULT_DOCUMENTATION = "consult_documentation"
+    """Значение корректно, но не поддерживается: сверить с документацией."""
+    CHECK_SOURCE = "check_source"
+    """Проверить доступность источника чтения и повторить попытку."""
+    INSPECT_SOURCE_DATA = "inspect_source_data"
+    """Проверить данные источника вручную, ничего не изменяя."""
+    RETRY_LATER = "retry_later"
+    """Повторить позже: ресурс занят другой операцией."""
+    OPEN_VIEW = "open_view"
+    """Открыть просмотр текущего состояния и сверить его перед повтором."""
+    PRESERVE_FILE = "preserve_file"
+    """Не перезаписывать и не удалять файл: сохранить копию и проверить вручную."""
+    UPDATE_INTERFACE = "update_interface"
+    """Использовать интерфейс, совместимый с версией контракта менеджера."""
+
+
+NEXT_STEP_MESSAGES: Mapping[NextStepCode, str] = MappingProxyType({
+    NextStepCode.RETRY_INPUT: "Исправьте введённое значение и повторите ввод.",
+    NextStepCode.CONSULT_DOCUMENTATION: (
+        "Значение корректно, но не поддерживается этой версией: сверьтесь с документацией поддерживаемых вариантов."
+    ),
+    NextStepCode.CHECK_SOURCE: (
+        "Проверьте доступность источника чтения и повторите попытку; настройки роутера при этом не менялись."
+    ),
+    NextStepCode.INSPECT_SOURCE_DATA: (
+        "Проверьте данные источника вручную, ничего не изменяя: менеджер их не исправляет."
+    ),
+    NextStepCode.RETRY_LATER: "Повторите операцию позже: её выполняет другая операция, настройки не менялись.",
+    NextStepCode.OPEN_VIEW: (
+        "Откройте просмотр текущего состояния и сверьте его перед повторной попыткой; данные при этом не меняются."
+    ),
+    NextStepCode.PRESERVE_FILE: (
+        "Не перезаписывайте и не удаляйте файл: сохраните его копию и проверьте вручную по документации."
+    ),
+    NextStepCode.UPDATE_INTERFACE: "Используйте интерфейс, совместимый с версией контракта установленного менеджера.",
+})
+"""Заранее заданный русский текст каждого шага; других текстов у шагов нет. Таблица только для чтения."""
+
+
+@dataclass(frozen=True, slots=True)
+class NextStep:
+    """Безопасный следующий шаг: стабильный код и его заранее заданный текст.
+
+    Текст берётся только из `NEXT_STEP_MESSAGES`, поэтому входные значения,
+    адреса, фрагменты ссылок и текст внешних исключений в шаг не попадают.
+    Таблицы каталога только для чтения: созданные ошибки сериализуются одинаково
+    на всём протяжении работы процесса.
+    """
+
+    code: NextStepCode
+    message: str
+
+    def __post_init__(self) -> None:
+        if type(self.code) is not NextStepCode or self.message != NEXT_STEP_MESSAGES[self.code]:
+            raise TypeError("Некорректное описание следующего шага.")
+
+    def to_dict(self) -> dict[str, str]:
+        """Вернуть JSON-совместимое представление."""
+        return {"code": self.code.value, "message": self.message}
+
+
+CATEGORY_NEXT_STEPS: Mapping[ErrorCategory, NextStepCode | None] = MappingProxyType({
+    ErrorCategory.INVALID_REQUEST: None,
+    ErrorCategory.INVALID_INPUT: NextStepCode.RETRY_INPUT,
+    ErrorCategory.UNSUPPORTED: NextStepCode.CONSULT_DOCUMENTATION,
+    ErrorCategory.SOURCE_FAILED: NextStepCode.CHECK_SOURCE,
+    ErrorCategory.INVALID_SOURCE_DATA: NextStepCode.INSPECT_SOURCE_DATA,
+})
+"""Шаг по умолчанию для каждой категории; `None` — безопасного шага нет. Таблица только для чтения."""
+
+CODE_NEXT_STEPS: Mapping[tuple[ErrorCategory, str], NextStepCode | None] = MappingProxyType({
+    # Единственный отказ запроса, где у пользователя есть действие: сменить интерфейс.
+    (ErrorCategory.INVALID_REQUEST, ErrorCode.UNSUPPORTED_CONTRACT_VERSION.value): NextStepCode.UPDATE_INTERFACE,
+    (ErrorCategory.INVALID_REQUEST, ErrorCode.INVALID_COMMAND.value): None,
+    # Отказы хранилища метаданных менеджера: ни один шаг не подталкивает к перезаписи файла.
+    (ErrorCategory.SOURCE_FAILED, "metadata_store_busy"): NextStepCode.RETRY_LATER,
+    (ErrorCategory.SOURCE_FAILED, "metadata_revision_conflict"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.SOURCE_FAILED, "metadata_write_unconfirmed"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.SOURCE_FAILED, "metadata_store_failed"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.INVALID_SOURCE_DATA, "invalid_metadata_store_result"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.SOURCE_FAILED, "metadata_store_unsafe"): NextStepCode.PRESERVE_FILE,
+    (ErrorCategory.INVALID_SOURCE_DATA, "invalid_stored_metadata"): NextStepCode.PRESERVE_FILE,
+    (ErrorCategory.UNSUPPORTED, "storage_placement_mismatch"): NextStepCode.OPEN_VIEW,
+})
+"""Переопределения по паре «категория, код»; остальные коды получают шаг категории. Таблица только для чтения."""
+
+
+def next_step_for(category: ErrorCategory, code: str) -> NextStep | None:
+    """Выбрать безопасный следующий шаг по категории и коду отказа; `None` — шага нет.
+
+    Сначала ищется переопределение для пары, затем шаг категории. Интерфейсы
+    этот выбор не повторяют: они читают `ErrorDetail.next_step`. Код принимается
+    в тех же типах, что и `ErrorDetail.code`, включая подклассы `str`; ключ
+    таблицы — его значение обычной строкой, без сравнения `StrEnum` со строкой.
+    """
+    if type(category) is not ErrorCategory or not isinstance(code, str):
+        raise TypeError("Шаг выбирается по категории ErrorCategory и строковому коду.")
+    step_code = CODE_NEXT_STEPS.get((category, str.__str__(code)), CATEGORY_NEXT_STEPS[category])
+    return None if step_code is None else NextStep(step_code, NEXT_STEP_MESSAGES[step_code])
+
+
 @dataclass(frozen=True, slots=True)
 class ErrorDetail:
     """Безопасное описание отказа.
 
     `code` и `reason` — стабильные английские идентификаторы, `message` —
     заранее заданный русский текст. Входные значения и сырые исключения
-    внешних источников сюда не попадают.
+    внешних источников сюда не попадают. `next_step` — безопасный следующий
+    шаг из каталога контракта по категории и коду; `None` означает, что
+    безопасного шага нет.
     """
 
     category: ErrorCategory
@@ -72,13 +188,20 @@ class ErrorDetail:
         ):
             raise TypeError("Некорректное описание ошибки сценария.")
 
-    def to_dict(self) -> dict[str, str | None]:
-        """Вернуть JSON-совместимое представление."""
+    @property
+    def next_step(self) -> NextStep | None:
+        """Безопасный следующий шаг по каталогу контракта; `None` — шага нет."""
+        return next_step_for(self.category, self.code)
+
+    def to_dict(self) -> dict[str, object]:
+        """Вернуть JSON-совместимое представление; ключ `next_step` добавлен в версии контракта 1."""
+        step = self.next_step
         return {
             "category": self.category.value,
             "code": self.code,
             "reason": self.reason,
             "message": self.message,
+            "next_step": None if step is None else step.to_dict(),
         }
 
 

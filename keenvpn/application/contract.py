@@ -7,9 +7,10 @@
 интерфейсы только показывают его и ничего не выполняют.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Protocol
 import uuid
 
@@ -77,7 +78,7 @@ class NextStepCode(StrEnum):
     """Использовать интерфейс, совместимый с версией контракта менеджера."""
 
 
-NEXT_STEP_MESSAGES: dict[NextStepCode, str] = {
+NEXT_STEP_MESSAGES: Mapping[NextStepCode, str] = MappingProxyType({
     NextStepCode.RETRY_INPUT: "Исправьте введённое значение и повторите ввод.",
     NextStepCode.CONSULT_DOCUMENTATION: (
         "Значение корректно, но не поддерживается этой версией: сверьтесь с документацией поддерживаемых вариантов."
@@ -96,8 +97,8 @@ NEXT_STEP_MESSAGES: dict[NextStepCode, str] = {
         "Не перезаписывайте и не удаляйте файл: сохраните его копию и проверьте вручную по документации."
     ),
     NextStepCode.UPDATE_INTERFACE: "Используйте интерфейс, совместимый с версией контракта установленного менеджера.",
-}
-"""Заранее заданный русский текст каждого шага; других текстов у шагов нет."""
+})
+"""Заранее заданный русский текст каждого шага; других текстов у шагов нет. Таблица только для чтения."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +107,8 @@ class NextStep:
 
     Текст берётся только из `NEXT_STEP_MESSAGES`, поэтому входные значения,
     адреса, фрагменты ссылок и текст внешних исключений в шаг не попадают.
+    Таблицы каталога только для чтения: созданные ошибки сериализуются одинаково
+    на всём протяжении работы процесса.
     """
 
     code: NextStepCode
@@ -120,16 +123,16 @@ class NextStep:
         return {"code": self.code.value, "message": self.message}
 
 
-CATEGORY_NEXT_STEPS: dict[ErrorCategory, NextStepCode | None] = {
+CATEGORY_NEXT_STEPS: Mapping[ErrorCategory, NextStepCode | None] = MappingProxyType({
     ErrorCategory.INVALID_REQUEST: None,
     ErrorCategory.INVALID_INPUT: NextStepCode.RETRY_INPUT,
     ErrorCategory.UNSUPPORTED: NextStepCode.CONSULT_DOCUMENTATION,
     ErrorCategory.SOURCE_FAILED: NextStepCode.CHECK_SOURCE,
     ErrorCategory.INVALID_SOURCE_DATA: NextStepCode.INSPECT_SOURCE_DATA,
-}
-"""Шаг по умолчанию для каждой категории; `None` — безопасного шага нет."""
+})
+"""Шаг по умолчанию для каждой категории; `None` — безопасного шага нет. Таблица только для чтения."""
 
-CODE_NEXT_STEPS: dict[tuple[ErrorCategory, str], NextStepCode | None] = {
+CODE_NEXT_STEPS: Mapping[tuple[ErrorCategory, str], NextStepCode | None] = MappingProxyType({
     # Единственный отказ запроса, где у пользователя есть действие: сменить интерфейс.
     (ErrorCategory.INVALID_REQUEST, ErrorCode.UNSUPPORTED_CONTRACT_VERSION.value): NextStepCode.UPDATE_INTERFACE,
     (ErrorCategory.INVALID_REQUEST, ErrorCode.INVALID_COMMAND.value): None,
@@ -142,8 +145,8 @@ CODE_NEXT_STEPS: dict[tuple[ErrorCategory, str], NextStepCode | None] = {
     (ErrorCategory.SOURCE_FAILED, "metadata_store_unsafe"): NextStepCode.PRESERVE_FILE,
     (ErrorCategory.INVALID_SOURCE_DATA, "invalid_stored_metadata"): NextStepCode.PRESERVE_FILE,
     (ErrorCategory.UNSUPPORTED, "storage_placement_mismatch"): NextStepCode.OPEN_VIEW,
-}
-"""Переопределения по паре «категория, код»; остальные коды получают шаг категории."""
+})
+"""Переопределения по паре «категория, код»; остальные коды получают шаг категории. Таблица только для чтения."""
 
 
 def next_step_for(category: ErrorCategory, code: str) -> NextStep | None:

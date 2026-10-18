@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError
 import json
 from pathlib import Path
 import sys
+from types import MappingProxyType
 import unittest
 
 
@@ -265,6 +266,23 @@ class NextStepCatalogTests(unittest.TestCase):
                 NextStep(*args)
         with self.assertRaises(FrozenInstanceError):
             step.message = "Иначе."
+
+    def test_catalog_tables_are_read_only(self):
+        # Регрессия GitHub review 227-R02: правка таблиц из процесса меняла бы сериализацию уже созданных ошибок.
+        for table, key in (
+            (NEXT_STEP_MESSAGES, NextStepCode.RETRY_INPUT),
+            (CATEGORY_NEXT_STEPS, ErrorCategory.INVALID_INPUT),
+            (CODE_NEXT_STEPS, (ErrorCategory.SOURCE_FAILED, "metadata_store_busy")),
+        ):
+            with self.subTest(table=type(table).__name__, key=key):
+                self.assertIs(type(table), MappingProxyType)
+                with self.assertRaises(TypeError):
+                    table[key] = None
+                with self.assertRaises(TypeError):
+                    del table[key]
+                self.assertFalse(hasattr(table, "clear"))
+        error = ErrorDetail(ErrorCategory.SOURCE_FAILED, "metadata_store_busy", "Текст.")
+        self.assertEqual(step_code(error.next_step), NextStepCode.RETRY_LATER)
 
     def test_next_step_for_checks_argument_types(self):
         for args in (("invalid_input", "code"), (ErrorCategory.INVALID_INPUT, None), (ErrorCategory.INVALID_INPUT, b"code")):

@@ -154,6 +154,13 @@ class MenuModelTests(unittest.TestCase):
             # Каждая причина говорит, что действие не выполнено или настройки не изменились.
             self.assertTrue("не меняются" in message or "не выполняется" in message)
 
+    def test_reason_messages_are_read_only(self):
+        # Таблица текстов только для чтения, как таблицы шагов контракта: правка из процесса не меняет показ причин.
+        with self.assertRaises(TypeError):
+            REASON_MESSAGES[UnavailableReason.NOT_IMPLEMENTED] = "другой текст"
+        with self.assertRaises(TypeError):
+            del REASON_MESSAGES[UnavailableReason.NOT_IMPLEMENTED]
+
 
 class NavigatorTests(unittest.TestCase):
     def setUp(self):

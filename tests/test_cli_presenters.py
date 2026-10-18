@@ -28,9 +28,11 @@ from keenvpn.interfaces.cli.presenters import (
 from keenvpn.interfaces.cli.menu import MAX_ITEM_NUMBER, MAX_LIST_LINE_LENGTH, MenuList
 from keenvpn.interfaces.cli.presenters import ROUTING_ITEM_NAME, ROUTING_LIST_TITLE
 from keenvpn.interfaces.cli.terminal import UNAVAILABLE_MARK
+from enum import StrEnum
 import json
 
 from keenvpn.adapters.xray_configs import xray_config_from_files
+from keenvpn.application.ports import MetadataStoreFailure
 from tests.support.in_memory import InMemoryManagerMetadataStore, InMemoryStoragePlacementSource
 from tests.support.isolation import forbid_external_effects
 from tests.support.snapshot import (
@@ -92,6 +94,12 @@ class PresenterAssertions(unittest.TestCase):
         for marker in PRIVATE_MARKERS:
             self.assertNotIn(marker, text)
         return text
+
+
+class _OddCode(StrEnum):
+    """Код-перечисление вне формата идентификатора: проверка, что фильтр действует и на значение."""
+
+    BAD = "bad code!"
 
 
 class SnapshotPresenterTests(PresenterAssertions):
@@ -487,6 +495,22 @@ class SafeValueTests(unittest.TestCase):
         enum_coded = ErrorDetail(ErrorCategory.INVALID_REQUEST, ErrorCode.UNSUPPORTED_CONTRACT_VERSION, "Текст.")
         self.assertEqual(present_error(enum_coded)[-1], f"Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.UPDATE_INTERFACE]}")
         self.assertEqual(len(present_error(ErrorDetail(ErrorCategory.INVALID_REQUEST, ErrorCode.INVALID_COMMAND, "Текст."))), 2)
+
+    def test_error_presenter_shows_enum_codes_and_reasons_by_value(self):
+        # Контракт принимает в коде и уточнении подклассы str: показывается значение, а не пометка скрытого.
+        error = ErrorDetail(
+            ErrorCategory.SOURCE_FAILED, MetadataStoreFailure.BUSY, "Текст.", reason=MetadataStoreFailure.BUSY,
+        )
+        self.assertEqual(present_error(error), [
+            "Отказ: source_failed / metadata_store_busy", "Уточнение: metadata_store_busy", "Причина: Текст.",
+            f"Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.RETRY_LATER]}",
+        ])
+        self.assertEqual(
+            present_error(ErrorDetail(ErrorCategory.INVALID_REQUEST, ErrorCode.INVALID_COMMAND, "Текст."))[0],
+            "Отказ: invalid_request / invalid_command",
+        )
+        # Фильтр формата действует и на значение перечисления.
+        self.assertEqual(present_error(ErrorDetail(ErrorCategory.INVALID_INPUT, _OddCode.BAD, "Текст."))[0], f"Отказ: invalid_input / {HIDDEN}")
         # Успешный результат любого сценария отдаётся переданному представлению как есть.
         data = _Data()
         self.assertEqual(present_result(succeeded("op", "cmd", data), lambda view: [repr(view is data)]), ["True"])

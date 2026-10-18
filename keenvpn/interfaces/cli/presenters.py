@@ -160,13 +160,14 @@ def present_error(error: ErrorDetail) -> Lines:
     """Показать отказ сценария: категорию, код, уточнение, текст и безопасный следующий шаг.
 
     Шаг берётся из `error.next_step` как есть: меню его не выбирает и не выполняет.
-    Без шага строка не выводится.
+    Без шага строка не выводится. Код и уточнение контракт допускает подклассами
+    `str`, например перечислениями: фильтр получает их значение обычной строкой.
     """
     if type(error) is not ErrorDetail:
         raise TypeError("Ожидается ErrorDetail.")
-    lines = [f"Отказ: {identifier(error.category.value)} / {identifier(error.code)}"]
+    lines = [f"Отказ: {identifier(error.category.value)} / {identifier(str.__str__(error.code))}"]
     if error.reason is not None:
-        lines.append(f"Уточнение: {identifier(error.reason)}")
+        lines.append(f"Уточнение: {identifier(str.__str__(error.reason))}")
     lines.append(f"Причина: {safe_text(error.message)}")
     step = error.next_step
     if step is not None:

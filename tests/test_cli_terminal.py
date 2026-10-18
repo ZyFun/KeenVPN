@@ -12,10 +12,11 @@ from keenvpn.interfaces.cli.composition import (
     MenuAssembly, MenuSources, assemble_main_menu, assemble_setup_menu, default_sources,
 )
 from keenvpn.interfaces.cli.menu import (
-    REASON_MESSAGES, Menu, MenuAction, MenuError, MenuItem, MenuNavigator, UnavailableReason,
+    MAX_LIST_LINE_LENGTH, REASON_MESSAGES, Menu, MenuAction, MenuError, MenuItem, MenuNavigator, UnavailableReason,
 )
 from keenvpn.interfaces.cli.terminal import (
-    BACK_LABEL, EXIT_LABEL, HINT, PROMPT, UNAVAILABLE_MARK, parse_choice, render_menu, run_menu,
+    BACK_LABEL, EXIT_LABEL, HINT, LIST_USAGE, NO_MATCHES, PROMPT, UNAVAILABLE_MARK, parse_choice, render_menu,
+    run_menu,
 )
 from keenvpn.interfaces.cli.tree import ALL_ACTION_IDS, BOUND_SCENARIOS, MAIN_MENU_TITLE, SETUP_MENU_TITLE
 from tests.support.in_memory import InMemoryManagerMetadataStore
@@ -178,11 +179,11 @@ class RunLoopTests(unittest.TestCase):
 
     def test_interrupt_and_wrong_stream_types_are_not_swallowed(self):
         class Interrupting:
-            def readline(self):
+            def readline(self, size=-1):
                 raise KeyboardInterrupt
 
         class Binary:
-            def readline(self):
+            def readline(self, size=-1):
                 return b"0\n"
 
         for stdin, error in ((Interrupting(), KeyboardInterrupt), (Binary(), TypeError)):
@@ -285,7 +286,7 @@ class SnapshotFlowTests(unittest.TestCase):
         self.assertEqual((self.sources.geodata.calls, self.sources.process.calls), (0, 0))
 
     def test_rules_devices_port53_storage_and_help_items(self):
-        code, output, _ = self.flow("4\n1\n0\n5\n1\n0\n6\n7\n0\n10\n1\n5\n0\n0\n")
+        code, output, _ = self.flow("4\n1\n0\n0\n5\n1\n0\n6\n7\n0\n10\n1\n5\n0\n0\n")
         self.assertEqual(code, 0)
         for text in (
             "Правила маршрутизации по конфигурации Xray", "Keenetic", "Порт 53 по файлам конфигурации XKeen",
@@ -294,6 +295,57 @@ class SnapshotFlowTests(unittest.TestCase):
             self.assertIn(text, output)
         self.assertEqual(self.sources.proxy.calls[:3], (2, 2, 2))
         self.assertEqual(self.sources.keenetic.calls, (1, 1, 1, 1))
+
+    def test_rule_groups_open_as_list_with_search_and_cards(self):
+        code, output, navigator = self.flow("4\n1\nfallback_mixed\n3\n0\n0\n0\n0\n0\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(navigator.depth, 0)
+        path = "Главное меню KeenVPN / Правила маршрутизации / Группы правил"
+        self.assertIn(f"{path}\nПравила маршрутизации по конфигурации Xray\n", output)
+        self.assertIn(f"{path} / Результаты поиска\nНайдено: 3 из 8.\n  3. rules:", output)
+        found = output.split(f"{path} / Результаты поиска\n", 1)[1].split(LIST_USAGE, 1)[0]
+        self.assertEqual([line.split(".")[0].strip() for line in found.splitlines()[1:]], ["3", "4", "8"])
+        self.assertIn(
+            f"{path} / Результаты поиска / Группа правил 3\n"
+            "Часть: 05_routing.json; индекс правила Xray: 2 (счёт с нуля)\n",
+            output,
+        )
+        self.assertIn(
+            "Назначение: balancer vpn-group; запасной: blocked; стратегия: leastPing; действие назначения: нет\n"
+            "Outbound назначения: 1\n  trojan-out\n", output,
+        )
+        self.assertIn("Тег правила: задан, значение не показывается", output)
+        # Сценарий выполнен один раз: поиск, карточка и возвраты источники не читают.
+        self.assertEqual(self.sources.proxy.calls[:3], (1, 1, 1))
+
+    def test_balancer_with_many_long_outbound_tags_keeps_the_menu_running(self):
+        # Регрессия review 72-R01: 40 outbound с тегами по 60 символов под селектором балансировщика.
+        files = load_xray_snapshot_files()
+        outbounds = json.loads(files["04_outbounds.json"])
+        tags = [f"trojan-out-{number:02d}-" + "a" * 46 for number in range(40)]
+        outbounds["outbounds"] += [{"tag": tag, "protocol": "freedom", "settings": {}} for tag in tags]
+        files["04_outbounds.json"] = json.dumps(outbounds).encode("utf-8")
+        self.sources.proxy.xray.outcome = xray_config_from_files(files)
+        code, output, navigator = self.flow("4\n1\n3\n0\n0\n0\n0\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(navigator.depth, 0)
+        self.assertIn("Outbound назначения: 41\n  trojan-out, " + ", ".join(tags[:9]) + "\n", output)
+        self.assertIn("  " + ", ".join(tags[29:39]) + "\n  " + tags[39] + "\nПричины назначения:", output)
+        self.assertTrue(all(len(line) <= MAX_LIST_LINE_LENGTH for line in output.splitlines()))
+        self.assertEqual(output.count("Главное меню KeenVPN / Правила маршрутизации / Группы правил\n"), 2)
+
+    def test_search_never_matches_hidden_values(self):
+        # Значения условий, теги правил и сети снимка не показываются, поэтому поиск их не находит.
+        for value in (
+            "fixture-rule-03", "host-04.example", "10.0.0.0/8", "geoip:ru", "dns-local", "force-proxy-redirect",
+            "tcp,udp", "localhost",
+        ):
+            with self.subTest(value=value):
+                code, output, _ = self.flow(f"4\n1\n{value}\n0\n0\n0\n")
+                self.assertEqual(code, 0)
+                self.assertIn(NO_MATCHES, output)
+                self.assertNotIn("Найдено:", output)
+                self.assertNotIn(value, output)
 
     def test_explain_route_requires_input_and_runs_nothing(self):
         code, output, _ = self.flow("4\n9\n0\n0\n")

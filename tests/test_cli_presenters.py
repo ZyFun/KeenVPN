@@ -1,7 +1,6 @@
 """Текстовые представления результатов на обезличенном снимке: подписи, безопасность, отказы."""
 
 from pathlib import Path
-import re
 import sys
 import unittest
 
@@ -24,6 +23,8 @@ from keenvpn.interfaces.cli.presenters import (
     present_manager_metadata, present_port53, present_proxy_summary, present_result, present_routing_scheme,
     present_xray_process, safe_text,
 )
+from keenvpn.interfaces.cli.menu import MAX_ITEM_NUMBER, MAX_LIST_LINE_LENGTH, MenuList
+from keenvpn.interfaces.cli.presenters import ROUTING_ITEM_NAME, ROUTING_LIST_TITLE
 from keenvpn.interfaces.cli.terminal import UNAVAILABLE_MARK
 import json
 
@@ -43,6 +44,11 @@ PRIVATE_MARKERS = (
     "fixture-set", "../", "fixture-user", "fixture-token", "fixture-query", "fixture-fragment", "token=",
     SYNTHETIC_STORAGE_ROOT, SYNTHETIC_STORAGE_ID, "\x1b",
 )
+
+
+def list_lines(groups: MenuList) -> list[str]:
+    """Все строки списка: вводные, строки элементов и карточки."""
+    return [*groups.header, *(entry.label for entry in groups.entries), *(line for entry in groups.entries for line in entry.card)]
 
 
 def snapshot_results() -> dict[str, Result]:
@@ -136,16 +142,20 @@ class SnapshotPresenterTests(PresenterAssertions):
     def test_routing_scheme_lists_groups_without_values(self):
         view = self.results["routing"].data
         with forbid_external_effects():
-            lines = present_routing_scheme(view)
-        text = self.assert_safe_lines(lines)
-        self.assertEqual(lines[0], "Правила маршрутизации по конфигурации Xray")
+            groups = present_routing_scheme(view)
+        self.assertIs(type(groups), MenuList)
+        self.assertEqual((groups.title, groups.item_name), (ROUTING_LIST_TITLE, ROUTING_ITEM_NAME))
+        text = self.assert_safe_lines(list_lines(groups))
+        self.assertEqual(groups.header[0], "Правила маршрутизации по конфигурации Xray")
         self.assertIn(f"Групп правил: {view.group_count}; правил модели: {view.rule_count}", text)
         self.assertIn("Политика маршрутизации не собрана", text)
-        group_lines = [line for line in lines if re.match(r"\s+\d+\. ", line)]
-        self.assertEqual(len(group_lines), len(view.groups))
-        for group in view.groups:
+        # Номер группы — позиция в схеме с 1: 0 зарезервирован за возвратом.
+        self.assertEqual([entry.number for entry in groups.entries], list(range(1, len(view.groups) + 1)))
+        for entry, group in zip(groups.entries, view.groups):
             for reason in group.reasons:
-                self.assertIn(reason, text)
+                self.assertIn(reason, entry.label)
+            self.assertTrue(entry.label.startswith(f"{group.kind}: условий {group.condition_count} "))
+            self.assertIn(f"Часть: {group.part}; индекс правила Xray: {group.index} (счёт с нуля)", entry.card)
         self.assertIn("условий", text)
 
     def test_manager_metadata_present_and_absent(self):
@@ -227,7 +237,7 @@ class KnownValueTests(PresenterAssertions):
         hidden = replace(group, target=replace(group.target, tag_known=True, tag=None))
         absent = replace(group, target=replace(group.target, tag_known=False, tag=None))
         lines = {
-            name: present_routing_scheme(replace(view, groups=(item,)))[-1]
+            name: present_routing_scheme(replace(view, groups=(item,))).entries[-1].label
             for name, item in (("shown", group), ("hidden", hidden), ("absent", absent))
         }
         self.assertIn(f"назначение {group.target.kind} {group.target.tag},", lines["shown"])
@@ -254,10 +264,83 @@ class KnownValueTests(PresenterAssertions):
             self.assertNotIn("версия нет данных", line)
 
 
+class RoutingCardTests(PresenterAssertions):
+    """Карточка группы правил: те же фильтры, что у строки списка, и различие скрытого и отсутствующего."""
+
+    def card(self, **changes) -> tuple[str, ...]:
+        view = self.results["routing"].data
+        group = next(item for item in view.groups if item.target.kind == "balancer")
+        target_changes = {key[7:]: value for key, value in changes.items() if key.startswith("target_")}
+        group_changes = {key: value for key, value in changes.items() if not key.startswith("target_")}
+        group = replace(group, target=replace(group.target, **target_changes), **group_changes)
+        with forbid_external_effects():
+            return present_routing_scheme(replace(view, groups=(group,))).entries[0].card
+
+    def test_card_on_snapshot_is_safe_and_names_every_area(self):
+        view = self.results["routing"].data
+        with forbid_external_effects():
+            groups = present_routing_scheme(view)
+        text = self.assert_safe_lines([line for entry in groups.entries for line in entry.card])
+        for label in ("Часть: ", "Вид: ", "Условий: ", "Причины значений: ", "Поля правила: ", "Тег правила: ",
+                      "Действие: ", "Назначение: ", "Outbound назначения: ", "Причины назначения: "):
+            self.assertEqual(text.count(label), len(view.groups), label)
+        self.assertIn("сами значения не показываются", text)
+
+    def test_target_tags_fallback_and_strategy_are_filtered(self):
+        shown = self.card()
+        self.assertIn("Назначение: balancer vpn-group; запасной: blocked; стратегия: leastPing; действие назначения: нет",
+                      shown)
+        self.assertIn("Outbound назначения: 1", shown)
+        self.assertIn("  trojan-out", shown)
+        hidden = self.card(
+            target_outbound_tags=(None, "probe.example", "trojan-out"), target_fallback_known=True,
+            target_fallback_tag=None, target_strategy_known=True, target_strategy=None,
+        )
+        self.assertIn(f"  {HIDDEN}, {HIDDEN}, trojan-out", hidden)
+        self.assertIn(f"запасной: {HIDDEN}; стратегия: {HIDDEN}", "\n".join(hidden))
+        self.assertNotIn("probe.example", "\n".join(hidden))
+        absent = "\n".join(self.card(
+            target_fallback_known=False, target_fallback_tag=None, target_strategy_known=False, target_strategy=None,
+        ))
+        self.assertIn("запасной: не задан; стратегия: не задана", absent)
+
+    def test_many_outbound_tags_are_split_into_lines_within_the_limit(self):
+        # Регрессия review 72-R01: число outbound задаёт конфигурация, строка карточки не превышает предел.
+        tags = tuple(f"out-{number:02d}-" + "a" * 53 for number in range(40)) + ("probe.example",)
+        card = self.card(target_outbound_tags=tags)
+        self.assertTrue(all(len(line) <= MAX_LIST_LINE_LENGTH for line in card))
+        self.assertIn("Outbound назначения: 41", card)
+        tag_lines = [line for line in card if line.startswith("  ")]
+        self.assertEqual(len(tag_lines), 5)
+        self.assertEqual([len(line[2:].split(", ")) for line in tag_lines], [10, 10, 10, 10, 1])
+        self.assertEqual(", ".join(line[2:] for line in tag_lines), ", ".join((*tags[:-1], HIDDEN)))
+        empty = self.card(target_outbound_tags=())
+        self.assertIn("Outbound назначения: 0", empty)
+        self.assertFalse([line for line in empty if line.startswith("  ")])
+
+    def test_rule_tag_presence_without_value_and_field_names_filter(self):
+        self.assertIn("Тег правила: задан, значение не показывается", self.card(has_rule_tag=True))
+        self.assertIn("Тег правила: не задан", self.card(has_rule_tag=False))
+        self.assertIn(f"Тег правила: {HIDDEN}", self.card(has_rule_tag=None))
+        card = "\n".join(self.card(fields=("domain", "probe.example", "a b"), unsupported_fields=("attrs", "x/y")))
+        self.assertIn(f"Поля правила: domain, {HIDDEN}, {HIDDEN}; неподдержанные: attrs, {HIDDEN}", card)
+        self.assertIn(f"Часть: {HIDDEN}", self.card(part="../05_routing.json")[0])
+
+    def test_more_groups_than_numbers_are_cut_with_a_note(self):
+        view = self.results["routing"].data
+        many = replace(view, groups=view.groups[:1] * (MAX_ITEM_NUMBER + 1))
+        with forbid_external_effects():
+            groups = present_routing_scheme(many)
+        self.assertEqual(len(groups.entries), MAX_ITEM_NUMBER)
+        self.assertEqual(groups.entries[-1].number, MAX_ITEM_NUMBER)
+        self.assertIn(f"Групп больше {MAX_ITEM_NUMBER}: в списке первые {MAX_ITEM_NUMBER}, остальные не показываются.",
+                      groups.header)
+
+
 class RoutingReasonTests(unittest.TestCase):
     """Регрессия review 71-R04: причины назначения и значений видны рядом с правилом."""
 
-    def routing_lines(self, files=None) -> list[str]:
+    def routing_groups(self, files=None) -> dict[int, str]:
         sources = snapshot_installation_sources()
         if files is not None:
             sources.proxy.xray.outcome = xray_config_from_files(files)
@@ -267,16 +350,17 @@ class RoutingReasonTests(unittest.TestCase):
         result = ImportRoutingSchemeHandler(proxy).execute(ImportRoutingScheme())
         self.assertTrue(result.succeeded)
         with forbid_external_effects():
-            return present_routing_scheme(result.data)
+            groups = present_routing_scheme(result.data)
+        self.text = "\n".join(list_lines(groups))
+        return {entry.number: entry.label for entry in groups.entries}
 
     def test_balancer_fallback_reason_is_shown_for_each_affected_rule(self):
-        lines = self.routing_lines()
-        groups = {int(line.split(".")[0]): line for line in (item.strip() for item in lines) if re.match(r"\d+\. ", line)}
-        for index in (2, 3, 7):
-            with self.subTest(index=index):
-                self.assertIn("причины назначения: fallback_mixed", groups[index])
-                self.assertIn("только просмотр да", groups[index])
-        self.assertNotIn("причины назначения", groups[1])
+        groups = self.routing_groups()
+        for number in (3, 4, 8):
+            with self.subTest(number=number):
+                self.assertIn("причины назначения: fallback_mixed", groups[number])
+                self.assertIn("только просмотр да", groups[number])
+        self.assertNotIn("причины назначения", groups[2])
 
     def test_value_reasons_are_codes_with_counts_without_values_or_paths(self):
         files = load_xray_snapshot_files()
@@ -284,11 +368,11 @@ class RoutingReasonTests(unittest.TestCase):
         rule = routing["routing"]["rules"][1]
         rule["domain"] = ["regexp:^TEST_ONLY_VALUE[.]example$", "regexp:^second[.]example$", *rule["domain"]]
         files["05_routing.json"] = json.dumps(routing).encode("utf-8")
-        lines = self.routing_lines(files)
-        text = "\n".join(lines)
-        group = next(line.strip() for line in lines if line.strip().startswith("1. "))
+        group = self.routing_groups(files)[2]
+        text = self.text
         self.assertIn("причины значений: domain_regexp ×2", group)
         self.assertIn("только просмотр да", group)
+        self.assertIn("Причины значений: domain_regexp ×2", text)
         for private in ("TEST_ONLY_VALUE", "regexp:", "second", "routing.rules", "domain[0]"):
             self.assertNotIn(private, text)
 

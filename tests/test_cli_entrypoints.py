@@ -19,7 +19,7 @@ from tests.support.isolation import forbid_external_effects
 
 
 class Interrupting:
-    def readline(self):
+    def readline(self, size=-1):
         raise KeyboardInterrupt
 
 

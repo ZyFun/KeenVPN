@@ -8,6 +8,8 @@
 схемы не угадывается и не мигрирует. Неизвестные поля верхнего уровня
 и известных объектов сохраняются и записываются обратно после известных.
 Значение с тремя состояниями отличает неизвестное от отсутствующего.
+Необязательный раздел `rules` хранит стабильные идентификаторы, названия
+и семантические ключи правил маршрутизации; версия схемы при этом не меняется.
 """
 
 from collections.abc import Callable
@@ -20,6 +22,7 @@ import re
 from typing import NoReturn
 
 from keenvpn.domain.config_document import ConfigDocumentError, parse_strict_json_object, valid_json_tree
+from keenvpn.domain.routing import RoutingAction, valid_rule_id, valid_rule_name
 
 
 METADATA_FORMAT = "keenvpn-manager-metadata"
@@ -55,6 +58,10 @@ class ManagerMetadataErrorCode(StrEnum):
     UNKNOWN_FIELDS = "invalid_unknown_fields"
     REVISION = "invalid_metadata_revision"
     METADATA = "invalid_manager_metadata"
+    RULE_RECORD_ID = "invalid_rule_record_id"
+    RULE_RECORD_NAME = "invalid_rule_record_name"
+    RULE_KEY = "invalid_rule_key"
+    DUPLICATE_RULE_RECORD_ID = "duplicate_rule_record_id"
 
 
 _MESSAGES = {
@@ -73,6 +80,14 @@ _MESSAGES = {
     ManagerMetadataErrorCode.UNKNOWN_FIELDS: "Неизвестные поля метаданных должны быть значениями JSON с новыми именами.",
     ManagerMetadataErrorCode.REVISION: "Ревизия метаданных должна быть SHA-256 в нижнем регистре.",
     ManagerMetadataErrorCode.METADATA: "Модель метаданных менеджера повреждена или имеет неверный тип.",
+    ManagerMetadataErrorCode.RULE_RECORD_ID: "Идентификатор записи правила должен быть UUID в нижнем регистре.",
+    ManagerMetadataErrorCode.RULE_RECORD_NAME: (
+        "Название в записи правила должно быть печатной строкой допустимой длины без пробелов по краям либо null."
+    ),
+    ManagerMetadataErrorCode.RULE_KEY: (
+        "Ключ записи правила должен содержать известный тип условия, непустое значение и действие DIRECT, VPN или BLOCK."
+    ),
+    ManagerMetadataErrorCode.DUPLICATE_RULE_RECORD_ID: "Идентификаторы записей правил в разделе должны быть уникальными.",
 }
 
 
@@ -225,7 +240,12 @@ _ROLE_KEYS = ("state", "storage_id", "path", "verified")
 _LIMIT_KEYS = ("size_bytes", "retention_seconds")
 _ROLES_KEYS = tuple(role.value for role in StorageRole)
 _STORAGE_KEYS = ("variant", "roles", "history_limits")
-_TOP_KEYS = ("format", "schema_version", "storage")
+_KEY_KEYS = ("condition", "value", "action")
+_RECORD_KEYS = ("id", "name", "key")
+_TOP_KEYS = ("format", "schema_version", "storage", "rules")
+RULE_KEY_CONDITIONS = frozenset({"domain", "ip", "geoip", "geosite", "unknown", "unsupported"})
+"""Типы условий семантического ключа правила: по одному на каждый тип условия модели маршрутизации."""
+_ACTIONS = frozenset(action.value for action in RoutingAction)
 _STATES = frozenset(state.value for state in ValueState)
 _VARIANTS = frozenset(variant.value for variant in StorageVariant)
 
@@ -352,26 +372,106 @@ class StoragePlacement:
         _check_extra(self.extra, _STORAGE_KEYS)
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class RuleKey:
+    """Семантический ключ правила: тип условия, каноническое значение и действие.
+
+    По ключу запись метаданных находит своё правило при повторном импорте;
+    позиция, группа и теги outbound в него не входят. Значение — данные
+    пользователя (домен, адрес, набор): `repr` его не показывает.
+    """
+
+    condition: str
+    value: str
+    action: RoutingAction
+    extra: UnknownFields = field(default_factory=_no_fields)
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.condition) is not str or self.condition not in RULE_KEY_CONDITIONS
+            or type(self.value) is not str or not self.value
+            or type(self.action) is not RoutingAction
+        ):
+            _fail(ManagerMetadataErrorCode.RULE_KEY)
+        _check_extra(self.extra, _KEY_KEYS)
+
+    def __repr__(self) -> str:
+        return f"RuleKey(condition={self.condition}, action={self.action.value})"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class RuleRecord:
+    """Запись раздела `rules`: стабильный идентификатор, название и ключ привязки правила.
+
+    Идентификатор — UUID в канонической строчной форме, как `storage_id`;
+    название — строка по правилам модели маршрутизации либо `None`. Название
+    в `repr` не показывается.
+    """
+
+    rule_id: str
+    name: str | None
+    key: RuleKey
+    extra: UnknownFields = field(default_factory=_no_fields)
+
+    def __post_init__(self) -> None:
+        if not valid_rule_id(self.rule_id):
+            _fail(ManagerMetadataErrorCode.RULE_RECORD_ID, "id")
+        if self.name is not None and not valid_rule_name(self.name):
+            _fail(ManagerMetadataErrorCode.RULE_RECORD_NAME, "name")
+        if type(self.key) is not RuleKey:
+            _fail(ManagerMetadataErrorCode.FORMAT, "key")
+        _check_extra(self.extra, _RECORD_KEYS)
+
+    def __repr__(self) -> str:
+        return f"RuleRecord(rule_id={self.rule_id}, named={self.name is not None})"
+
+
+def _check_rules(rules: object) -> None:
+    """Раздел правил — кортеж записей с уникальными идентификаторами либо `None`."""
+    if rules is None:
+        return
+    if type(rules) is not tuple:
+        _fail(ManagerMetadataErrorCode.FORMAT, "rules")
+    seen: set[str] = set()
+    for index, record in enumerate(rules):
+        if type(record) is not RuleRecord:
+            _fail(ManagerMetadataErrorCode.FORMAT, f"rules[{index}]")
+        if record.rule_id in seen:
+            _fail(ManagerMetadataErrorCode.DUPLICATE_RULE_RECORD_ID, f"rules[{index}].id")
+        seen.add(record.rule_id)
+
+
 @dataclass(frozen=True, slots=True)
 class ManagerMetadata:
     """Метаданные менеджера текущей версии схемы.
 
-    `storage` — `None`, если раздел размещения не записан. Будущие разделы
-    добавляются как необязательные поля верхнего уровня; прежняя версия
-    менеджера сохраняет их как неизвестные.
+    `storage` — `None`, если раздел размещения не записан; `rules` — `None`,
+    если раздел правил не записан, иначе кортеж записей в порядке файла
+    (пустой кортеж — записанный пустой раздел). Будущие разделы добавляются
+    как необязательные поля верхнего уровня; прежняя версия менеджера
+    сохраняет их как неизвестные.
     """
 
     storage: StoragePlacement | None = None
     extra: UnknownFields = field(default_factory=_no_fields)
+    rules: tuple[RuleRecord, ...] | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.storage is not None and type(self.storage) is not StoragePlacement:
             _fail(ManagerMetadataErrorCode.FORMAT, "storage")
+        _check_rules(self.rules)
         _check_extra(self.extra, _TOP_KEYS)
 
     def to_diagnostic(self) -> dict[str, object]:
-        """Роли, вариант, состояния, проверка, лимиты и счётчики без путей и идентификаторов."""
+        """Роли, вариант, состояния, проверка, лимиты и счётчики без путей, идентификаторов, названий и ключей."""
         extras = len(self.extra)
+        rules = None
+        if self.rules is not None:
+            extras += sum(len(record.extra) + len(record.key.extra) for record in self.rules)
+            rules = {
+                "record_count": len(self.rules),
+                "named_record_count": sum(record.name is not None for record in self.rules),
+            }
         storage = None
         if self.storage is not None:
             placement = self.storage
@@ -405,7 +505,9 @@ class ManagerMetadata:
                     "retention_seconds": limits.retention_seconds.value,
                 },
             }
-        return {"schema_version": METADATA_SCHEMA_VERSION, "storage": storage, "unknown_field_count": extras}
+        return {
+            "schema_version": METADATA_SCHEMA_VERSION, "storage": storage, "rules": rules, "unknown_field_count": extras,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -520,6 +622,33 @@ def _parse_storage(value: object) -> StoragePlacement:
     )
 
 
+def _parse_key(value: object, name: str) -> RuleKey:
+    document = _object(value, name)
+    condition = _require(document, "condition", name)
+    text = _require(document, "value", name)
+    action = _require(document, "action", name)
+    if type(action) is not str or action not in _ACTIONS:
+        _fail(ManagerMetadataErrorCode.RULE_KEY, _join(name, "action"))
+    return _build(
+        name, RuleKey, condition=condition, value=text, action=RoutingAction(action), extra=_extra(document, _KEY_KEYS),
+    )
+
+
+def _parse_record(value: object, name: str) -> RuleRecord:
+    document = _object(value, name)
+    return _build(
+        name, RuleRecord, rule_id=_require(document, "id", name), name=_require(document, "name", name),
+        key=_parse_key(_require(document, "key", name), _join(name, "key")), extra=_extra(document, _RECORD_KEYS),
+    )
+
+
+def _parse_rules(value: object) -> tuple[RuleRecord, ...]:
+    name = "rules"
+    if type(value) is not list:
+        _fail(ManagerMetadataErrorCode.FORMAT, name)
+    return tuple(_parse_record(item, f"{name}[{index}]") for index, item in enumerate(value))
+
+
 def decode_manager_metadata(content: bytes) -> StoredManagerMetadata:
     """Разобрать байты файла в метаданные с ревизией.
 
@@ -552,7 +681,8 @@ def decode_manager_metadata(content: bytes) -> StoredManagerMetadata:
     if version != METADATA_SCHEMA_VERSION:
         _fail(ManagerMetadataErrorCode.SCHEMA_VERSION, "schema_version")
     storage = _parse_storage(document["storage"]) if "storage" in document else None
-    metadata = _build("", ManagerMetadata, storage=storage, extra=_extra(document, _TOP_KEYS))
+    rules = _parse_rules(document["rules"]) if "rules" in document else None
+    metadata = _build("", ManagerMetadata, storage=storage, rules=rules, extra=_extra(document, _TOP_KEYS))
     return StoredManagerMetadata(metadata, metadata_revision(content))
 
 
@@ -605,6 +735,29 @@ def _rebuild_storage(placement: object) -> StoragePlacement:
     )
 
 
+def _rebuild_key(key: object, name: str) -> RuleKey:
+    if type(key) is not RuleKey:
+        _fail(ManagerMetadataErrorCode.FORMAT, name)
+    return _build(name, RuleKey, condition=key.condition, value=key.value, action=key.action, extra=_rebuild_extra(key.extra))
+
+
+def _rebuild_record(record: object, name: str) -> RuleRecord:
+    if type(record) is not RuleRecord:
+        _fail(ManagerMetadataErrorCode.FORMAT, name)
+    return _build(
+        name, RuleRecord, rule_id=record.rule_id, name=record.name, key=_rebuild_key(record.key, _join(name, "key")),
+        extra=_rebuild_extra(record.extra),
+    )
+
+
+def _rebuild_rules(rules: object) -> tuple[RuleRecord, ...] | None:
+    if rules is None:
+        return None
+    if type(rules) is not tuple:
+        _fail(ManagerMetadataErrorCode.FORMAT, "rules")
+    return tuple(_rebuild_record(record, f"rules[{index}]") for index, record in enumerate(rules))
+
+
 def validate_manager_metadata(metadata: ManagerMetadata) -> None:
     """Проверить готовую модель заново, пересобрав вложенные объекты из их собственных полей.
 
@@ -617,7 +770,7 @@ def validate_manager_metadata(metadata: ManagerMetadata) -> None:
         if type(metadata) is not ManagerMetadata:
             _fail(ManagerMetadataErrorCode.METADATA)
         storage = None if metadata.storage is None else _rebuild_storage(metadata.storage)
-        ManagerMetadata(storage=storage, extra=_rebuild_extra(metadata.extra))
+        ManagerMetadata(storage=storage, rules=_rebuild_rules(metadata.rules), extra=_rebuild_extra(metadata.extra))
     except ManagerMetadataError as error:
         code, name = error.code, error.field
     except Exception:
@@ -660,6 +813,16 @@ def _storage_json(placement: StoragePlacement) -> dict[str, object]:
     return document
 
 
+def _record_json(record: RuleRecord) -> dict[str, object]:
+    key: dict[str, object] = {
+        "condition": record.key.condition, "value": record.key.value, "action": record.key.action.value,
+    }
+    key.update(record.key.extra.export())
+    document: dict[str, object] = {"id": record.rule_id, "name": record.name, "key": key}
+    document.update(record.extra.export())
+    return document
+
+
 def encode_manager_metadata(metadata: ManagerMetadata) -> bytes:
     """Собрать байты файла текущей версии схемы после повторной проверки модели.
 
@@ -670,6 +833,8 @@ def encode_manager_metadata(metadata: ManagerMetadata) -> bytes:
     document: dict[str, object] = {"format": METADATA_FORMAT, "schema_version": METADATA_SCHEMA_VERSION}
     if metadata.storage is not None:
         document["storage"] = _storage_json(metadata.storage)
+    if metadata.rules is not None:
+        document["rules"] = [_record_json(record) for record in metadata.rules]
     document.update(metadata.extra.export())
     # Неизвестное поле, допустимое само по себе, внутри вложенного объекта может
     # превысить общую глубину: такой файл не прочитался бы обратно.

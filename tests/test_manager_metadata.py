@@ -12,12 +12,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.domain import manager_metadata
 from keenvpn.domain.config_document import MAX_JSON_DEPTH
 from keenvpn.domain.manager_metadata import (
-    MAX_LIMIT_VALUE, MAX_METADATA_SIZE, METADATA_FORMAT, HistoryLimits, ManagerMetadata, ManagerMetadataError,
-    ManagerMetadataErrorCode as Code, RoleLocation, StorageRoles, StoragePlacement, StorageVariant,
-    StoredManagerMetadata, TrackedValue, UnknownFields, ValueState, decode_manager_metadata,
-    encode_manager_metadata, metadata_revision, valid_metadata_revision, valid_storage_id, valid_storage_path,
-    validate_manager_metadata,
+    MAX_LIMIT_VALUE, MAX_METADATA_SIZE, METADATA_FORMAT, RULE_KEY_CONDITIONS, HistoryLimits, ManagerMetadata,
+    ManagerMetadataError, ManagerMetadataErrorCode as Code, RoleLocation, RuleKey, RuleRecord, StorageRoles,
+    StoragePlacement, StorageVariant, StoredManagerMetadata, TrackedValue, UnknownFields, ValueState,
+    decode_manager_metadata, encode_manager_metadata, metadata_revision, valid_metadata_revision, valid_storage_id,
+    valid_storage_path, validate_manager_metadata,
 )
+from keenvpn.domain.routing import MAX_RULE_NAME_LENGTH, RoutingAction
 from tests.support.isolation import forbid_external_effects
 
 
@@ -216,9 +217,13 @@ class ModelTests(unittest.TestCase):
                 "history_limits": {"size_state": "known", "size_bytes": 1024, "retention_state": "absent",
                                    "retention_seconds": None},
             },
+            "rules": None,
             "unknown_field_count": 1,
         })
-        self.assertEqual(ManagerMetadata().to_diagnostic(), {"schema_version": 1, "storage": None, "unknown_field_count": 0})
+        self.assertEqual(
+            ManagerMetadata().to_diagnostic(),
+            {"schema_version": 1, "storage": None, "rules": None, "unknown_field_count": 0},
+        )
         stored = decode_manager_metadata(encoded(document(note="личная заметка")))
         text = repr(stored) + str(stored) + repr(metadata) + json.dumps(diagnostic, ensure_ascii=False)
         for marker in (DATA_ID, DATA_PATH, "test-data", "личная заметка", "note"):
@@ -509,6 +514,227 @@ class ValidationTests(unittest.TestCase):
                 build()
             self.assertIs(caught.exception.code, code)
         RoleLocation(KNOWN, TrackedValue(UNKNOWN), TrackedValue(UNKNOWN), False)
+
+
+RULE_ID_A = "0000abcd-0000-4000-8000-0000000000a1"
+RULE_ID_B = "0000abcd-0000-4000-8000-0000000000b2"
+RULE_NAME = "TEST_PRIVATE_RULE_NAME"
+RULE_VALUE = "subdomains:private.example.test"
+
+
+def rule_key(condition="domain", value=RULE_VALUE, action=RoutingAction.VPN, **extra):
+    return RuleKey(condition, value, action, UnknownFields(extra) if extra else UnknownFields())
+
+
+def rule_record(rule_id=RULE_ID_A, name=RULE_NAME, key=None, **extra):
+    return RuleRecord(rule_id, name, rule_key() if key is None else key, UnknownFields(extra) if extra else UnknownFields())
+
+
+def record_json(rule_id=RULE_ID_A, name=RULE_NAME, key=None, **extra):
+    document = {
+        "id": rule_id, "name": name,
+        "key": {"condition": "domain", "value": RULE_VALUE, "action": "VPN"} if key is None else key,
+    }
+    document.update(extra)
+    return document
+
+
+class _Text(str):
+    """Подкласс строки: формат требует именно `str`."""
+
+
+class RuleRecordsTests(unittest.TestCase):
+    """Необязательный раздел `rules`: формат, неизвестные поля, дубли и безопасный вывод."""
+
+    def assert_rejected(self, content, code, field):
+        with self.assertRaises(ManagerMetadataError) as caught:
+            decode_manager_metadata(content)
+        self.assertIs(caught.exception.code, code)
+        self.assertEqual(caught.exception.field, field)
+        self.assertIsNone(caught.exception.__context__)
+        return caught.exception
+
+    def test_file_without_rules_reads_and_writes_as_before_byte_for_byte(self):
+        for source in (document(), {"format": METADATA_FORMAT, "schema_version": 1}):
+            with self.subTest(sections=list(source)):
+                content = (json.dumps(source, ensure_ascii=True, allow_nan=False, indent=2) + "\n").encode("ascii")
+                stored = decode_manager_metadata(content)
+                self.assertIsNone(stored.metadata.rules)
+                self.assertEqual(encode_manager_metadata(stored.metadata), content)
+                self.assertNotIn("rules", json.loads(encode_manager_metadata(stored.metadata)))
+                self.assertEqual(stored.metadata.to_diagnostic()["rules"], None)
+        self.assertEqual(ManagerMetadata(placement()).rules, None)
+        self.assertEqual(json.loads(encode_manager_metadata(ManagerMetadata(placement()))).get("rules", "absent"), "absent")
+
+    def test_round_trip_keeps_records_order_names_keys_and_schema_version(self):
+        records = (
+            rule_record(),
+            rule_record(RULE_ID_B, None, rule_key("ip", "198.51.100.0/24", RoutingAction.DIRECT)),
+        )
+        metadata = ManagerMetadata(placement(), rules=records)
+        content = encode_manager_metadata(metadata)
+        parsed = json.loads(content)
+        self.assertEqual(list(parsed), ["format", "schema_version", "storage", "rules"])
+        self.assertEqual(parsed["schema_version"], 1)
+        self.assertEqual(parsed["rules"], [
+            record_json(),
+            record_json(RULE_ID_B, None, {"condition": "ip", "value": "198.51.100.0/24", "action": "DIRECT"}),
+        ])
+        stored = decode_manager_metadata(content)
+        self.assertEqual(stored.metadata, metadata)
+        self.assertEqual(stored.metadata.rules, records)
+        self.assertEqual(encode_manager_metadata(stored.metadata), content)
+        empty = encode_manager_metadata(ManagerMetadata(rules=()))
+        self.assertEqual(json.loads(empty)["rules"], [])
+        self.assertEqual(decode_manager_metadata(empty).metadata.rules, ())
+        self.assertNotEqual(decode_manager_metadata(empty).metadata, ManagerMetadata())
+
+    def test_every_key_condition_and_action_round_trips(self):
+        records = tuple(
+            rule_record(f"0000abcd-0000-4000-8000-0000000000{index:02x}", None, rule_key(condition, f"{condition}-value", action))
+            for index, (condition, action) in enumerate(
+                (condition, action) for condition in sorted(RULE_KEY_CONDITIONS) for action in RoutingAction
+            )
+        )
+        stored = decode_manager_metadata(encode_manager_metadata(ManagerMetadata(rules=records)))
+        self.assertEqual(stored.metadata.rules, records)
+        self.assertEqual({record.key.action for record in stored.metadata.rules}, set(RoutingAction))
+        self.assertTrue(all(type(record.key.action) is RoutingAction for record in stored.metadata.rules))
+
+    def test_unknown_fields_of_records_and_keys_survive_rewrite(self):
+        source = document(rules=[
+            record_json(**{"": None, "Id": "регистр", "weight": 1.5, "nested": {"a": [True]}}),
+            record_json(RULE_ID_B, None, {"condition": "ip", "value": "2001:db8::/32", "action": "BLOCK", "Value": 0, "hint": "x"}),
+        ])
+        content = encoded(source)
+        stored = decode_manager_metadata(content)
+        rewritten = json.loads(encode_manager_metadata(stored.metadata))
+        self.assertEqual(rewritten["rules"], source["rules"])
+        self.assertEqual(list(rewritten["rules"][0]), ["id", "name", "key", "", "Id", "weight", "nested"])
+        self.assertEqual(list(rewritten["rules"][1]["key"]), ["condition", "value", "action", "Value", "hint"])
+        self.assertEqual(stored.metadata.rules[0].extra.names, ("", "Id", "weight", "nested"))
+        self.assertEqual(stored.metadata.rules[1].key.extra.names, ("Value", "hint"))
+        self.assertEqual(stored.metadata.to_diagnostic()["unknown_field_count"], 6)
+        again = decode_manager_metadata(encode_manager_metadata(stored.metadata))
+        self.assertEqual(encode_manager_metadata(again.metadata), encode_manager_metadata(stored.metadata))
+
+    def test_unknown_fields_cannot_shadow_record_or_key_names(self):
+        cases = (
+            (lambda: RuleRecord(RULE_ID_A, RULE_NAME, rule_key(), UnknownFields({"id": "x"})), "rules[0]"),
+            (lambda: RuleRecord(RULE_ID_A, RULE_NAME, rule_key(), UnknownFields({"key": {}})), "rules[0]"),
+            (lambda: RuleKey("domain", RULE_VALUE, RoutingAction.VPN, UnknownFields({"action": "VPN"})), "rules[0].key"),
+        )
+        for build, _path in cases:
+            with self.subTest(path=_path):
+                with self.assertRaises(ManagerMetadataError) as caught:
+                    build()
+                self.assertIs(caught.exception.code, Code.UNKNOWN_FIELDS)
+        # Тот же запрет при чтении файла: поле записи с именем известного поля сюда попасть не может,
+        # потому что строгий JSON отклоняет дубли ключей; проверяется запись и чтение модели.
+
+    def test_duplicate_record_id_rejects_the_whole_file(self):
+        content = encoded(document(rules=[record_json(), record_json(RULE_ID_B, None), record_json(name=None)]))
+        self.assert_rejected(content, Code.DUPLICATE_RULE_RECORD_ID, "rules[2].id")
+        with self.assertRaises(ManagerMetadataError) as caught:
+            ManagerMetadata(rules=(rule_record(), rule_record(name=None)))
+        self.assertIs(caught.exception.code, Code.DUPLICATE_RULE_RECORD_ID)
+        self.assertEqual(caught.exception.field, "rules[1].id")
+        # Одинаковые ключи — не ошибка формата: их разбирает привязка.
+        same_key = decode_manager_metadata(encoded(document(rules=[record_json(), record_json(RULE_ID_B, None)])))
+        self.assertEqual(len(same_key.metadata.rules), 2)
+
+    def test_rejects_invalid_records_with_field_paths(self):
+        cases = (
+            ("null_section", None, Code.FORMAT, "rules"),
+            ("object_section", {}, Code.FORMAT, "rules"),
+            ("record_not_object", [1], Code.FORMAT, "rules[0]"),
+            ("missing_id", [{"name": None, "key": record_json()["key"]}], Code.FORMAT, "rules[0].id"),
+            ("missing_name", [{"id": RULE_ID_A, "key": record_json()["key"]}], Code.FORMAT, "rules[0].name"),
+            ("missing_key", [{"id": RULE_ID_A, "name": None}], Code.FORMAT, "rules[0].key"),
+            ("null_id", [record_json(rule_id=None)], Code.RULE_RECORD_ID, "rules[0].id"),
+            ("uppercase_id", [record_json(rule_id=RULE_ID_A.upper())], Code.RULE_RECORD_ID, "rules[0].id"),
+            ("braced_id", [record_json(rule_id="{" + RULE_ID_A + "}")], Code.RULE_RECORD_ID, "rules[0].id"),
+            ("numeric_id", [record_json(rule_id=1)], Code.RULE_RECORD_ID, "rules[0].id"),
+            ("empty_name", [record_json(name="")], Code.RULE_RECORD_NAME, "rules[0].name"),
+            ("padded_name", [record_json(name=" x")], Code.RULE_RECORD_NAME, "rules[0].name"),
+            ("control_name", [record_json(name="a\x1bb")], Code.RULE_RECORD_NAME, "rules[0].name"),
+            ("long_name", [record_json(name="x" * (MAX_RULE_NAME_LENGTH + 1))], Code.RULE_RECORD_NAME, "rules[0].name"),
+            ("numeric_name", [record_json(name=5)], Code.RULE_RECORD_NAME, "rules[0].name"),
+            ("key_not_object", [record_json(key="domain")], Code.FORMAT, "rules[0].key"),
+            ("key_missing_value", [record_json(key={"condition": "domain", "action": "VPN"})], Code.FORMAT, "rules[0].key.value"),
+            ("key_unknown_condition", [record_json(key={"condition": "port", "value": "53", "action": "VPN"})], Code.RULE_KEY, "rules[0].key"),
+            ("key_condition_case", [record_json(key={"condition": "Domain", "value": "x", "action": "VPN"})], Code.RULE_KEY, "rules[0].key"),
+            ("key_empty_value", [record_json(key={"condition": "domain", "value": "", "action": "VPN"})], Code.RULE_KEY, "rules[0].key"),
+            ("key_numeric_value", [record_json(key={"condition": "ip", "value": 1, "action": "VPN"})], Code.RULE_KEY, "rules[0].key"),
+            ("key_action_case", [record_json(key={"condition": "domain", "value": "x", "action": "vpn"})], Code.RULE_KEY, "rules[0].key.action"),
+            ("key_action_null", [record_json(key={"condition": "domain", "value": "x", "action": None})], Code.RULE_KEY, "rules[0].key.action"),
+            ("second_record_bad", [record_json(), record_json(RULE_ID_B, "")], Code.RULE_RECORD_NAME, "rules[1].name"),
+        )
+        for name, rules, code, field in cases:
+            with self.subTest(name):
+                error = self.assert_rejected(encoded(document(rules=rules)), code, field)
+                rendered = str(error) + repr(error) + repr(vars(error))
+                self.assertNotIn(RULE_NAME, rendered)
+                self.assertNotIn("private.example", rendered)
+
+    def test_validation_rebuilds_records_and_rejects_equal_but_differently_typed_values(self):
+        metadata = ManagerMetadata(rules=(rule_record(),))
+        record = metadata.rules[0]
+        cases = (
+            (record, "rule_id", _Text(RULE_ID_A), Code.RULE_RECORD_ID),
+            (record, "name", _Text(RULE_NAME), Code.RULE_RECORD_NAME),
+            (record.key, "action", "VPN", Code.RULE_KEY),
+            (record.key, "condition", _Text("domain"), Code.RULE_KEY),
+            (record.key, "value", _Text(RULE_VALUE), Code.RULE_KEY),
+        )
+        for owner, attribute, value, code in cases:
+            with self.subTest(attribute=attribute):
+                original = getattr(owner, attribute)
+                object.__setattr__(owner, attribute, value)
+                try:
+                    self.assertEqual(getattr(owner, attribute), original)
+                    with self.assertRaises(ManagerMetadataError) as caught:
+                        validate_manager_metadata(metadata)
+                    self.assertIs(caught.exception.code, code)
+                    with self.assertRaises(ManagerMetadataError):
+                        encode_manager_metadata(metadata)
+                finally:
+                    object.__setattr__(owner, attribute, original)
+        validate_manager_metadata(metadata)
+        object.__setattr__(metadata, "rules", [record])
+        with self.assertRaises(ManagerMetadataError) as caught:
+            validate_manager_metadata(metadata)
+        self.assertIs(caught.exception.code, Code.FORMAT)
+        self.assertEqual(caught.exception.field, "rules")
+
+    def test_safe_output_hides_names_and_key_values_and_counts_records(self):
+        metadata = ManagerMetadata(
+            placement(), rules=(rule_record(), rule_record(RULE_ID_B, None, rule_key("ip", "198.51.100.7", RoutingAction.BLOCK), note="x")),
+        )
+        diagnostic = metadata.to_diagnostic()
+        self.assertEqual(diagnostic["rules"], {"record_count": 2, "named_record_count": 1})
+        self.assertEqual(diagnostic["unknown_field_count"], 1)
+        stored = decode_manager_metadata(encode_manager_metadata(metadata))
+        text = (
+            repr(metadata) + str(metadata) + repr(stored) + repr(metadata.rules) + repr(metadata.rules[0].key)
+            + json.dumps(diagnostic, ensure_ascii=False)
+        )
+        for marker in (RULE_NAME, "private.example", "subdomains", "198.51.100.7", "note"):
+            self.assertNotIn(marker, text)
+        self.assertIn(RULE_ID_A, repr(metadata.rules[0]))
+        self.assertEqual(repr(metadata.rules[0].key), "RuleKey(condition=domain, action=VPN)")
+
+    def test_records_are_frozen_and_need_no_io(self):
+        record = rule_record()
+        with self.assertRaises(FrozenInstanceError):
+            record.name = "x"
+        with self.assertRaises(FrozenInstanceError):
+            record.key.value = "x"
+        with forbid_external_effects():
+            content = encode_manager_metadata(ManagerMetadata(rules=(record,)))
+            stored = decode_manager_metadata(content)
+            validate_manager_metadata(stored.metadata)
+            stored.metadata.to_diagnostic()
 
 
 class HelperTests(unittest.TestCase):

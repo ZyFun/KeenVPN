@@ -9,8 +9,9 @@
 Active configs Xray и XKeen, Keenetic и процессы не затрагиваются.
 
 Просмотр только читает метаданные. Оба сценария возвращают безопасное
-представление без путей, идентификаторов хранилищ, ревизии и значений
-неизвестных полей.
+представление без путей, идентификаторов хранилищ, ревизии, названий
+и ключей правил и значений неизвестных полей. Помощники чтения хранилища
+и перевода его отказов общие для сценариев над портом `ManagerMetadataStore`.
 """
 
 from dataclasses import dataclass
@@ -86,15 +87,25 @@ class StoragePlacementView:
 
 
 @dataclass(frozen=True, slots=True)
+class RuleRecordsView:
+    """Счётчики раздела записей правил: сколько записей и у скольких есть название."""
+
+    record_count: int
+    named_record_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class ManagerMetadataView:
     """Безопасное представление метаданных менеджера.
 
-    `storage` — `None`, если раздел размещения не записан. Пути, UUID,
-    ревизия, имена и значения неизвестных полей сюда не входят.
+    `storage` — `None`, если раздел размещения не записан; `rules` — `None`,
+    если раздел записей правил не записан. Пути, UUID, ревизия, названия
+    и ключи правил, имена и значения неизвестных полей сюда не входят.
     """
 
     schema_version: int
     storage: StoragePlacementView | None
+    rules: RuleRecordsView | None
     unknown_field_count: int
 
     @classmethod
@@ -102,6 +113,7 @@ class ManagerMetadataView:
         """Построить представление из безопасной диагностики домена."""
         diagnostic = metadata.to_diagnostic()
         storage = diagnostic["storage"]
+        rules = diagnostic["rules"]
         return cls(
             schema_version=diagnostic["schema_version"],
             storage=None if storage is None else StoragePlacementView(
@@ -111,6 +123,7 @@ class ManagerMetadataView:
                 distinct_storage_count=storage["distinct_storage_count"],
                 history_limits=HistoryLimitsView(**view_fields(HistoryLimitsView, storage["history_limits"])),
             ),
+            rules=None if rules is None else RuleRecordsView(**view_fields(RuleRecordsView, rules)),
             unknown_field_count=diagnostic["unknown_field_count"],
         )
 
@@ -123,7 +136,7 @@ class ManagerMetadataView:
                 "roles": [view_dict(role) for role in self.storage.roles],
                 "history_limits": view_dict(self.storage.history_limits),
             }
-        return {**view_dict(self), "storage": storage}
+        return {**view_dict(self), "storage": storage, "rules": None if self.rules is None else view_dict(self.rules)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,12 +189,14 @@ _PLACEMENT_MISMATCH = ErrorDetail(
     ErrorCategory.UNSUPPORTED, "storage_placement_mismatch",
     "Обнаруженное размещение отличается от сохранённого: импорт его не меняет, смена размещения — отдельный перенос.",
 )
-_INCONSISTENT = "manager_metadata_inconsistent"
+INCONSISTENT = "manager_metadata_inconsistent"
+"""Код отказа: новые данные нельзя объединить с прочитанными метаданными в пределах формата."""
 _INCONSISTENT_MESSAGE = "Обнаруженное размещение не удалось объединить с сохранёнными метаданными менеджера."
-_INVALID_STORE_RESULT = ErrorDetail(
+INVALID_STORE_RESULT = ErrorDetail(
     ErrorCategory.INVALID_SOURCE_DATA, "invalid_metadata_store_result",
     "Хранилище метаданных менеджера вернуло некорректный ответ: перечитайте их состояние.",
 )
+"""Отказ: ответ хранилища не по контракту порта, в том числе ревизия, не совпавшая с записанными байтами."""
 _STORE_FAILED = ErrorDetail(
     ErrorCategory.SOURCE_FAILED, "metadata_store_failed",
     "Хранилище метаданных менеджера отказало непредвиденно: перечитайте их состояние.",
@@ -223,7 +238,7 @@ def _reason(failure: MetadataStoreFailure, value: object) -> str | None:
     return (_DOMAIN_REASONS if failure is MetadataStoreFailure.INVALID else _STORE_REASONS).get(value)
 
 
-def _store_error(error: Exception) -> ErrorDetail:
+def store_error_detail(error: Exception) -> ErrorDetail:
     """Перевести отказ хранилища в ErrorDetail без текста и цепочки исключения.
 
     Только точный тип `ManagerMetadataStoreError` с известным видом отказа
@@ -239,24 +254,28 @@ def _store_error(error: Exception) -> ErrorDetail:
     return ErrorDetail(category, failure.value, message, reason=_reason(failure, getattr(error, "reason", None)))
 
 
-def _read_stored(store: ManagerMetadataStore) -> StoredManagerMetadata | None | ErrorDetail:
-    """Прочитать метаданные один раз и повторно проверить ответ хранилища."""
+def read_stored_metadata(store: ManagerMetadataStore) -> StoredManagerMetadata | None | ErrorDetail:
+    """Прочитать метаданные один раз и повторно проверить ответ хранилища.
+
+    `None` — метаданных ещё нет; отказ хранилища и ответ не по контракту
+    возвращаются как `ErrorDetail` без текста и цепочки исключения.
+    """
     try:
         stored = store.read_metadata()
     except Exception as error:
         # Текст и цепочка исключения хранилища могут содержать пути.
-        return _store_error(error)
+        return store_error_detail(error)
     if stored is None:
         return None
     if type(stored) is not StoredManagerMetadata:
-        return _INVALID_STORE_RESULT
+        return INVALID_STORE_RESULT
     try:
         validate_manager_metadata(stored.metadata)
         valid = valid_metadata_revision(stored.revision)
     except Exception:
         # Повреждённый после создания ответ: подменённые поля, неверные типы.
         valid = False
-    return stored if valid else _INVALID_STORE_RESULT
+    return stored if valid else INVALID_STORE_RESULT
 
 
 def _canonical(metadata: ManagerMetadata) -> bytes | None:
@@ -288,7 +307,7 @@ class InspectManagerMetadataHandler:
         error = check_contract_version(command.contract_version)
         if error is not None:
             return failed(operation_id, name, error)
-        stored = _read_stored(self._store)
+        stored = read_stored_metadata(self._store)
         if isinstance(stored, ErrorDetail):
             return failed(operation_id, name, stored)
         if stored is None:
@@ -305,7 +324,8 @@ class ImportStoragePlacementHandler:
     каноническим байтам раздела `storage`, включая его неизвестные поля:
     при совпадении запись не вызывается, при расхождении — отказ без
     перезаписи. Кандидат на запись — обнаруженное размещение вместе
-    с неизвестными полями верхнего уровня прочитанного файла. Ревизию
+    с известными разделами и неизвестными полями верхнего уровня
+    прочитанного файла: раздел записей правил переносится как есть. Ревизию
     в последний момент перед записью сверяет хранилище. Отказ записи,
     включая неподтверждённую, не превращается в успех.
     """
@@ -331,7 +351,7 @@ class ImportStoragePlacementHandler:
         placement = self._detect()
         if isinstance(placement, ErrorDetail):
             return failed(operation_id, name, placement)
-        stored = _read_stored(self._store)
+        stored = read_stored_metadata(self._store)
         if isinstance(stored, ErrorDetail):
             return failed(operation_id, name, stored)
 
@@ -350,6 +370,7 @@ class ImportStoragePlacementHandler:
         try:
             candidate = ManagerMetadata(
                 storage=placement, extra=UnknownFields() if stored is None else stored.metadata.extra,
+                rules=None if stored is None else stored.metadata.rules,
             )
             content = encode_manager_metadata(candidate)
         except ManagerMetadataError as error:
@@ -357,15 +378,15 @@ class ImportStoragePlacementHandler:
             reason = error.code.value
         if reason is not None:
             return failed(operation_id, name, ErrorDetail(
-                ErrorCategory.INVALID_SOURCE_DATA, _INCONSISTENT, _INCONSISTENT_MESSAGE, reason=reason,
+                ErrorCategory.INVALID_SOURCE_DATA, INCONSISTENT, _INCONSISTENT_MESSAGE, reason=reason,
             ))
 
         try:
             revision = self._store.write_metadata(candidate, None if stored is None else stored.revision)
         except Exception as error:
-            return failed(operation_id, name, _store_error(error))
+            return failed(operation_id, name, store_error_detail(error))
         if type(revision) is not str or revision != metadata_revision(content):
-            return failed(operation_id, name, _INVALID_STORE_RESULT)
+            return failed(operation_id, name, INVALID_STORE_RESULT)
         view = StoragePlacementImportView(
             StoragePlacementImportOutcome.CREATED.value, ManagerMetadataView.from_metadata(candidate),
         )

@@ -20,14 +20,16 @@
 | `InspectInstallation` | `InspectInstallationHandler` | Читает [существующую установку](installation.md) поверх двух сценариев выше и двух портов: состояние Keenetic, конфигурацию Xray и XKeen, инвентарь геобаз со ссылками правил на наборы и наблюдение процесса Xray; отказ любого источника завершает чтение его кодом без частичного результата |
 | `ImportRoutingScheme` | `ImportRoutingSchemeHandler` | Переводит действующие [правила Xray в модель маршрутизации](routing-import.md) поверх `InspectProxyConfigHandler.read()`: группы условий в порядке файла, явные действия, неизвестные значения и поля только для просмотра, политика без выдуманного финального правила |
 | `InspectManagerMetadata` | `InspectManagerMetadataHandler` | Читает [метаданные менеджера](manager-metadata.md) из хранилища и показывает вариант хранения, состояния ролей и лимиты истории без путей, идентификаторов хранилищ и ревизии |
-| `ImportStoragePlacement` | `ImportStoragePlacementHandler` | Сохраняет обнаруженное размещение хранилищ и лимиты истории в метаданных менеджера как есть: создаёт или дописывает раздел размещения, совпадение не записывает, расхождение отклоняет без перезаписи |
+| `ImportStoragePlacement` | `ImportStoragePlacementHandler` | Сохраняет обнаруженное размещение хранилищ и лимиты истории в метаданных менеджера как есть: создаёт или дописывает раздел размещения, совпадение не записывает, расхождение отклоняет без перезаписи; раздел записей правил и неизвестные поля файла сохраняет |
+| `InspectRoutingRules` | `InspectRoutingRulesHandler` | Показывает [правила с названиями и идентификаторами](routing-import.md#названия-и-идентификаторы-правил) из метаданных менеджера поверх `ImportRoutingSchemeHandler.read()` и порта хранилища: привязка по семантическому ключу, позиции, признак и длина названия, причины отсутствия привязки; ничего не записывает |
+| `AssignRuleIdentifiers` | `AssignRuleIdentifiersHandler` | Присваивает идентификаторы правилам без записи в метаданных: генерирует их подставляемой фабрикой `uuid4`, дописывает записи без названия и записывает раздел `rules` один раз только при изменениях |
 
 Сценарии работают в памяти. Они не устанавливают соединения, не выполняют DNS,
 не запускают Xray, не записывают файлы и не меняют конфигурацию роутера.
-Единственная запись — `ImportStoragePlacement`: он сохраняет собственные метаданные
-менеджера через порт хранилища, а active configs Xray и XKeen, настройки Keenetic
-и процессы не затрагивает. Успешный результат не подтверждает работоспособность
-сервера или VPN.
+Записывают только `ImportStoragePlacement` и `AssignRuleIdentifiers`: они сохраняют
+собственные метаданные менеджера через порт хранилища, а active configs Xray
+и XKeen, настройки Keenetic и процессы не затрагивают. Успешный результат
+не подтверждает работоспособность сервера или VPN.
 
 ## Граница с интерфейсом
 
@@ -46,7 +48,7 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 
 `ConnectionLinkView`, `ConnectionProfileView`, `ProtocolSupportView`, `RouteExplanationView`,
 `KeeneticPolicyResolutionView`, `KeeneticStateView`, `ProxyConfigView`, `InstallationView`, `RoutingSchemeView`,
-`ManagerMetadataStatusView`, `StoragePlacementImportView` и `ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
+`ManagerMetadataStatusView`, `StoragePlacementImportView`, `RoutingRulesView`, `RuleIdentityAssignmentView` и `ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
 ошибки и преобразование `to_dict()` относятся к контракту результата: они не добавляют ANSI-оформление,
 заголовки меню или выравнивание для терминала. Отображение и сериализация одного
 результата не требуют повторного выполнения сценария или чтения его источников.
@@ -61,7 +63,7 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 | --- | --- |
 | `contract_version` | Версия формата команд и результатов, сейчас `1` (`CONTRACT_VERSION`) |
 | `operation_id` | Идентификатор вызова; по умолчанию случайная hex-строка |
-| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_installation`, `import_routing_scheme`, `inspect_manager_metadata` или `import_storage_placement` |
+| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_installation`, `import_routing_scheme`, `inspect_manager_metadata`, `import_storage_placement`, `inspect_routing_rules` или `assign_rule_identifiers` |
 | `status` | `OperationStatus.SUCCEEDED` или `OperationStatus.FAILED` |
 | `data` | Безопасное представление при успехе, иначе `None` |
 | `error` | `ErrorDetail` при отказе, иначе `None` |
@@ -560,6 +562,32 @@ outbound и балансировщиков показываются только
 `reason` отказа хранилища передаётся, только если входит в известный набор
 причин `MetadataStoreReason` или кодов домена для `invalid_stored_metadata`.
 Отсутствие метаданных при просмотре — успешный результат с `present=False`.
+
+## Правила с названиями и идентификаторами
+
+`InspectRoutingRules` и `AssignRuleIdentifiers` работают поверх обработчика
+`ImportRoutingSchemeHandler` (его метод `read()`, тот же порядок чтения и коды
+отказов источников Xray и XKeen) и порта `ManagerMetadataStore`. Просмотр
+один раз читает схему и метаданные, привязывает записи раздела `rules`
+к правилам по семантическому ключу и ничего не записывает: отсутствие
+метаданных или раздела — состояние, а не отказ. Присвоение после того же
+чтения генерирует идентификаторы фабрикой `rule_ids` (по умолчанию `uuid4`
+в канонической строчной форме) только для правил с причиной `record_missing`,
+дописывает записи без названия и пишет раздел один раз, только если
+канонические байты кандидата отличаются от прочитанного файла; без правил,
+которым нужен идентификатор, файл не создаётся. Правила, для которых ключ
+неоднозначен, идентификаторов не получают; записи без правила сохраняются.
+Подробности, представления и пример — в [импорте правил](routing-import.md#названия-и-идентификаторы-правил).
+
+| Ситуация | Категория и код |
+| --- | --- |
+| Неверный тип команды или версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
+| Отказ или некорректный ответ источника Xray или XKeen | коды сценария `inspect_proxy_config` без изменения; хранилище не читается |
+| Прочитанные части не удалось перевести | `invalid_source_data` / `routing_import_failed`; доменная причина в `reason` |
+| Отказ хранилища, непредвиденное исключение или ответ не по контракту | те же коды, что у [сценариев метаданных](#метаданные-менеджера-и-первичный-импорт-размещения) |
+| Записи не удалось привязать к правилам | `invalid_source_data` / `rule_binding_failed`; доменная причина в `reason` |
+| Фабрика вернула идентификатор неверного формата, уже занятый или вызвала исключение | `invalid_source_data` / `rule_id_generation_failed`; запись не выполняется |
+| Записи правил не удалось объединить с прочитанными метаданными | `invalid_source_data` / `manager_metadata_inconsistent`; доменная причина в `reason` |
 
 ## Тестовые адаптеры в памяти
 

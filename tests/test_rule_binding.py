@@ -117,6 +117,33 @@ class KeyTests(unittest.TestCase):
                 self.assertEqual(binding.rules[0].reason, BindingReason.RECORD_MISSING)
                 self.assertEqual(binding.unbound_records[0].reason, BindingReason.RULE_MISSING)
 
+    def test_duplicate_keys_in_record_snapshot_never_match_a_rule(self):
+        # Регрессия 238-R04: json.loads молча оставлял последний из повторяющихся ключей,
+        # и запись {"port":"80","port":"443"} привязывалась к правилу {"port":"443"}.
+        scheme = import_routing_scheme(_config([
+            {"type": "field", "port": "443", "outboundTag": "direct"},
+            {"type": "field", "attrs": {"x": 1}, "network": "tcp", "outboundTag": "direct"},
+            {"type": "field", "network": "tcp,udp", "outboundTag": "proxy-out"},
+        ]))
+        port_rule, nested_rule = scheme_rules(scheme)
+        self.assertEqual(rule_key(port_rule).value, '{"port":"443"}')
+        duplicates = (
+            (ID_A, port_rule, '{"port":"80","port":"443"}'),
+            (ID_B, port_rule, '{"port":"443","port":"443"}'),
+            (ID_C, nested_rule, '{"attrs":{"x":0,"x":1},"network":"tcp"}'),
+        )
+        for rule_id, rule, snapshot in duplicates:
+            with self.subTest(snapshot=snapshot):
+                record = RuleRecord(rule_id, NAME_MARKER, RuleKey("unsupported", snapshot, RoutingAction.DIRECT))
+                binding = bind_routing_scheme(scheme, (record,))
+                self.assertEqual([item.reason for item in binding.rules], [BindingReason.RECORD_MISSING] * 2)
+                self.assertEqual([(item.record.rule_id, item.reason) for item in binding.unbound_records], [(rule_id, BindingReason.RULE_MISSING)])
+                self.assertEqual({item.rule.name for item in binding.rules}, {None})
+        # Та же запись без повтора ключей привязывается, как и раньше.
+        record = RuleRecord(ID_D, NAME_MARKER, RuleKey("unsupported", '{"port":"443"}', RoutingAction.DIRECT))
+        binding = bind_routing_scheme(scheme, (record,))
+        self.assertEqual((binding.rules[0].record, binding.rules[0].rule.name), (record, NAME_MARKER))
+
     def test_key_ignores_identity_state_protection_and_database_metadata(self):
         base = rule(GeoIPCondition(GEOIP, "ru"), RoutingAction.DIRECT)
         variants = (

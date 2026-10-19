@@ -18,6 +18,7 @@ from enum import StrEnum
 import json
 from typing import NoReturn
 
+from keenvpn.domain.config_document import _constant, _pairs
 from keenvpn.domain.manager_metadata import ManagerMetadataError, RuleKey, RuleRecord
 from keenvpn.domain.routing import (
     DomainCondition, GeoIPCondition, GeoSiteCondition, IPCondition, RoutingRule, RoutingValidationError,
@@ -117,13 +118,16 @@ def rule_key(rule: RoutingRule) -> RuleKey:
 def _sorted_snapshot(snapshot: str) -> str:
     """Снимок полей неподдержанного правила с отсортированными ключами объектов на всех уровнях.
 
-    Текст, который не является JSON или не кодируется обратно (например,
-    `NaN`, `Infinity` и число вне диапазона в значении записи метаданных),
-    возвращается как есть: такой ключ всё равно не совпадёт со снимком
-    импорта, где строгий разбор частей Xray этих значений не допускает.
+    Разбор тот же строгий, что у документов конфигурации: повтор ключа
+    объекта, `NaN` и `Infinity` отклоняются, а не сводятся к последнему
+    или одному из значений. Текст, который не является строгим JSON или
+    не кодируется обратно (например, число вне диапазона в значении
+    записи метаданных), возвращается как есть: такой ключ всё равно
+    не совпадёт со снимком импорта, где строгий разбор частей Xray этих
+    значений не допускает, и запись остаётся без правила.
     """
     try:
-        document = json.loads(snapshot)
+        document = json.loads(snapshot, object_pairs_hook=_pairs, parse_constant=_constant)
         return json.dumps(document, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":"))
     except (ValueError, TypeError, RecursionError):
         return snapshot

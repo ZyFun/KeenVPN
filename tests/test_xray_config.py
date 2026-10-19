@@ -17,6 +17,7 @@ from keenvpn.domain.xray_config import (
     summarize_xray_config, validate_xray_config_set,
 )
 from tests.support.isolation import forbid_external_effects
+from tests.support.privacy import UNSAFE_MARKERS, UNSAFE_PART_NAME, unsafe_xray_config
 from tests.support.snapshot import load_xray_snapshot_files, snapshot_xray_config
 
 
@@ -79,9 +80,24 @@ class SnapshotXrayConfigTests(unittest.TestCase):
         self.assertTrue(all(rule["inbound_tags_resolved"] and rule["target_resolved"] for rule in diagnostic["rules"]))
         self.assertTrue(all(rule["has_rule_tag"] and rule["type"] == "field" for rule in diagnostic["rules"]))
         self.assertEqual(diagnostic["balancers"], [{
-            "part": "05_routing.json", "tag": "vpn-group", "selector": ["trojan-out"], "selector_match_count": 1,
-            "fallback_tag": "blocked", "fallback_resolved": True, "strategy": "leastPing",
+            "part": "05_routing.json", "index": 0, "tag_known": True, "tag": "vpn-group", "selector": ["trojan-out"],
+            "selector_match_count": 1, "fallback_known": True, "fallback_tag": "blocked", "fallback_resolved": True,
+            "fallback_position": {"part": "04_outbounds.json", "index": 2}, "strategy_known": True,
+            "strategy": "leastPing",
         }])
+        # Позиции целей: outbound `direct` — второй в своей части, балансировщик `vpn-group` — единственный.
+        self.assertEqual(
+            [rule["target_position"] for rule in diagnostic["rules"]],
+            [{"part": "04_outbounds.json", "index": 1} if rule["target_kind"] == "outbound"
+             else {"part": "05_routing.json", "index": 0} for rule in diagnostic["rules"]],
+        )
+        self.assertTrue(all(
+            rule["type_known"] and rule["target_tag_known"] and rule["unknown_condition_count"] == 0
+            for rule in diagnostic["rules"]
+        ))
+        self.assertEqual([item["index"] for item in diagnostic["inbounds"]], [0, 1, 2, 3])
+        self.assertTrue(all(item["tag_known"] and item["protocol_known"] for item in diagnostic["inbounds"] + diagnostic["outbounds"]))
+        self.assertEqual([item["unknown_section_count"] for item in diagnostic["parts"]], [0] * 7)
         self.assertEqual(diagnostic["observatory_subjects"], [{
             "part": "07_observatory.json", "section": "burstObservatory", "selector": "trojan-out", "match_count": 1,
         }])
@@ -145,9 +161,16 @@ class SyntheticXrayConfigTests(unittest.TestCase):
                     }),))
                     before = config.parts[0].content
                     diagnostic = config.to_diagnostic()
-                    self.assertEqual(diagnostic["rules"][0]["inbound_tags"], inbound_tags)
+                    # Пустой и начинающийся с пробела элемент скрываются проверкой формата; пустой селектор остаётся пустым.
+                    self.assertEqual(
+                        diagnostic["rules"][0]["inbound_tags"],
+                        [tag if tag in ("lan", "missing-in") else None for tag in inbound_tags],
+                    )
                     self.assertEqual(diagnostic["rules"][0]["inbound_tags_resolved"], resolved)
-                    self.assertEqual(diagnostic["balancers"][0]["selector"], selectors)
+                    self.assertEqual(
+                        diagnostic["balancers"][0]["selector"],
+                        [item if item in ("proxy", "direct", "") else None for item in selectors],
+                    )
                     self.assertEqual(diagnostic["balancers"][0]["selector_match_count"], matches)
                     self.assertEqual(diagnostic["unsupported_paths"], [])
                     self.assertEqual(config.parts[0].content, before)
@@ -163,9 +186,10 @@ class SyntheticXrayConfigTests(unittest.TestCase):
         }),))
         with forbid_external_effects():
             diagnostic = config.to_diagnostic()
-        self.assertEqual(diagnostic["rules"][0]["inbound_tags"], ["lan,missing-in"])
+        # Элемент с запятой не делится и не проходит проверку формата: разрешимость считается по исходному значению.
+        self.assertEqual(diagnostic["rules"][0]["inbound_tags"], [None])
         self.assertFalse(diagnostic["rules"][0]["inbound_tags_resolved"])
-        self.assertEqual(diagnostic["balancers"][0]["selector"], ["proxy,direct"])
+        self.assertEqual(diagnostic["balancers"][0]["selector"], [None])
         self.assertEqual(diagnostic["balancers"][0]["selector_match_count"], 0)
         self.assertEqual(diagnostic["observatory_subjects"], [])
         self.assertEqual(diagnostic["unsupported_paths"], [
@@ -207,9 +231,10 @@ class SyntheticXrayConfigTests(unittest.TestCase):
         self.assertEqual(diagnostic["dns_tags"], ["dns-a"])
         self.assertEqual(diagnostic["domain_strategies"], ["AsIs"])
         self.assertEqual(diagnostic["inbounds"], [
-            {"part": "01_a.json", "tag": "in-a", "protocol": "tunnel"},
-            {"part": "01_a.json", "tag": None, "protocol": None},
-            {"part": "01_a.json", "tag": None, "protocol": "dokodemo-door"},
+            {"part": "01_a.json", "index": 0, "tag_known": True, "tag": "in-a", "protocol_known": True, "protocol": "tunnel"},
+            {"part": "01_a.json", "index": 2, "tag_known": False, "tag": None, "protocol_known": False, "protocol": None},
+            {"part": "01_a.json", "index": 3, "tag_known": False, "tag": None, "protocol_known": True,
+             "protocol": "dokodemo-door"},
         ])
         self.assertEqual(
             [(item["part"], item["tag"], item["protocol"]) for item in diagnostic["outbounds"]],
@@ -232,14 +257,21 @@ class SyntheticXrayConfigTests(unittest.TestCase):
             (4, "field", [], True, "none", None, False, False, {"protocol": 1}),
             (6, None, [], True, "none", None, False, False, {"ip": 0}),
         ])
-        self.assertTrue(all(rule["part"] == "03_c.json" for rule in diagnostic["rules"]))
+        self.assertTrue(all(rule["part"] == "03_c.json" and rule["unknown_condition_count"] == 0 for rule in diagnostic["rules"]))
+        # Повтор тега `out-a` и `group` оставляет ссылку разрешённой, но без позиции; `type` не строка — `type_known` ложно.
+        self.assertEqual([rule["target_position"] for rule in diagnostic["rules"]], [None] * 6)
+        self.assertEqual([rule["type_known"] for rule in diagnostic["rules"]], [True] * 5 + [False])
+        self.assertEqual([rule["target_tag_known"] for rule in diagnostic["rules"]], [True, False, True, True, False, False])
         self.assertEqual(diagnostic["balancers"], [
-            {"part": "03_c.json", "tag": "group", "selector": ["out-", "none-"], "selector_match_count": 3,
-             "fallback_tag": "missing", "fallback_resolved": False, "strategy": "random"},
-            {"part": "03_c.json", "tag": "group", "selector": [], "selector_match_count": 0,
-             "fallback_tag": None, "fallback_resolved": None, "strategy": None},
-            {"part": "03_c.json", "tag": None, "selector": [], "selector_match_count": 0,
-             "fallback_tag": None, "fallback_resolved": None, "strategy": None},
+            {"part": "03_c.json", "index": 0, "tag_known": True, "tag": "group", "selector": ["out-", "none-"],
+             "selector_match_count": 3, "fallback_known": True, "fallback_tag": "missing", "fallback_resolved": False,
+             "fallback_position": None, "strategy_known": True, "strategy": "random"},
+            {"part": "03_c.json", "index": 1, "tag_known": True, "tag": "group", "selector": [], "selector_match_count": 0,
+             "fallback_known": False, "fallback_tag": None, "fallback_resolved": None, "fallback_position": None,
+             "strategy_known": False, "strategy": None},
+            {"part": "03_c.json", "index": 2, "tag_known": False, "tag": None, "selector": [], "selector_match_count": 0,
+             "fallback_known": False, "fallback_tag": None, "fallback_resolved": None, "fallback_position": None,
+             "strategy_known": False, "strategy": None},
         ])
         self.assertEqual(diagnostic["observatory_subjects"], [
             {"part": "01_a.json", "section": "observatory", "selector": "out-", "match_count": 3},
@@ -436,6 +468,83 @@ class SyntheticXrayConfigTests(unittest.TestCase):
         self.assertIsNone(error.__context__)
         self.assertIsNone(error.__cause__)
         self.assertNotIn("fixture-private", str(error) + repr(error))
+
+
+class UnsafeIdentifierSummaryTests(unittest.TestCase):
+    """Строки из конфигурации выводятся только после проверки формата или по списку известных значений Xray."""
+
+    def test_unsafe_tags_strategies_protocols_and_names_are_hidden_with_known_flags_and_positions(self):
+        config = unsafe_xray_config()
+        with forbid_external_effects():
+            diagnostic = config.to_diagnostic()
+        part = UNSAFE_PART_NAME
+        text = json.dumps(diagnostic, ensure_ascii=False) + repr(config) + repr(config.parts)
+        for marker in UNSAFE_MARKERS:
+            self.assertNotIn(marker, text)
+        self.assertEqual(json.loads(json.dumps(diagnostic)), diagnostic)
+        self.assertEqual(diagnostic["part_count"], 1)
+        self.assertEqual(diagnostic["parts"][0]["sections"], ["log", "inbounds", "outbounds", "dns", "routing", "observatory"])
+        self.assertEqual(diagnostic["parts"][0]["unknown_section_count"], 1)
+        self.assertEqual(set(diagnostic["parts"][0]), {"name", "size", "sha256", "sections", "unknown_section_count"})
+        self.assertEqual(set(diagnostic["sections"]), {"log", "inbounds", "outbounds", "dns", "routing", "observatory"})
+        self.assertEqual(diagnostic["duplicate_sections"], [])
+        self.assertEqual(diagnostic["dns_tags"], [None])
+        self.assertEqual(diagnostic["domain_strategies"], [None])
+
+        def endpoint(index, tag, protocol):
+            return {
+                "part": part, "index": index, "tag_known": True, "tag": tag, "protocol_known": True, "protocol": protocol,
+            }
+
+        self.assertEqual(diagnostic["inbounds"], [
+            endpoint(0, None, None), endpoint(1, "lan", "tunnel"), endpoint(2, None, None),
+        ])
+        self.assertEqual(diagnostic["outbounds"], [
+            endpoint(0, None, None), endpoint(1, "proxy-safe", "trojan"), endpoint(2, None, None),
+            endpoint(3, None, "freedom"), endpoint(4, None, "freedom"),
+        ])
+        self.assertEqual(diagnostic["duplicate_inbound_tags"], [])
+        self.assertEqual(diagnostic["duplicate_outbound_tags"], [None])
+        self.assertEqual(diagnostic["duplicate_balancer_tags"], [])
+        self.assertEqual(diagnostic["rule_count"], 3)
+        self.assertEqual(diagnostic["rules"], [
+            {
+                "part": part, "index": 0, "type_known": True, "type": None, "inbound_tags": [None, "lan"],
+                "inbound_tags_resolved": True, "target_kind": "outbound", "target_tag_known": True, "target_tag": None,
+                "target_resolved": True, "target_position": None, "has_rule_tag": False,
+                "conditions": {"domain": 1}, "unknown_condition_count": 1,
+            },
+            {
+                "part": part, "index": 1, "type_known": True, "type": "field", "inbound_tags": [],
+                "inbound_tags_resolved": True, "target_kind": "balancer", "target_tag_known": True, "target_tag": None,
+                "target_resolved": True, "target_position": {"part": part, "index": 0}, "has_rule_tag": False,
+                "conditions": {}, "unknown_condition_count": 2,
+            },
+            {
+                "part": part, "index": 2, "type_known": True, "type": "field", "inbound_tags": [],
+                "inbound_tags_resolved": True, "target_kind": "outbound", "target_tag_known": True,
+                "target_tag": "proxy-safe", "target_resolved": True, "target_position": {"part": part, "index": 1},
+                "has_rule_tag": False, "conditions": {"network": 1}, "unknown_condition_count": 0,
+            },
+        ])
+        self.assertEqual(diagnostic["balancers"], [
+            {
+                "part": part, "index": 0, "tag_known": True, "tag": None, "selector": [None, "proxy-", ""],
+                "selector_match_count": 5, "fallback_known": True, "fallback_tag": None, "fallback_resolved": True,
+                "fallback_position": {"part": part, "index": 3}, "strategy_known": True, "strategy": None,
+            },
+            {
+                "part": part, "index": 1, "tag_known": True, "tag": "pool", "selector": [""],
+                "selector_match_count": 5, "fallback_known": True, "fallback_tag": "proxy-safe", "fallback_resolved": True,
+                "fallback_position": {"part": part, "index": 1}, "strategy_known": True, "strategy": "leastPing",
+            },
+        ])
+        self.assertEqual(diagnostic["observatory_subjects"], [
+            {"part": part, "section": "observatory", "selector": None, "match_count": 0},
+            {"part": part, "section": "observatory", "selector": "proxy-", "match_count": 1},
+        ])
+        self.assertEqual(diagnostic["unsupported_paths"], [])
+        self.assertEqual(config.parts[0].content, unsafe_xray_config().parts[0].content)
 
 
 if __name__ == "__main__":

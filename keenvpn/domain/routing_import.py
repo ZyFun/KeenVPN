@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 import ipaddress
 import json
-import re
 from typing import NoReturn
 
 from keenvpn.domain.config_document import valid_document_name
@@ -31,13 +30,12 @@ from keenvpn.domain.routing import (
 )
 from keenvpn.domain.routing_policy import FinalRoutingRule, RoutingPolicy
 from keenvpn.domain.xray_config import RuleListValue, RuleTargetKind, XrayConfigSet, decode_string_list
+from keenvpn.domain.xray_identifiers import (
+    BALANCER_STRATEGIES, XRAY_RULE_CONDITION_FIELDS, safe_identifier, safe_strategy,
+)
+# Проверка формата и списки известных значений общие со сводкой конфигурации; имена сохранены для импорта.
 
 
-XRAY_RULE_CONDITION_FIELDS = frozenset({
-    "domain", "domains", "ip", "port", "network", "sourceIP", "source", "sourcePort", "user", "vlessRoute",
-    "inboundTag", "protocol", "attrs", "localIP", "localPort", "process", "webhook",
-})
-"""Поля условий правила, которые читает `parseFieldRule` Xray v26.3.27; регистр имён учитывается."""
 DIRECT_OUTBOUND_PROTOCOLS = frozenset({"freedom", "direct"})
 """Протоколы outbound, означающие прямой выход."""
 BLOCK_OUTBOUND_PROTOCOLS = frozenset({"blackhole", "block"})
@@ -59,16 +57,6 @@ _SOCKOPT_FIELDS = frozenset({"dialerProxy"})
 _BALANCER_FIELDS = frozenset({"tag", "selector", "fallbackTag", "strategy"})
 _STRATEGY_FIELDS = frozenset({"type", "settings"})
 _RULE_FIELDS = XRAY_RULE_CONDITION_FIELDS | _SERVICE_FIELDS
-BALANCER_STRATEGIES = frozenset({"random", "leastping", "roundrobin", "leastload"})
-"""Стратегии балансировщика Xray v26.3.27; тип сравнивается без учёта регистра, как в загрузчике."""
-_SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_+-]{0,127}")
-"""Технический идентификатор в безопасном выводе: без `.`, `/`, `:`, `@`, пробелов и управляющих символов.
-
-Без точки и двоеточия в вывод не попадают IPv4- и IPv6-адреса и имена,
-похожие на домен.
-"""
-
-
 def _case_variants(item: dict[str, object], names: frozenset[str]) -> bool:
     """Есть ли ключ, совпадающий с полем Xray только без учёта регистра.
 
@@ -87,29 +75,6 @@ def _balancer_case_variants(item: dict[str, object]) -> bool:
     return _case_variants(item, _BALANCER_FIELDS) or (
         type(strategy) is dict and _case_variants(strategy, _STRATEGY_FIELDS)
     )
-
-
-def safe_identifier(value: object) -> str | None:
-    """Тег outbound или балансировщика для вывода, если он похож на технический идентификатор.
-
-    Теги задаёт пользователь: значение с разделителями URL, пути, адреса,
-    домена или учётных данных скрывается и заменяется на `None`; отдельно
-    скрывается всё, что разбирается как IP-адрес. Проверка формата не
-    отличает секрет из букв, цифр, `_`, `+` и `-` от обычного тега: такие
-    теги выводятся так же, как в сводке конфигурации прокси.
-    """
-    if type(value) is not str or not _SAFE_IDENTIFIER.fullmatch(value):
-        return None
-    try:
-        ipaddress.ip_address(value)
-    except ValueError:
-        return value
-    return None
-
-
-def safe_strategy(value: object) -> str | None:
-    """Тип стратегии для вывода, только если это известная стратегия Xray."""
-    return value if type(value) is str and value.lower() in BALANCER_STRATEGIES else None
 
 
 class RoutingImportErrorCode(StrEnum):

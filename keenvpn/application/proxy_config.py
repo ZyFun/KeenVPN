@@ -29,12 +29,13 @@ class InspectProxyConfig:
 
 @dataclass(frozen=True, slots=True)
 class XrayPartView:
-    """Ревизия одной части и имена её разделов верхнего уровня."""
+    """Ревизия одной части, известные разделы верхнего уровня и число остальных."""
 
     name: str
     size: int
     sha256: str
     sections: tuple[str, ...]
+    unknown_section_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,17 +47,40 @@ class XraySectionView:
 
 
 @dataclass(frozen=True, slots=True)
-class XrayEndpointView:
-    """Inbound или outbound: часть, тег и протокол без настроек."""
+class XrayPositionView:
+    """Позиция элемента: часть и индекс в своём списке, как в путях `unsupported_paths`."""
 
     part: str
+    index: int
+
+
+def _position(value: dict[str, object] | None) -> XrayPositionView | None:
+    return None if value is None else XrayPositionView(**view_fields(XrayPositionView, value))
+
+
+def _position_dict(value: XrayPositionView | None) -> dict[str, object] | None:
+    return None if value is None else view_dict(value)
+
+
+@dataclass(frozen=True, slots=True)
+class XrayEndpointView:
+    """Inbound или outbound: позиция, тег после проверки формата и известный протокол.
+
+    `tag` и `protocol` — `None`, если поля нет или значение скрыто как
+    небезопасное либо неизвестное; `tag_known` и `protocol_known` различают эти случаи.
+    """
+
+    part: str
+    index: int
+    tag_known: bool
     tag: str | None
+    protocol_known: bool
     protocol: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class XrayConditionView:
-    """Имя поля условия правила и число его значений; сами значения скрыты."""
+    """Имя известного поля условия Xray и число его значений; сами значения скрыты."""
 
     key: str
     value_count: int
@@ -64,40 +88,57 @@ class XrayConditionView:
 
 @dataclass(frozen=True, slots=True)
 class XrayRuleView:
-    """Правило маршрутизации: ссылки на теги, назначение и состав условий."""
+    """Правило маршрутизации: ссылки на теги, назначение, его позиция и состав условий.
+
+    Скрытый тег в `inbound_tags` заменяется на `None` на своей позиции.
+    `target_position` указывает outbound или балансировщик, если цель однозначна;
+    `unknown_condition_count` — число полей, которые декодер Xray не читает.
+    """
 
     part: str
     index: int
+    type_known: bool
     type: str | None
-    inbound_tags: tuple[str, ...]
+    inbound_tags: tuple[str | None, ...]
     inbound_tags_resolved: bool
     target_kind: str
+    target_tag_known: bool
     target_tag: str | None
     target_resolved: bool
+    target_position: XrayPositionView | None
     has_rule_tag: bool
     conditions: tuple[XrayConditionView, ...]
+    unknown_condition_count: int
 
 
 @dataclass(frozen=True, slots=True)
 class XrayBalancerView:
-    """Балансировщик: селекторы, `fallbackTag` и стратегия."""
+    """Балансировщик: позиция, селекторы, `fallbackTag` с позицией цели и известная стратегия.
+
+    Пустой селектор остаётся пустым, скрытый — `None` на своей позиции.
+    """
 
     part: str
+    index: int
+    tag_known: bool
     tag: str | None
-    selector: tuple[str, ...]
+    selector: tuple[str | None, ...]
     selector_match_count: int
+    fallback_known: bool
     fallback_tag: str | None
     fallback_resolved: bool | None
+    fallback_position: XrayPositionView | None
+    strategy_known: bool
     strategy: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class XrayObservatorySubjectView:
-    """Селектор наблюдателя и число совпавших outbound."""
+    """Селектор наблюдателя после проверки формата и число совпавших outbound."""
 
     part: str
     section: str
-    selector: str
+    selector: str | None
     match_count: int
 
 
@@ -111,19 +152,26 @@ class XrayUnsupportedPathView:
 
 @dataclass(frozen=True, slots=True)
 class XrayConfigView:
-    """Ревизии частей и структурная сводка без доменов, адресов, путей и паролей."""
+    """Ревизии частей и структурная сводка без доменов, адресов, путей и паролей.
+
+    Строки из конфигурации показываются по правилу `keenvpn.domain.xray_identifiers`:
+    теги и селекторы — после проверки формата, протоколы, стратегии, `type`
+    правила, имена полей условий и разделов — только из списков известных
+    значений Xray; скрытое значение — `None`, признаки `*_known` сохраняют факт
+    его наличия. В списках скрытый элемент стоит на своей позиции.
+    """
 
     part_count: int
     parts: tuple[XrayPartView, ...]
     sections: tuple[XraySectionView, ...]
     duplicate_sections: tuple[str, ...]
-    dns_tags: tuple[str, ...]
-    domain_strategies: tuple[str, ...]
+    dns_tags: tuple[str | None, ...]
+    domain_strategies: tuple[str | None, ...]
     inbounds: tuple[XrayEndpointView, ...]
     outbounds: tuple[XrayEndpointView, ...]
-    duplicate_inbound_tags: tuple[str, ...]
-    duplicate_outbound_tags: tuple[str, ...]
-    duplicate_balancer_tags: tuple[str, ...]
+    duplicate_inbound_tags: tuple[str | None, ...]
+    duplicate_outbound_tags: tuple[str | None, ...]
+    duplicate_balancer_tags: tuple[str | None, ...]
     rule_count: int
     rules: tuple[XrayRuleView, ...]
     balancers: tuple[XrayBalancerView, ...]
@@ -154,12 +202,17 @@ class XrayConfigView:
                 XrayRuleView(**{
                     **view_fields(XrayRuleView, item),
                     "inbound_tags": tuple(item["inbound_tags"]),
+                    "target_position": _position(item["target_position"]),
                     "conditions": tuple(XrayConditionView(key, count) for key, count in item["conditions"].items()),
                 })
                 for item in diagnostic["rules"]
             ),
             balancers=tuple(
-                XrayBalancerView(**{**view_fields(XrayBalancerView, item), "selector": tuple(item["selector"])})
+                XrayBalancerView(**{
+                    **view_fields(XrayBalancerView, item),
+                    "selector": tuple(item["selector"]),
+                    "fallback_position": _position(item["fallback_position"]),
+                })
                 for item in diagnostic["balancers"]
             ),
             observatory_subjects=tuple(
@@ -191,11 +244,19 @@ class XrayConfigView:
                 {
                     **view_dict(rule),
                     "inbound_tags": list(rule.inbound_tags),
+                    "target_position": _position_dict(rule.target_position),
                     "conditions": {condition.key: condition.value_count for condition in rule.conditions},
                 }
                 for rule in self.rules
             ],
-            "balancers": [{**view_dict(item), "selector": list(item.selector)} for item in self.balancers],
+            "balancers": [
+                {
+                    **view_dict(item),
+                    "selector": list(item.selector),
+                    "fallback_position": _position_dict(item.fallback_position),
+                }
+                for item in self.balancers
+            ],
             "observatory_subjects": [view_dict(item) for item in self.observatory_subjects],
             "unsupported_paths": [view_dict(item) for item in self.unsupported_paths],
         }
@@ -211,14 +272,20 @@ class XKeenFlagView:
 
 @dataclass(frozen=True, slots=True)
 class XKeenSettingsView:
-    """Ревизия `xkeen.json`, имена полей объекта `xkeen` и kill-switch."""
+    """Ревизия `xkeen.json`, имена разделов и полей объекта `xkeen` после проверки формата и kill-switch.
+
+    Имена, не похожие на технический идентификатор, не показываются и учитываются
+    счётчиками `hidden_section_count` и `hidden_settings_key_count`.
+    """
 
     name: str
     size: int
     sha256: str
     sections: tuple[str, ...]
+    hidden_section_count: int
     has_xkeen_section: bool
     settings_keys: tuple[str, ...]
+    hidden_settings_key_count: int
     killswitch: XKeenFlagView
 
 
@@ -357,9 +424,11 @@ class ProxyConfigModels:
 class ProxyConfigView:
     """Безопасное представление прочитанной конфигурации Xray и XKeen.
 
-    Теги, протоколы, имена разделов и файлов — технические идентификаторы
-    установки. Домены, адреса, пути, пароли, теги правил, значения параметров
-    init и записи списков сюда не входят.
+    Имена файлов проверяет `valid_document_name`; теги, протоколы, стратегии,
+    имена разделов и ключи `xkeen.json` — значения из файлов, а не доверенные
+    идентификаторы: они показываются только после проверки формата или по
+    списку известных значений Xray. Домены, адреса, пути, пароли, теги правил,
+    значения параметров init и записи списков сюда не входят.
     """
 
     xray: XrayConfigView

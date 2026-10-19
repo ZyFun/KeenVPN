@@ -11,7 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application.contract import CONTRACT_VERSION, ErrorCategory
 from keenvpn.application.proxy_config import (
-    LIST_NAME_MISMATCH, InspectProxyConfig, InspectProxyConfigHandler, ProxyConfigView,
+    LIST_NAME_MISMATCH, InspectProxyConfig, InspectProxyConfigHandler, ProxyConfigView, XrayPositionView,
 )
 from keenvpn.domain.config_document import ConfigDocument
 from keenvpn.domain.xkeen_config import (
@@ -24,7 +24,7 @@ from tests.support.in_memory import (
     InMemoryXrayConfigSource, UnconfiguredResponseError,
 )
 from tests.support.isolation import forbid_external_effects
-from tests.support.privacy import reachable
+from tests.support.privacy import UNSAFE_MARKERS, UNSAFE_PART_NAME, reachable, unsafe_xkeen_settings, unsafe_xray_config
 from tests.support.snapshot import snapshot_proxy_sources, snapshot_xkeen_list, snapshot_xkeen_settings
 
 
@@ -47,12 +47,24 @@ PART_HASHES = {
 }
 
 
+OUTBOUND_POSITIONS = {"trojan-out": 0, "direct": 1, "blocked": 2}
+
+
 def rule(index, target_kind, target_tag, conditions, inbound_tags=()):
+    position = (
+        {"part": "04_outbounds.json", "index": OUTBOUND_POSITIONS[target_tag]} if target_kind == "outbound"
+        else {"part": "05_routing.json", "index": 0}
+    )
     return {
-        "part": "05_routing.json", "index": index, "type": "field", "inbound_tags": list(inbound_tags),
-        "inbound_tags_resolved": True, "target_kind": target_kind, "target_tag": target_tag, "target_resolved": True,
-        "has_rule_tag": True, "conditions": conditions,
+        "part": "05_routing.json", "index": index, "type_known": True, "type": "field", "inbound_tags": list(inbound_tags),
+        "inbound_tags_resolved": True, "target_kind": target_kind, "target_tag_known": True, "target_tag": target_tag,
+        "target_resolved": True, "target_position": position, "has_rule_tag": True, "conditions": conditions,
+        "unknown_condition_count": 0,
     }
+
+
+def endpoint(part, index, tag, protocol):
+    return {"part": part, "index": index, "tag_known": True, "tag": tag, "protocol_known": True, "protocol": protocol}
 
 
 def port_list(name, line_count, comment_count, entry_count, port_count, address_count=None):
@@ -66,14 +78,14 @@ def port_list(name, line_count, comment_count, entry_count, port_count, address_
 
 EXPECTED_XRAY = {
     "part_count": 7,
-    "parts": [{"name": name, "size": size, "sha256": digest, "sections": sections}
+    "parts": [{"name": name, "size": size, "sha256": digest, "sections": sections, "unknown_section_count": 0}
               for name, (size, digest, sections) in PART_HASHES.items()],
     "sections": {sections[0]: [name] for name, (_size, _digest, sections) in PART_HASHES.items()},
     "duplicate_sections": [], "dns_tags": ["dns-local"], "domain_strategies": ["IPOnDemand"],
-    "inbounds": [{"part": "03_inbounds.json", "tag": tag, "protocol": "tunnel"}
-                 for tag in ("redirect", "tproxy", "force-proxy-redirect", "force-proxy-tproxy")],
-    "outbounds": [{"part": "04_outbounds.json", "tag": tag, "protocol": protocol}
-                  for tag, protocol in (("trojan-out", "trojan"), ("direct", "freedom"), ("blocked", "blackhole"))],
+    "inbounds": [endpoint("03_inbounds.json", index, tag, "tunnel")
+                 for index, tag in enumerate(("redirect", "tproxy", "force-proxy-redirect", "force-proxy-tproxy"))],
+    "outbounds": [endpoint("04_outbounds.json", index, tag, protocol)
+                  for index, (tag, protocol) in enumerate((("trojan-out", "trojan"), ("direct", "freedom"), ("blocked", "blackhole")))],
     "duplicate_inbound_tags": [], "duplicate_outbound_tags": [], "duplicate_balancer_tags": [],
     "rule_count": 8,
     "rules": [
@@ -87,8 +99,9 @@ EXPECTED_XRAY = {
         rule(7, "balancer", "vpn-group", {"network": 1}),
     ],
     "balancers": [{
-        "part": "05_routing.json", "tag": "vpn-group", "selector": ["trojan-out"], "selector_match_count": 1,
-        "fallback_tag": "blocked", "fallback_resolved": True, "strategy": "leastPing",
+        "part": "05_routing.json", "index": 0, "tag_known": True, "tag": "vpn-group", "selector": ["trojan-out"],
+        "selector_match_count": 1, "fallback_known": True, "fallback_tag": "blocked", "fallback_resolved": True,
+        "fallback_position": {"part": "04_outbounds.json", "index": 2}, "strategy_known": True, "strategy": "leastPing",
     }],
     "observatory_subjects": [{
         "part": "07_observatory.json", "section": "burstObservatory", "selector": "trojan-out", "match_count": 1,
@@ -98,7 +111,8 @@ EXPECTED_XRAY = {
 EXPECTED_XKEEN = {
     "settings": {
         "name": "xkeen.json", "size": 78, "sha256": "daa179d2dd60e90dd00716fec0fa82bb6e4f9f54df3547137e67e2452b20e470",
-        "sections": ["xkeen"], "has_xkeen_section": True, "settings_keys": ["verify_downloads", "killswitch"],
+        "sections": ["xkeen"], "hidden_section_count": 0, "has_xkeen_section": True,
+        "settings_keys": ["verify_downloads", "killswitch"], "hidden_settings_key_count": 0,
         "killswitch": {"status": "present", "value": "on"},
     },
     "init": {
@@ -231,6 +245,49 @@ class InspectProxyConfigTests(unittest.TestCase):
         self.assertEqual(view["unsupported_paths"], [])
         self.assertEqual(self.sources.calls, (1, 1, 1, LIST_NAMES))
         self.assert_private(result)
+
+    def test_unsafe_identifiers_are_hidden_in_repr_str_and_dict_with_known_flags_and_positions(self):
+        self.sources.xray.outcome = unsafe_xray_config()
+        self.sources.settings.outcome = unsafe_xkeen_settings()
+        with forbid_external_effects():
+            result = self.execute()
+        self.assertTrue(result.succeeded)
+        text = repr(result) + str(result) + json.dumps(result.to_dict(), ensure_ascii=False)
+        text += repr(result.data) + repr(result.data.xray) + repr(result.data.xkeen)
+        for marker in UNSAFE_MARKERS:
+            self.assertNotIn(marker, text)
+        self.assert_private(result)
+        part = UNSAFE_PART_NAME
+        xray = result.to_dict()["data"]["xray"]
+        self.assertEqual(xray["outbounds"][0], {
+            "part": part, "index": 0, "tag_known": True, "tag": None, "protocol_known": True, "protocol": None,
+        })
+        self.assertEqual(xray["outbounds"][1]["tag"], "proxy-safe")
+        self.assertEqual(xray["dns_tags"], [None])
+        self.assertEqual(xray["domain_strategies"], [None])
+        self.assertEqual(xray["duplicate_outbound_tags"], [None])
+        self.assertEqual(xray["parts"][0]["unknown_section_count"], 1)
+        rule = xray["rules"][0]
+        self.assertEqual((rule["type_known"], rule["type"], rule["inbound_tags"]), (True, None, [None, "lan"]))
+        self.assertEqual((rule["target_tag_known"], rule["target_tag"], rule["target_resolved"], rule["target_position"]),
+                         (True, None, True, None))
+        self.assertEqual((rule["conditions"], rule["unknown_condition_count"]), ({"domain": 1}, 1))
+        self.assertEqual(xray["rules"][1]["target_position"], {"part": part, "index": 0})
+        self.assertIs(type(result.data.xray.rules[1].target_position), XrayPositionView)
+        self.assertIsNone(result.data.xray.rules[0].target_position)
+        balancer = xray["balancers"][0]
+        self.assertEqual(balancer["selector"], [None, "proxy-", ""])
+        self.assertEqual((balancer["tag_known"], balancer["tag"], balancer["fallback_known"], balancer["fallback_tag"]),
+                         (True, None, True, None))
+        self.assertEqual(balancer["fallback_position"], {"part": part, "index": 3})
+        self.assertEqual((balancer["strategy_known"], balancer["strategy"]), (True, None))
+        self.assertEqual(xray["observatory_subjects"][0]["selector"], None)
+        settings = result.to_dict()["data"]["xkeen"]["settings"]
+        self.assertEqual((settings["sections"], settings["hidden_section_count"]), (["xkeen"], 1))
+        self.assertEqual(
+            (settings["settings_keys"], settings["hidden_settings_key_count"]), (["killswitch", "verify_downloads"], 2),
+        )
+        self.assertEqual(self.sources.calls, (1, 1, 1, LIST_NAMES))
 
     def test_each_source_failure_has_distinct_code_and_stops_reading(self):
         for index, name in enumerate(SOURCES):

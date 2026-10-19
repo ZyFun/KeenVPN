@@ -31,7 +31,7 @@ from tests.support.in_memory import (
     AdapterSetupError, InMemoryGeoDatabaseSource, InMemoryXrayProcessSource, UnconfiguredResponseError,
 )
 from tests.support.isolation import forbid_external_effects
-from tests.support.privacy import reachable
+from tests.support.privacy import UNSAFE_MARKERS, UNSAFE_PART_NAME, reachable, unsafe_xkeen_settings, unsafe_xray_config
 from tests.support.snapshot import (
     SYNTHETIC_GEOIP_SHA256, SYNTHETIC_GEOIP_SOURCE, SYNTHETIC_XRAY_PID, snapshot_installation_sources,
     snapshot_keenetic_sources, snapshot_proxy_sources, synthetic_geo_inventory,
@@ -174,6 +174,25 @@ class InspectInstallationTests(unittest.TestCase):
         self.assertEqual(result.data.proxy.xkeen.port_53.port_exclude_entry, True)
         self.assertEqual(result.data.keenetic.policy_count, 3)
         self.assert_private(result)
+
+    def test_unsafe_proxy_identifiers_are_hidden_in_installation_result(self):
+        self.sources.proxy.xray.outcome = unsafe_xray_config()
+        self.sources.proxy.settings.outcome = unsafe_xkeen_settings()
+        with forbid_external_effects():
+            result = self.execute()
+        self.assertTrue(result.succeeded)
+        text = repr(result) + str(result) + json.dumps(result.to_dict(), ensure_ascii=False) + repr(result.data)
+        for marker in UNSAFE_MARKERS:
+            self.assertNotIn(marker, text)
+        self.assert_private(result)
+        proxy = result.to_dict()["data"]["proxy"]
+        self.assertEqual(proxy["xray"]["inbounds"][0]["tag_known"], True)
+        self.assertIsNone(proxy["xray"]["inbounds"][0]["tag"])
+        self.assertEqual(proxy["xray"]["rules"][2]["target_position"], {"part": UNSAFE_PART_NAME, "index": 1})
+        self.assertEqual(proxy["xkeen"]["settings"]["hidden_settings_key_count"], 2)
+        self.assertEqual(result.data.proxy.to_dict(), proxy)
+        # Ссылка `geosite:test` правила разбирается из исходных частей, а не из безопасного представления.
+        self.assertEqual(result.to_dict()["data"]["geodata"]["reference_count"], 1)
 
     def test_wrong_command_and_version_do_not_read_sources(self):
         for command, code in (

@@ -17,6 +17,7 @@ import re
 from typing import NoReturn
 
 from keenvpn.domain.config_document import ConfigDocument, validate_config_document
+from keenvpn.domain.xray_identifiers import safe_identifier
 
 
 DNS_PORT = 53
@@ -152,11 +153,21 @@ class XKeenSettings:
         return _switch(XKeenFlagStatus.PRESENT, value)
 
     def to_diagnostic(self) -> dict[str, object]:
-        """Ревизия файла, имена полей и статус kill-switch без остальных значений."""
+        """Ревизия файла, имена полей после проверки формата и статус kill-switch без остальных значений.
+
+        Имена разделов и полей объекта `xkeen` задаёт пользователь: показываются
+        только похожие на технический идентификатор, остальные учитываются числом.
+        """
+        document = self.document.to_diagnostic()
+        sections = [safe_identifier(name) for name in document.pop("sections")]
+        keys = [safe_identifier(name) for name in self.settings_keys]
         return {
-            **self.document.to_diagnostic(),
+            **document,
+            "sections": [name for name in sections if name is not None],
+            "hidden_section_count": sections.count(None),
             "has_xkeen_section": type(self.export().get("xkeen")) is dict,
-            "settings_keys": list(self.settings_keys),
+            "settings_keys": [name for name in keys if name is not None],
+            "hidden_settings_key_count": keys.count(None),
             "killswitch": self.killswitch.to_diagnostic(),
         }
 

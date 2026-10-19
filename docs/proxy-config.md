@@ -19,27 +19,51 @@
 
 `XrayConfigSet(parts)` хранит части в порядке источника с уникальными именами; пустой набор допустим. Адаптер `keenvpn.adapters.xray_configs.xray_config_from_files(files)` собирает набор из словаря «имя → байты», упорядочивая части по имени, как при загрузке каталога конфигураций. Отбор файлов `*.json` выполняет источник при перечислении каталога `XRAY_CONFIG_DIRECTORY`; транспорт и ограничение размера файла в репозитории не реализованы.
 
-`to_diagnostic()` и `summarize_xray_config(parts)` строят структурную сводку за один проход по частям:
+`to_diagnostic()` и `summarize_xray_config(parts)` строят структурную сводку за один проход по частям. Строки из файлов попадают в неё только по правилу [безопасного вывода](#безопасный-вывод-сводки): теги и селекторы — после проверки формата, протоколы, стратегии, `type` правила, имена полей условий и разделов — только из списков известных значений Xray; скрытое значение заменяется на `None`.
 
 | Поле | Содержимое |
 |---|---|
-| `part_count`, `parts` | Имя, размер, SHA-256 и имена разделов каждой части |
-| `sections`, `duplicate_sections` | Какие части содержат каждый раздел верхнего уровня; разделы, встречающиеся более чем в одной части |
-| `dns_tags`, `domain_strategies` | `dns.tag` и `routing.domainStrategy` из всех частей |
-| `inbounds`, `outbounds` | Часть, `tag` и `protocol` каждого элемента; отсутствующее поле — `None` |
-| `duplicate_inbound_tags`, `duplicate_outbound_tags`, `duplicate_balancer_tags` | Теги, встречающиеся более одного раза |
-| `rule_count`, `rules` | Для каждого правила: часть, индекс, `type`, ссылки `inboundTag` и их разрешимость, назначение `outbound`/`balancer`/`both`/`none` с тегом и разрешимостью, наличие `ruleTag` и число значений каждого поля условия |
-| `balancers` | Часть, тег, `selector`, число outbound с таким префиксом, `fallbackTag` и его разрешимость, тип `strategy` |
-| `observatory_subjects` | Селекторы `subjectSelector` разделов `observatory` и `burstObservatory` и число совпавших outbound |
-| `unsupported_paths` | Места частей, структура которых не поддержана сводкой: например `inbounds[1]` или `routing.rules[4].inboundTag` |
+| `part_count`, `parts` | Имя, размер, SHA-256, известные разделы верхнего уровня (`sections`) и число остальных (`unknown_section_count`) каждой части; `summarize_xray_config` даёт имя и разделы, ревизию добавляет `to_diagnostic()` набора |
+| `sections`, `duplicate_sections` | Какие части содержат каждый известный раздел верхнего уровня; известные разделы, встречающиеся более чем в одной части |
+| `dns_tags`, `domain_strategies` | `dns.tag` после проверки формата и известные `routing.domainStrategy` из всех частей в порядке частей; скрытое значение — `None` на своей позиции |
+| `inbounds`, `outbounds` | Часть, индекс в своём списке (`index`), `tag` после проверки формата и известный `protocol` каждого элемента; `tag_known` и `protocol_known` показывают, было ли строковое поле в файле |
+| `duplicate_inbound_tags`, `duplicate_outbound_tags`, `duplicate_balancer_tags` | Теги, встречающиеся более одного раза, после проверки формата; повтор считается по исходным значениям |
+| `rule_count`, `rules` | Для каждого правила: часть, индекс, известный `type` с `type_known`, ссылки `inboundTag` после проверки формата и их разрешимость, назначение `outbound`/`balancer`/`both`/`none` с тегом (`target_tag`, `target_tag_known`), разрешимостью и позицией цели (`target_position`), наличие `ruleTag`, число значений каждого известного поля условия (`conditions`) и число полей, которые декодер Xray не читает (`unknown_condition_count`) |
+| `balancers` | Часть, индекс, тег с `tag_known`, `selector` после проверки формата, число outbound с таким префиксом, `fallbackTag` с `fallback_known`, разрешимостью и позицией цели (`fallback_position`), известный тип `strategy` с `strategy_known` |
+| `observatory_subjects` | Селекторы `subjectSelector` разделов `observatory` и `burstObservatory` после проверки формата и число совпавших outbound |
+| `unsupported_paths` | Места частей, структура которых не поддержана сводкой: например `inbounds[1]` или `routing.rules[4].inboundTag`; пути собираются из фиксированных имён полей и индексов |
 
 Поля `inboundTag` правил и `selector` балансировщиков принимают массив строк либо строку с разделением по запятым, как `StringList` Xray. Пробелы и пустые элементы строковой формы сохраняются; запятые внутри элементов массива не разделяются. `subjectSelector` разделов `observatory` и `burstObservatory` принимает только массив строк. Общий декодер `decode_string_list(value)` возвращает кортеж строк либо `None` для значения, которое декодер Xray отклонит; перевод действующего раздела `routing` в группы условий и политику маршрутизации описан в [импорте правил](routing-import.md).
 
 Тот же проход собирает значения списков доменов и адресов правил (`domain`, `domains`, `ip`, `source`, `sourceIP`, `localIP`), серверов DNS (`domains`, `expectIPs`, `expectedIPs`, `unexpectedIPs`) и ключи `dns.hosts`: `rule_list_values(parts)` и `XrayConfigSet.rule_list_values()` возвращают их как `RuleListValue` для доверенного кода с выбором алиасов `source`/`sourceIP` и `expectIPs`/`expectedIPs` по правилам Xray, например для [разбора ссылок на наборы геобаз](installation.md#ссылки-на-наборы-из-конфигурации-xray). В сводку эти значения не входят; поле списка другого типа, элемент не строка, `servers` не список, сервер не объект и не строка, `hosts` не объект отмечаются в `unsupported_paths`.
 
-Ссылка `inboundTag` считается разрешённой, если тег есть среди inbound или равен `dns.tag`. Селекторы балансировщиков и наблюдателя сопоставляются по префиксу тега outbound, как в Xray; пустой селектор совпадает со всеми тегами. Правило с `outboundTag` и `balancerTag` одновременно или без обоих отмечается как `both`/`none` с неразрешённым назначением; сводка не выбирает одно из них. Объединение разделов между частями не моделируется, установленный Xray для проверки не вызывается.
+Ссылка `inboundTag` считается разрешённой, если тег есть среди inbound или равен `dns.tag`. Селекторы балансировщиков и наблюдателя сопоставляются по префиксу тега outbound, как в Xray; пустой селектор совпадает со всеми тегами. Правило с `outboundTag` и `balancerTag` одновременно или без обоих отмечается как `both`/`none` с неразрешённым назначением; сводка не выбирает одно из них. Разрешимость ссылок, совпадения селекторов и повторы считаются по исходным тегам до проверки формата. Объединение разделов между частями не моделируется, установленный Xray для проверки не вызывается.
+
+Позиция элемента — часть и индекс в своём списке: `inbounds[i]`, `outbounds[i]` или `routing.balancers[i]` той части, как в путях `unsupported_paths`. `target_position` правила и `fallback_position` балансировщика заполняются, только если среди всех частей ровно один outbound (для назначения `outbound` и `fallbackTag`) или ровно один балансировщик (для назначения `balancer`) носит этот тег; при отсутствии или повторе тега позиция — `None`, хотя `target_resolved` и `fallback_resolved` при повторе остаются истинными. По позиции можно отличить два элемента со скрытыми тегами и определить, какой из них выбран правилом или `fallbackTag`.
 
 В сводку входят только теги, протоколы, имена полей и счётчики. Значения `settings` и `streamSettings`, домены, адреса, порты, пути, пароли, UUID, ключи REALITY и теги правил `ruleTag` в неё не попадают; `repr()` набора показывает только число частей. Структура, не соответствующая ожидаемой (раздел не список, элемент не объект, поле другого типа), отмечается в `unsupported_paths`, а не исправляется и не прерывает чтение.
+
+## Безопасный вывод сводки
+
+Теги, селекторы, имена полей и разделов задаёт пользователь, поэтому сводка и [импорт правил](routing-import.md#безопасный-вывод) выводят их по одному правилу из общего модуля `keenvpn.domain.xray_identifiers`:
+
+| Значение | Проверка | Функция |
+|---|---|---|
+| Теги inbound, outbound и балансировщиков, `dns.tag`, `inboundTag`, `outboundTag`, `balancerTag`, `fallbackTag`, списки повторов | Формат технического идентификатора: до 128 символов из букв ASCII, цифр, `_`, `+` и `-`, начиная с буквы или цифры; всё, что разбирается как IP-адрес, скрывается | `safe_identifier` |
+| `selector` балансировщика, `subjectSelector` | То же; пустой селектор показывается пустым | `safe_selector` |
+| `strategy.type` | Известные стратегии `random`, `leastPing`, `roundRobin`, `leastLoad` без учёта регистра | `safe_strategy` |
+| `routing.domainStrategy` | `AsIs`, `IPIfNonMatch`, `IPOnDemand` без учёта регистра | `safe_domain_strategy` |
+| `protocol` inbound | Ключи загрузчика inbound: `tunnel`, `dokodemo-door`, `http`, `shadowsocks`, `mixed`, `socks`, `vless`, `vmess`, `trojan`, `wireguard`, `hysteria`, `tun`; без учёта регистра | `safe_inbound_protocol` |
+| `protocol` outbound | Ключи загрузчика outbound: `block`, `blackhole`, `loopback`, `direct`, `freedom`, `http`, `shadowsocks`, `socks`, `vless`, `vmess`, `trojan`, `hysteria`, `dns`, `wireguard`; без учёта регистра | `safe_outbound_protocol` |
+| `type` правила | Только `field` | `safe_rule_type` |
+| Имена полей условий правила | Только поля `parseFieldRule` (`XRAY_RULE_CONDITION_FIELDS`), остальные учитываются числом | `known_condition_field` |
+| Разделы верхнего уровня части | Только разделы структуры `Config` (`XRAY_SECTIONS`): `log`, `api`, `dns`, `routing`, `policy`, `inbounds`, `outbounds`, `transport`, `stats`, `reverse`, `fakeDns`, `metrics`, `observatory`, `burstObservatory`, `version`; остальные учитываются числом | `known_section` |
+
+Списки известных значений сверены с исходниками Xray-core тега `XRAY_VERSION` (`v26.3.27`): `infra/conf/xray.go`, `router.go`, `loader.go`. Сравнение без учёта регистра повторяет загрузчик Xray и выполняется только для строк ASCII: строка с не-ASCII символами скрывается, даже если приведение регистра свело бы её к известному имени (например, знак Кельвина U+212A в `soc\u212As`). Имена разделов и полей сравниваются точно, хотя JSON-декодер Go принял бы их и в другом регистре, — такой раздел или поле сводка считает неизвестным. Любое другое значение `domainStrategy` Xray трактует как `AsIs`; сводка его скрывает, а не подменяет.
+
+Скрытое значение заменяется на `None`, а признак `*_known` (`tag_known`, `protocol_known`, `type_known`, `target_tag_known`, `fallback_known`, `strategy_known`) показывает, что строковое значение в файле было: `known=False` означает отсутствие или поле другого типа, `known=True` с `None` — скрытое значение. В списках скрытый элемент стоит на своей позиции, поэтому длина и порядок сохраняются. Исходные значения остаются доверенному коду в `export()` частей и `rule_list_values()`.
+
+Остаточное ограничение: проверка формата не отличает секрет, составленный только из букв ASCII, цифр, `_`, `+` и `-`, от тега — такой секрет будет показан как тег, поэтому секреты в тегах, селекторах и ключах `xkeen.json` хранить не следует. Домены, адреса, пароли и пути в сводку не входят независимо от этой проверки.
 
 | Код `XrayConfigErrorCode` | Причина |
 |---|---|
@@ -59,7 +83,7 @@
 | `unsupported` | Объект `xkeen` или поле другого типа |
 | `unexpected` | Строка с другим значением |
 
-XKeen считает включённым только строковое `"on"`; модель не подменяет другие значения выключенным состоянием, а показывает их статус. `keenvpn.adapters.xkeen_files.xkeen_settings_from_bytes(content)` создаёт модель из байтов файла под именем `xkeen.json`.
+XKeen считает включённым только строковое `"on"`; модель не подменяет другие значения выключенным состоянием, а показывает их статус. В `to_diagnostic()` имена разделов верхнего уровня и полей объекта `xkeen` показываются только в формате технического идентификатора (`safe_identifier` из [правила безопасного вывода](#безопасный-вывод-сводки)), остальные учитываются счётчиками `hidden_section_count` и `hidden_settings_key_count`; свойство `settings_keys` по-прежнему возвращает все имена доверенному коду. `keenvpn.adapters.xkeen_files.xkeen_settings_from_bytes(content)` создаёт модель из байтов файла под именем `xkeen.json`.
 
 ## Параметры init
 
@@ -120,7 +144,7 @@ XKeen считает включённым только строковое `"on"`
 Источники вызываются по одному разу в фиксированном порядке: части Xray, настройки, init, список исключённых портов, список перехватываемых портов, список исключённых адресов. После отказа или некорректного ответа следующие источники не читаются; частичного результата нет. Метод `read()` обработчика выполняет то же чтение и возвращает `ProxyConfigModels` (набор частей Xray и собранные настройки XKeen) для доверенного кода либо `ErrorDetail` с теми же кодами; его использует [чтение существующей установки](installation.md).
 
 ```python
-from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler
+from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler, XrayPositionView
 from keenvpn.domain.config_document import ConfigDocument
 from keenvpn.domain.xkeen_config import XKeenList, XKeenListName, XKeenSettings, parse_xkeen_init
 from keenvpn.domain.xray_config import XrayConfigSet
@@ -153,6 +177,7 @@ assert result.succeeded
 assert [part.name for part in result.data.xray.parts] == ["04_outbounds.json", "05_routing.json"]
 assert result.data.xray.outbounds[0].protocol == "trojan"
 assert result.data.xray.rules[0].target_resolved is True
+assert result.data.xray.rules[0].target_position == XrayPositionView("04_outbounds.json", 0)
 assert result.data.xkeen.settings.killswitch.value == "on"
 assert result.data.xkeen.port_53.port_exclude_entry is True
 assert "vpn.example.test" not in str(result.data.to_dict())
@@ -162,13 +187,13 @@ assert "vpn.example.test" not in str(result.data.to_dict())
 
 | Поле | Содержимое |
 |---|---|
-| `xray` | `XrayConfigView`: те же поля, что в сводке набора частей; `rules[].conditions` — кортеж `XrayConditionView(key, value_count)`, `sections` — кортеж `XraySectionView(name, parts)` |
-| `xkeen.settings` | `XKeenSettingsView`: имя, размер, SHA-256, разделы, `has_xkeen_section`, `settings_keys`, `killswitch` |
+| `xray` | `XrayConfigView`: те же поля, что в сводке набора частей; `parts` — кортеж `XrayPartView` с `unknown_section_count`, `inbounds`/`outbounds` — кортежи `XrayEndpointView(part, index, tag_known, tag, protocol_known, protocol)`, `rules[].conditions` — кортеж `XrayConditionView(key, value_count)`, `rules[].target_position` и `balancers[].fallback_position` — `XrayPositionView(part, index)` либо `None`, `sections` — кортеж `XraySectionView(name, parts)` |
+| `xkeen.settings` | `XKeenSettingsView`: имя, размер, SHA-256, разделы после проверки формата и `hidden_section_count`, `has_xkeen_section`, `settings_keys` после проверки формата и `hidden_settings_key_count`, `killswitch` |
 | `xkeen.init` | `XKeenInitView`: счётчики, `duplicate_names`, `flags` — кортеж `XKeenInitFlagView(name, status, value, indented_count)` |
 | `xkeen.port_exclude`, `xkeen.port_proxying`, `xkeen.ip_exclude` | `XKeenListView` со счётчиками строк и элементов |
 | `xkeen.port_53` | `Port53View`: порт, четыре признака записей и флаги `proxy_dns`, `proxy_router` |
 
-Имена файлов, теги, протоколы и имена разделов — технические идентификаторы установки. Домены, адреса, порты слушателей, пути, пароли, теги правил, значения параметров init и записи списков в представление не входят; модели источников недостижимы из результата. `to_dict()` возвращает JSON-совместимый словарь (`sections`, `conditions` и `flags` — словари по именам), представление одного результата не читает источники повторно.
+Имена файлов проверяет `valid_document_name`; теги, протоколы, стратегии, имена разделов и ключи `xkeen.json` — значения из файлов, а не доверенные идентификаторы: они показываются только после проверки формата или по списку известных значений Xray по [правилу безопасного вывода](#безопасный-вывод-сводки), скрытое значение — `None` с признаком `*_known`. Домены, адреса, порты слушателей, пути, пароли, теги правил, значения параметров init и записи списков в представление не входят; модели источников недостижимы из результата. `to_dict()` возвращает JSON-совместимый словарь (`sections`, `conditions` и `flags` — словари по именам, позиции — словари `{part, index}`), представление одного результата не читает источники повторно.
 
 | Ситуация | Категория и код |
 |---|---|
@@ -191,9 +216,10 @@ assert "vpn.example.test" not in str(result.data.to_dict())
 ```sh
 python3 -I -S -B -m unittest discover -s tests -p test_config_document.py -v
 python3 -I -S -B -m unittest discover -s tests -p test_xray_config.py -v
+python3 -I -S -B -m unittest discover -s tests -p test_xray_identifiers.py -v
 python3 -I -S -B -m unittest discover -s tests -p test_xkeen_config.py -v
 python3 -I -S -B -m unittest discover -s tests -p test_xkeen_files.py -v
 python3 -I -S -B -m unittest discover -s tests -p test_application_proxy_config.py -v
 ```
 
-Тесты используют искусственные части, синтетический текст init и [обезличенный снимок](../tests/fixtures/router_snapshot/README.md), из которого `tests/support/snapshot.py` собирает модели и управляемые источники; SHA-256 частей Xray совпадают с `manifest.json` снимка. Проверяются строгий JSON с комментариями и без, ссылки между тегами, неподдержанные структуры, повторы и неподдержанный синтаксис init, разбор списков, факты по порту 53, отказ каждого источника, отсутствие секретов в результатах и отсутствие терминала, файлов, сети и процессов во время сценария. Роутер и сеть не требуются.
+Тесты используют искусственные части, синтетический текст init и [обезличенный снимок](../tests/fixtures/router_snapshot/README.md), из которого `tests/support/snapshot.py` собирает модели и управляемые источники; SHA-256 частей Xray совпадают с `manifest.json` снимка. Проверяются строгий JSON с комментариями и без, ссылки между тегами, неподдержанные структуры, повторы и неподдержанный синтаксис init, разбор списков, факты по порту 53, отказ каждого источника, отсутствие секретов в результатах, скрытие искусственных небезопасных тегов, протоколов, стратегий и имён полей (URI с паролем, адреса, домен, путь, userinfo, управляющие символы, не-ASCII, строка длиннее 128 символов) с признаками `*_known` и позициями, списки известных значений Xray и отсутствие терминала, файлов, сети и процессов во время сценария. Роутер и сеть не требуются.

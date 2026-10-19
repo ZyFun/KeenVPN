@@ -16,7 +16,7 @@ from keenvpn.domain.xkeen_config import (
     validate_xkeen_init, validate_xkeen_list, validate_xkeen_settings,
 )
 from tests.support.isolation import forbid_external_effects
-from tests.support.privacy import reachable
+from tests.support.privacy import UNSAFE_MARKERS, reachable, unsafe_xkeen_settings
 from tests.support.snapshot import snapshot_xkeen_init, snapshot_xkeen_list, snapshot_xkeen_settings
 
 
@@ -105,10 +105,30 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(diagnostic["has_xkeen_section"])
         self.assertEqual(diagnostic["sections"], ["xkeen"])
         self.assertEqual(diagnostic["killswitch"], {"status": "present", "value": "on"})
-        self.assertEqual(set(diagnostic), {"name", "size", "sha256", "sections", "has_xkeen_section", "settings_keys", "killswitch"})
+        self.assertEqual(set(diagnostic), {
+            "name", "size", "sha256", "sections", "hidden_section_count", "has_xkeen_section", "settings_keys",
+            "hidden_settings_key_count", "killswitch",
+        })
+        self.assertEqual((diagnostic["hidden_section_count"], diagnostic["hidden_settings_key_count"]), (0, 0))
         self.assertNotIn(PRIVATE, json.dumps(diagnostic) + repr(model))
         self.assertEqual(repr(model), f"XKeenSettings(size={model.document.size})")
         self.assertEqual(settings({"xkeen": []}).settings_keys, ())
+        validate_xkeen_settings(model)
+
+    def test_unsafe_settings_keys_and_sections_are_counted_not_shown(self):
+        model = unsafe_xkeen_settings()
+        with forbid_external_effects():
+            diagnostic = model.to_diagnostic()
+        text = json.dumps(diagnostic, ensure_ascii=False) + repr(model)
+        for marker in UNSAFE_MARKERS:
+            self.assertNotIn(marker, text)
+        self.assertEqual((diagnostic["sections"], diagnostic["hidden_section_count"]), (["xkeen"], 1))
+        self.assertEqual(
+            (diagnostic["settings_keys"], diagnostic["hidden_settings_key_count"]), (["killswitch", "verify_downloads"], 2),
+        )
+        self.assertEqual(diagnostic["killswitch"], {"status": "present", "value": "on"})
+        # Исходные ключи остаются доверенному коду.
+        self.assertEqual(len(model.settings_keys), 4)
         validate_xkeen_settings(model)
 
     def test_settings_require_expected_document_name(self):

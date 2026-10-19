@@ -3,21 +3,31 @@
 Это модель чтения существующей установки, а не генератор или валидатор
 конфигурации: генерация, проверка установленным Xray и пробы принадлежат
 адаптеру движка. Сводка извлекает только теги, протоколы, имена полей и
-счётчики. Значения `settings`, `streamSettings`, доменов, адресов, путей,
-паролей и теги правил `ruleTag` в неё не попадают. Семантика объединения
-нескольких файлов Xray не моделируется: сводка лишь показывает, какие части
-содержат каждый раздел. Значения списков доменов и адресов правил и DNS
-доступны доверенному коду отдельно через `rule_list_values`: по ним
-разбираются ссылки на наборы геобаз, в сводку они не входят.
+счётчики, причём строки из файлов выводятся по правилу `xray_identifiers`,
+общему с импортом правил: теги и селекторы — после проверки формата,
+протоколы, стратегии, `type` правила, имена полей условий и разделов — только
+из списков известных значений Xray; скрытое значение заменяется на `None`,
+признаки `*_known` сохраняют факт его наличия, а позиция (часть и индекс)
+позволяет отличить элементы со скрытыми тегами. Значения `settings`,
+`streamSettings`, доменов, адресов, путей, паролей и теги правил `ruleTag` в
+сводку не попадают. Семантика объединения нескольких файлов Xray не
+моделируется: сводка лишь показывает, какие части содержат каждый раздел.
+Значения списков доменов и адресов правил и DNS доступны доверенному коду
+отдельно через `rule_list_values`: по ним разбираются ссылки на наборы геобаз,
+в сводку они не входят.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import NoReturn
 
 from keenvpn.domain.config_document import ConfigDocument, validate_config_document
 from keenvpn.domain.routing import ConditionFamily
+from keenvpn.domain.xray_identifiers import (
+    known_condition_field, known_section, safe_domain_strategy, safe_identifier, safe_inbound_protocol,
+    safe_outbound_protocol, safe_rule_type, safe_selector, safe_strategy,
+)
 
 
 _RULE_SERVICE_KEYS = frozenset({"type", "ruleTag", "inboundTag", "outboundTag", "balancerTag"})
@@ -153,6 +163,7 @@ class _Summary:
     """Один проход по частям: заполняет сводку и перечисляет неподдержанные места."""
 
     def __init__(self) -> None:
+        self.parts: list[dict[str, object]] = []
         self.sections: dict[str, list[str]] = {}
         self.inbounds: list[dict[str, object]] = []
         self.outbounds: list[dict[str, object]] = []
@@ -226,13 +237,17 @@ class _Summary:
         """Пройти разделы части в порядке документа; неизвестные разделы только учитываются."""
         document = part.export()
         name = part.name
+        known = [section for section in document if known_section(section)]
+        self.parts.append({"name": name, "sections": known, "unknown_section_count": len(document) - len(known)})
         for section, value in document.items():
-            self.sections.setdefault(section, []).append(name)
+            if known_section(section):
+                self.sections.setdefault(section, []).append(name)
             if section in ("inbounds", "outbounds"):
                 target = self.inbounds if section == "inbounds" else self.outbounds
-                for _index, path, item in self.objects(name, section, value):
+                for index, path, item in self.objects(name, section, value):
                     target.append({
                         "part": name,
+                        "index": index,
                         "tag": self.string_field(name, path, item, "tag"),
                         "protocol": self.string_field(name, path, item, "protocol"),
                     })
@@ -295,9 +310,10 @@ class _Summary:
             for index, path, rule in self.objects(name, "routing.rules", routing["rules"]):
                 self.add_rule(name, index, path, rule)
         if "balancers" in routing:
-            for _index, path, balancer in self.objects(name, "routing.balancers", routing["balancers"]):
+            for index, path, balancer in self.objects(name, "routing.balancers", routing["balancers"]):
                 entry = {
                     "part": name,
+                    "index": index,
                     "tag": self.string_field(name, path, balancer, "tag"),
                     "selector": self.string_list(name, path, balancer, "selector", allow_string=True),
                     "fallback_tag": self.string_field(name, path, balancer, "fallbackTag"),
@@ -344,52 +360,87 @@ class _Summary:
         })
 
     def resolve(self) -> dict[str, object]:
-        """Сопоставить ссылки между тегами и собрать JSON-совместимую сводку."""
+        """Сопоставить ссылки между тегами по исходным значениям и собрать безопасную JSON-совместимую сводку.
+
+        Разрешимость ссылок, совпадения селекторов и повторы считаются по
+        исходным тегам; в вывод теги попадают только после проверки формата,
+        а протоколы, стратегии и `type` — только из списков известных значений.
+        Позиция цели ссылки указывается, только если среди всех частей ровно
+        один outbound или балансировщик носит этот тег.
+        """
         inbound_tags = [item["tag"] for item in self.inbounds if item["tag"] is not None]
         outbound_tags = [item["tag"] for item in self.outbounds if item["tag"] is not None]
         balancer_tags = [item["tag"] for item in self.balancers if item["tag"] is not None]
         known_inbound = set(inbound_tags) | set(self.dns_tags)
-        known_outbound = set(outbound_tags)
-        known_balancer = set(balancer_tags)
+        outbound_positions = _unique_positions(self.outbounds)
+        balancer_positions = _unique_positions(self.balancers)
         rules = []
         for rule in self.rules:
             kind = rule["target_kind"]
+            tag = rule["target_tag"]
             if kind is RuleTargetKind.OUTBOUND:
-                resolved = rule["target_tag"] in known_outbound
+                resolved = tag in outbound_positions
+                position = outbound_positions.get(tag)
             elif kind is RuleTargetKind.BALANCER:
-                resolved = rule["target_tag"] in known_balancer
+                resolved = tag in balancer_positions
+                position = balancer_positions.get(tag)
             else:
-                resolved = False
+                resolved, position = False, None
+            conditions = rule["conditions"]
             rules.append({
-                **rule,
+                "part": rule["part"],
+                "index": rule["index"],
+                "type_known": rule["type"] is not None,
+                "type": safe_rule_type(rule["type"]),
+                "inbound_tags": [safe_identifier(item) for item in rule["inbound_tags"]],
+                "inbound_tags_resolved": all(item in known_inbound for item in rule["inbound_tags"]),
                 "target_kind": kind.value,
-                "inbound_tags_resolved": all(tag in known_inbound for tag in rule["inbound_tags"]),
+                "target_tag_known": tag is not None,
+                "target_tag": safe_identifier(tag),
                 "target_resolved": resolved,
+                "target_position": position,
+                "has_rule_tag": rule["has_rule_tag"],
+                "conditions": {key: count for key, count in conditions.items() if known_condition_field(key)},
+                "unknown_condition_count": sum(not known_condition_field(key) for key in conditions),
             })
         balancers = [
             {
-                **balancer,
+                "part": balancer["part"],
+                "index": balancer["index"],
+                "tag_known": balancer["tag"] is not None,
+                "tag": safe_identifier(balancer["tag"]),
+                "selector": [safe_selector(item) for item in balancer["selector"]],
                 "selector_match_count": _prefix_matches(balancer["selector"], outbound_tags),
+                "fallback_known": balancer["fallback_tag"] is not None,
+                "fallback_tag": safe_identifier(balancer["fallback_tag"]),
                 "fallback_resolved": (
-                    None if balancer["fallback_tag"] is None else balancer["fallback_tag"] in known_outbound
+                    None if balancer["fallback_tag"] is None else balancer["fallback_tag"] in outbound_positions
                 ),
+                "fallback_position": outbound_positions.get(balancer["fallback_tag"]),
+                "strategy_known": balancer["strategy"] is not None,
+                "strategy": safe_strategy(balancer["strategy"]),
             }
             for balancer in self.balancers
         ]
         observatory = [
-            {**subject, "match_count": _prefix_matches([subject["selector"]], outbound_tags)}
+            {
+                **subject,
+                "selector": safe_selector(subject["selector"]),
+                "match_count": _prefix_matches([subject["selector"]], outbound_tags),
+            }
             for subject in self.observatory
         ]
         return {
+            "parts": [dict(item) for item in self.parts],
             "sections": {name: list(parts) for name, parts in self.sections.items()},
             "duplicate_sections": [name for name, parts in self.sections.items() if len(parts) > 1],
-            "dns_tags": list(self.dns_tags),
-            "domain_strategies": list(self.domain_strategies),
-            "inbounds": [dict(item) for item in self.inbounds],
-            "outbounds": [dict(item) for item in self.outbounds],
-            "duplicate_inbound_tags": _duplicates(inbound_tags),
-            "duplicate_outbound_tags": _duplicates(outbound_tags),
-            "duplicate_balancer_tags": _duplicates(balancer_tags),
+            "dns_tags": [safe_identifier(tag) for tag in self.dns_tags],
+            "domain_strategies": [safe_domain_strategy(strategy) for strategy in self.domain_strategies],
+            "inbounds": [_endpoint(item, safe_inbound_protocol) for item in self.inbounds],
+            "outbounds": [_endpoint(item, safe_outbound_protocol) for item in self.outbounds],
+            "duplicate_inbound_tags": [safe_identifier(tag) for tag in _duplicates(inbound_tags)],
+            "duplicate_outbound_tags": [safe_identifier(tag) for tag in _duplicates(outbound_tags)],
+            "duplicate_balancer_tags": [safe_identifier(tag) for tag in _duplicates(balancer_tags)],
             "rule_count": len(rules),
             "rules": rules,
             "balancers": balancers,
@@ -398,8 +449,39 @@ class _Summary:
         }
 
 
+def _unique_positions(items: list[dict[str, object]]) -> dict[object, dict[str, object] | None]:
+    """Позиция `{part, index}` для тега, который носит ровно один элемент; повтор тега даёт `None`.
+
+    Ключи словаря — все исходные теги, поэтому проверка разрешимости ссылки
+    по-прежнему считается по исходным значениям.
+    """
+    positions: dict[object, dict[str, object] | None] = {}
+    for item in items:
+        tag = item["tag"]
+        if tag is None:
+            continue
+        positions[tag] = None if tag in positions else {"part": item["part"], "index": item["index"]}
+    return positions
+
+
+def _endpoint(item: dict[str, object], safe_protocol: Callable[[object], str | None]) -> dict[str, object]:
+    """Inbound или outbound в безопасной форме: позиция, признаки наличия, тег и известный протокол."""
+    return {
+        "part": item["part"],
+        "index": item["index"],
+        "tag_known": item["tag"] is not None,
+        "tag": safe_identifier(item["tag"]),
+        "protocol_known": item["protocol"] is not None,
+        "protocol": safe_protocol(item["protocol"]),
+    }
+
+
 def summarize_xray_config(parts: tuple[ConfigDocument, ...]) -> dict[str, object]:
-    """Структурная сводка частей в их порядке без значений полей конфигурации."""
+    """Структурная сводка частей в их порядке без значений полей конфигурации.
+
+    `parts` содержит имя, известные разделы и число неизвестных разделов каждой
+    части; ревизии частей добавляет `XrayConfigSet.to_diagnostic()`.
+    """
     summary = _Summary()
     for part in parts:
         summary.add_part(part)
@@ -446,12 +528,14 @@ class XrayConfigSet:
         return tuple(part.name for part in self.parts)
 
     def to_diagnostic(self) -> dict[str, object]:
-        """Ревизии частей и структурная сводка без доменов, адресов, путей и паролей."""
-        return {
-            "part_count": len(self.parts),
-            "parts": [part.to_diagnostic() for part in self.parts],
-            **summarize_xray_config(self.parts),
-        }
+        """Ревизии частей и структурная сводка без доменов, адресов, путей и паролей.
+
+        Имена разделов части берутся из сводки: показываются только известные
+        разделы Xray, остальные учитываются числом.
+        """
+        summary = summarize_xray_config(self.parts)
+        parts = [{**part.to_diagnostic(), **entry} for part, entry in zip(self.parts, summary.pop("parts"))]
+        return {"part_count": len(self.parts), "parts": parts, **summary}
 
     def rule_list_values(self) -> tuple[RuleListValue, ...]:
         """Значения списков доменов и адресов для доверенного кода, не для вывода."""

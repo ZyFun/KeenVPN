@@ -50,7 +50,7 @@ JSON-декодер Go, которым Xray читает конфигураци�
 | `rule_not_object` | Элемент `routing.rules` не объект; снимок — его JSON |
 | `field_case_variant` | Неизвестное поле правила совпадает с полем Xray без учёта регистра |
 
-Группа с любой из этих причин, с неопределённым действием или с неизвестным значением доступна только для просмотра (`read_only`). Импортированные правила не помечаются служебными, не отключаются и не получают [название и идентификатор](routing-model.md#название-и-идентификатор-правила): признаки `protected` и `enabled`, `rule_id` и `name` остаются за доверенным кодом и метаданными менеджера.
+Группа с любой из этих причин, с неопределённым действием или с неизвестным значением доступна только для просмотра (`read_only`). Импортированные правила не помечаются служебными, не отключаются и не получают [название и идентификатор](routing-model.md#название-и-идентификатор-правила): признаки `protected` и `enabled`, `rule_id` и `name` остаются за доверенным кодом и метаданными менеджера; [привязка](#названия-и-идентификаторы-правил) записей метаданных к правилам выполняется отдельно и импорт не меняет.
 
 ## Значения списков
 
@@ -231,14 +231,115 @@ assert "example.test" not in str(result.data.to_dict())
 
 `KeyboardInterrupt` и `SystemExit` проходят наружу. Успех означает только перевод прочитанных частей в модель: он не подтверждает принятие конфигурации Xray, работу XKeen, kill-switch или VPN, не создаёт метаданные менеджера и не меняет роутер.
 
+## Названия и идентификаторы правил
+
+Название и стабильный идентификатор правила — [метаданные менеджера](manager-metadata.md#записи-правил), не поля Xray JSON. Импорт их не присваивает; модуль `keenvpn.domain.rule_binding` находит запись раздела `rules` для каждого правила схемы при повторном импорте, а прикладные сценарии `InspectRoutingRules` и `AssignRuleIdentifiers` (`keenvpn.application.routing_rules`) показывают правила с идентичностью и присваивают идентификаторы.
+
+### Семантический ключ и привязка
+
+`rule_key(rule)` строит `RuleKey(condition, value, action)` из правила модели: тип условия, каноническое значение в форме модели и действие. Позиция, группа, `ruleTag`, теги outbound и балансировщиков, идентификатор, название, состояние и защита правила в ключ не входят.
+
+| Условие | `condition` | `value` |
+|---|---|---|
+| `DomainCondition` | `domain` | режим и имя: `subdomains:example.test`, `exact:static.example.test`; имя уже нормализовано (IDNA, нижний регистр) |
+| `IPCondition` | `ip` | адрес или сеть в стандартной записи |
+| `GeoIPCondition`, `GeoSiteCondition` | `geoip`, `geosite` | имя файла базы и код набора: `geoip.dat:ru`; версия и хеш базы не входят |
+| `UnknownCondition` | `unknown` | семейство и исходный текст: `domain:regexp:^x` |
+| `UnsupportedRuleCondition` | `unsupported` | JSON-снимок полей правила с отсортированными ключами объектов на всех уровнях: перестановка полей в файле Xray ключ не меняет, порядок массивов и типы значений сохраняются; та же нормализация применяется к значению записи при сопоставлении |
+
+`bind_routing_scheme(scheme, records)` берёт правила всех групп схемы в порядке файла (`scheme_rules`): группа без определённого действия правил не даёт; при наличии политики это ровно её правила, а без политики, например при неоднозначном резерве балансировщика, правила групп остаются. Привязка линейна по числу правил и записей и ничего не выбирает по первому: правило и запись сопоставляются только когда их ключ единственный с обеих сторон. Поэтому привязка переживает перемещение, вставку и удаление соседних правил и перенос значения между группами с тем же действием, а ручная правка значения или действия вне менеджера отвязывает только это правило. Запись, не нашедшая правила, сохраняется в метаданных и считается отдельно; удаляет её только явное действие, которого в этой версии нет.
+
+| Причина (`BindingReason`) | У правила | У записи |
+|---|---|---|
+| `rule_duplicate` | ключ встречается среди правил больше одного раза; все такие правила без привязки, даже если запись есть | запись с таким ключом не привязана |
+| `record_duplicate` | ключ встречается среди записей больше одного раза; правило без привязки | обе записи не привязаны и сохраняются |
+| `record_missing` | записи с ключом правила нет: идентификатор ещё не присвоен | — |
+| `rule_missing` | — | правила с ключом записи нет: удалено или изменено вне менеджера |
+
+Результат `RuleBinding` содержит `rules` — кортеж `BoundRule(index, rule, record, reason)`, где привязанное правило несёт `rule_id` и `name` записи; `unbound_records` — записи без правила с причиной; `policy` — `RoutingPolicy` с идентичностью, если у схемы есть политика. `bind_rule_records(rules, records, policy)` делает то же для произвольного списка правил без идентичности. Повреждённый вход — `RuleBindingError` с кодами `invalid_binding_rules`, `invalid_binding_records`, `invalid_binding_scheme`, `invalid_rule_binding` без значений и чужой цепочки исключений. `to_diagnostic()` привязки показывает счётчики, по каждому правилу позицию, итог (`bound` либо причина) и диагностику правила, по каждой записи без правила — идентификатор, признак и длину названия и причину; названия и значения ключей не выводятся.
+
+### Прикладные сценарии
+
+`InspectRoutingRulesHandler(routing, store)` принимает обработчик `ImportRoutingSchemeHandler` и порт `ManagerMetadataStore`, читает схему его методом `read()` с тем же порядком и кодами отказов, один раз читает метаданные и ничего не записывает; `AssignRuleIdentifiersHandler(routing, store, rule_ids=new_rule_id)` после того же чтения присваивает идентификаторы правилам с причиной `record_missing` и пишет раздел `rules` один раз только при изменениях.
+
+```python
+import os
+import tempfile
+
+from keenvpn.adapters.manager_metadata_files import ManagerMetadataFiles
+from keenvpn.application.proxy_config import InspectProxyConfigHandler
+from keenvpn.application.routing_import import ImportRoutingSchemeHandler
+from keenvpn.application.routing_rules import (
+    AssignRuleIdentifiers, AssignRuleIdentifiersHandler, InspectRoutingRules, InspectRoutingRulesHandler,
+)
+from keenvpn.domain.config_document import ConfigDocument
+from keenvpn.domain.xkeen_config import XKeenList, XKeenListName, XKeenSettings, parse_xkeen_init
+from keenvpn.domain.xray_config import XrayConfigSet
+
+
+class FixedSources:
+    """Искусственные данные; реальные файлы читает адаптер роутера."""
+
+    def current_xray_config(self):
+        return XrayConfigSet((
+            ConfigDocument("04_outbounds.json", b'{"outbounds": [{"tag": "proxy-out", "protocol": "trojan"}, '
+                           b'{"tag": "direct", "protocol": "freedom"}]}'),
+            ConfigDocument("05_routing.json", b'{"routing": {"rules": [{"type": "field", "domain": ["domain:example.test"], '
+                           b'"outboundTag": "direct"}, {"type": "field", "network": "tcp,udp", "outboundTag": "proxy-out"}]}}'),
+        ))
+
+    def current_xkeen_settings(self):
+        return XKeenSettings(ConfigDocument("xkeen.json", b'{"xkeen": {"killswitch": "on"}}'))
+
+    def current_xkeen_init(self):
+        return parse_xkeen_init(b'start_auto="on"\nproxy_dns="off"\nproxy_router="off"\nipv6_support="on"\n')
+
+    def current_xkeen_list(self, name):
+        return XKeenList(name, b"53\n" if name is XKeenListName.PORT_EXCLUDE else b"")
+
+
+sources = FixedSources()
+routing = ImportRoutingSchemeHandler(InspectProxyConfigHandler(sources, sources, sources, sources))
+store = ManagerMetadataFiles(os.path.realpath(tempfile.mkdtemp()) + "/keenvpn")
+
+view = InspectRoutingRulesHandler(routing, store).execute(InspectRoutingRules()).data
+assert (view.metadata_present, view.rule_count, view.rules[0].binding) == (False, 1, "record_missing")
+assert store.read_metadata() is None  # Просмотр не создал файл.
+
+assign = AssignRuleIdentifiersHandler(routing, store)
+assert assign.execute(AssignRuleIdentifiers()).data.outcome == "created"
+assert assign.execute(AssignRuleIdentifiers()).data.outcome == "unchanged"
+view = InspectRoutingRulesHandler(routing, store).execute(InspectRoutingRules()).data
+rule = view.rules[0]
+assert (rule.binding, rule.has_id, rule.has_name, rule.part, rule.group_index, rule.offset) == ("bound", True, False, "05_routing.json", 0, 0)
+assert "example.test" not in str(view.to_dict())
+print(rule.rule_id == store.read_metadata().metadata.rules[0].rule_id)
+```
+
+`RoutingRulesView`:
+
+| Поле | Содержимое |
+|---|---|
+| `routing_part`, `metadata_present`, `scheme_read_only`, `policy_present` | Действующая часть, наличие файла метаданных, режим только для просмотра схемы и наличие политики |
+| `rule_count`, `bound_rule_count`, `named_rule_count`, `unbound_rule_count` | Число правил схемы, привязанных, с названием и без привязки |
+| `record_count`, `unbound_record_count` | Число записей раздела `rules` (`None`, если раздел не записан) и число записей без правила |
+| `rules` | Кортеж `RuleIdentityView`: `index` среди правил схемы, `part`, `group_index` правила Xray и `offset` внутри группы, `condition_type`, `action`, `read_only`, `has_id`, `rule_id`, `has_name`, `name_length`, `binding` (`bound` либо причина) |
+| `unbound_records` | Кортеж `UnboundRecordView`: `rule_id`, `has_name`, `name_length`, `reason` |
+
+`AssignRuleIdentifiers` возвращает `RuleIdentityAssignmentView(outcome, assigned_count, rules)`: `created` — записи добавлены и раздел записан, `unchanged` — присваивать нечего (без новых записей операция завершается до кодирования, поэтому допустимый компактный файл, чья форматированная копия превысила бы предел размера, повтор не блокирует) или кандидат совпал с файлом по каноническим байтам, записи не было; `rules` — представление после операции. Кандидат — прочитанные метаданные с дополненным разделом: размещение, неизвестные поля, прежние записи, в том числе без правила, сохраняются; новые записи идут после прежних в порядке правил. Ревизию в последний момент сверяет хранилище; ревизия, которую вернула запись, должна совпасть с SHA-256 кандидата. Домены, адреса, коды наборов, названия и ключи в представления не входят; идентификаторы показываются после проверки формата. Коды отказов перечислены в [описании прикладных сценариев](application.md#правила-с-названиями-и-идентификаторами). Просмотр не вызывает запись ни при каких данных, поэтому первое подключение к действующей установке не создаёт раздел `rules` и не пишет метаданные, пока идентификаторы не присвоены явно.
+
 ## Локальная проверка
 
 ```sh
 python3 -I -S -B -m unittest discover -s tests -p test_routing_import.py -v
 python3 -I -S -B -m unittest discover -s tests -p test_application_routing_import.py -v
+python3 -I -S -B -m unittest discover -s tests -p test_rule_binding.py -v
+python3 -I -S -B -m unittest discover -s tests -p test_application_routing_rules.py -v
 python3 -I -S -B -m unittest discover -s tests -p test_import_zero_diff.py -v
 ```
 
 Тесты используют [обезличенный снимок](../tests/fixtures/router_snapshot/README.md) и искусственные части. Проверяются порядок и состав групп снимка, неизменность байтов частей, перевод каждого вида значения, строковая форма `StringList`, причины уровня группы и назначения, замена `routing` и outbound между частями со сверкой с прямой реализацией `Override`, линейная стоимость объединения outbound по числу выполненных строк, формы финального правила, повторная валидация после подмены полей, линейная стоимость сопоставления, отсутствие секретов в результатах и отсутствие терминала, файлов, сети и процессов во время импорта. Роутер и сеть не требуются.
+
+`test_rule_binding.py` проверяет ключ каждого типа условия, его независимость от идентичности, состояния и метаданных базы, привязку при перемещении, вставке, удалении и перегруппировке правил в искусственных частях Xray, отвязку одного правила после ручной правки, дубли ключей с обеих сторон без выбора по первому, записи без правила, линейную стоимость по числу выполненных строк, отказы на повреждённый вход и отсутствие названий и значений в выводе. `test_application_routing_rules.py` проверяет оба сценария на снимке и хранилище в памяти: просмотр без записи и без создания файла, позиции по группам схемы, привязку записей с названиями, присвоение всем правилам и только недостающим с сохранением прежних записей, повтор без записи, неканонический файл без перезаписи, отказы фабрики и каждого отказа хранилища, неподтверждённую запись, внешнюю правку перед сверкой ревизии, приватность результатов, а с настоящим файловым хранилищем во временном каталоге — что просмотр не создаёт каталог и файл, а повтор присвоения не меняет inode, время изменения и байты.
 
 `test_import_zero_diff.py` выполняет импорт правил вместе с чтением установки и первичным импортом размещения и проверяет, что повторные запуски дают то же представление и не меняют байты частей Xray; подробности — в [локальной проверке чтения установки](installation.md#локальная-проверка).

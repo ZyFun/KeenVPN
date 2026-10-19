@@ -32,9 +32,10 @@ from keenvpn.application.ports import (
 from keenvpn.domain import manager_metadata as domain
 from keenvpn.domain.manager_metadata import (
     MAX_LIMIT_VALUE, MAX_METADATA_SIZE, METADATA_FORMAT, HistoryLimits, ManagerMetadata, ManagerMetadataErrorCode,
-    RoleLocation, StoragePlacement, StorageRoles, StorageVariant, StoredManagerMetadata, TrackedValue, UnknownFields,
-    ValueState, decode_manager_metadata, encode_manager_metadata, metadata_revision,
+    RoleLocation, RuleKey, RuleRecord, StoragePlacement, StorageRoles, StorageVariant, StoredManagerMetadata,
+    TrackedValue, UnknownFields, ValueState, decode_manager_metadata, encode_manager_metadata, metadata_revision,
 )
+from keenvpn.domain.routing import RoutingAction
 from tests.support import in_memory
 from tests.support.in_memory import (
     AdapterSetupError, InMemoryManagerMetadataStore, InMemoryStoragePlacementSource, UnconfiguredResponseError,
@@ -49,13 +50,15 @@ BACKUP_ID = "0000abcd-0000-4000-8000-00000000000c"
 DATA_PATH = "/tmp/mnt/test-data/keenvpn-private"
 HISTORY_PATH = "/tmp/mnt/test-history/keenvpn-history"
 BACKUP_PATH = "/tmp/mnt/test-backup/keenvpn-copies"
+RULE_ID = "0000abcd-0000-4000-8000-0000000000e1"
 PRIVATE_MARKERS = (
     "0000abcd", "/tmp/mnt", "test-data", "test-history", "test-backup", "keenvpn-private", "keenvpn-history",
-    "keenvpn-copies", "private-note", "future-section", "secret-extra", "Искусственный",
+    "keenvpn-copies", "private-note", "future-section", "secret-extra", "Искусственный", "private-rule-name",
+    "private.example", "subdomains:",
 )
 PRIVATE_TYPES = (
     ManagerMetadata, StoredManagerMetadata, StoragePlacement, StorageRoles, RoleLocation, HistoryLimits, TrackedValue,
-    UnknownFields, BaseException, bytes,
+    UnknownFields, RuleRecord, RuleKey, BaseException, bytes,
 )
 KNOWN, UNKNOWN, ABSENT = ValueState.KNOWN, ValueState.UNKNOWN, ValueState.ABSENT
 CATEGORIES = {
@@ -277,6 +280,31 @@ class ImportStoragePlacementTests(ScenarioCase):
         repeated = self.run_import()
         self.assertEqual(repeated.data.outcome, "unchanged")
         self.assertEqual(len(self.store.write_calls), 1)
+
+    def test_rules_section_survives_adding_storage_to_existing_file(self):
+        # Регрессия: кандидат собирался только из storage и неизвестных полей, известный раздел rules терялся.
+        record = RuleRecord(
+            RULE_ID, "private-rule-name", RuleKey("domain", "subdomains:private.example.test", RoutingAction.VPN),
+            UnknownFields({"future": 1}),
+        )
+        original = encode_manager_metadata(ManagerMetadata(None, UnknownFields({"future-section": {"a": 1}}), rules=(record,)))
+        self.store.content = original
+        result = self.run_import()
+        self.assertTrue(result.succeeded)
+        self.assertEqual(result.data.outcome, StoragePlacementImportOutcome.CREATED.value)
+        stored = decode_manager_metadata(self.store.content).metadata
+        self.assertEqual(stored.rules, (record,))
+        self.assertEqual(stored.storage, placement())
+        self.assertEqual(stored.extra.names, ("future-section",))
+        self.assertEqual(json.loads(self.store.content)["rules"], json.loads(original)["rules"])
+        self.assertEqual(result.data.metadata.to_dict()["rules"], {"record_count": 1, "named_record_count": 1})
+        self.assertEqual(result.data.metadata.unknown_field_count, 2)
+        self.assert_private(result)
+        # Повтор: раздел storage совпадает, записи нет, rules нетронуты.
+        again = self.run_import()
+        self.assertEqual(again.data.outcome, StoragePlacementImportOutcome.UNCHANGED.value)
+        self.assertEqual(self.store.publications, 1)
+        self.assertEqual(decode_manager_metadata(self.store.content).metadata.rules, (record,))
 
     def test_corrupted_file_or_other_schema_version_is_not_overwritten(self):
         cases = {
@@ -651,6 +679,7 @@ class InspectManagerMetadataTests(ScenarioCase):
                     "retention_state": "known", "retention_seconds": 30 * 24 * 3600,
                 },
             },
+            "rules": None,
             "unknown_field_count": 1,
         })
         self.assertEqual(self.store.write_calls, ())
@@ -660,7 +689,7 @@ class InspectManagerMetadataTests(ScenarioCase):
         self.store.content = stored_bytes(None, **{"future-section": {"a": 1}, "": 2, "private-note": "x"})
         result = self.run_inspect()
         self.assertEqual(result.to_dict()["data"]["metadata"], {
-            "schema_version": 1, "storage": None, "unknown_field_count": 3,
+            "schema_version": 1, "storage": None, "rules": None, "unknown_field_count": 3,
         })
         self.assert_private(result)
 

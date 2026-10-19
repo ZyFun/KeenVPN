@@ -132,6 +132,8 @@ LITERAL_PAIRS = sorted({
     ("invalid_source_data", "invalid_stored_metadata"),
     ("source_failed", "metadata_write_failed"),
     ("source_failed", "metadata_write_unconfirmed"),
+    ("invalid_source_data", "rule_binding_failed"),
+    ("invalid_source_data", "rule_id_generation_failed"),
 })
 """Пары «категория, код», которые сценарии задают литералами; снимок неизменности кодов и категорий."""
 

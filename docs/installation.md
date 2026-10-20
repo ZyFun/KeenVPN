@@ -142,10 +142,12 @@ assert result.data.proxy.xkeen.port_53.port_exclude_entry is True
 assert [item.file_status for item in result.data.geodata.references] == ["present", "missing"]
 assert result.data.geodata.files[0].version == "fixture-release"
 assert result.data.xray_process.state == "running"
+assert result.data.checks.active_network_check is False
+assert [item.status.value for item in result.data.checks.items] == ["passed", "failed", "not_checked"]
 assert "geoip:ru" not in str(result.data.to_dict())
 ```
 
-При успехе `data` — `InstallationView` с четырьмя частями:
+При успехе `data` — `InstallationView` с четырьмя областями и проверками по ним:
 
 | Поле | Содержимое |
 |---|---|
@@ -153,6 +155,7 @@ assert "geoip:ru" not in str(result.data.to_dict())
 | `proxy` | `ProxyConfigView` — те же поля, что у [чтения конфигурации Xray и XKeen](proxy-config.md#прикладной-сценарий) |
 | `geodata` | `GeoDataView`: `files` — кортеж `GeoDatabaseFileView` (имя, наличие, размер, SHA-256, `source_known`, безопасный источник, `version_known`, безопасная версия, `reference_count`, `set_count`); `references` — кортеж `GeoReferenceView` (часть, путь, семейство, `external`, имя файла или `None`, `file_status`, `negated`, `attribute_count`); `unsupported_references` — кортеж `UnsupportedGeoReferenceView`; счётчики `present_count`, `missing_count`, `extra_count`, `reference_count`, `resolved_count`, `unresolved_count` |
 | `xray_process` | `XrayProcessView`: `process_count`, `pids`, `ready_marker`, `state`, `consistent` |
+| `checks` | `ChecksView`: `active_network_check` — всегда `False`, `items` — кортеж `CheckView` (код, статус `CheckStatus`, признак сетевой проверки, код причины или `None`) из раздела [проверок сводки](#проверки-сводки) |
 
 Имена файлов, PID и идентификаторы роутера показываются; теги, протоколы, стратегии, имена разделов конфигурации Xray и ключи `xkeen.json` — только по [правилу безопасного вывода сводки](proxy-config.md#безопасный-вывод-сводки): после проверки формата или из списка известных значений Xray, иначе `None` с признаком `*_known`. Коды наборов геобаз, домены, адреса, пути, пароли, MAC и имена устройств в представление не входят, модели источников недостижимы из результата. Известные источник и версия базы показываются только в безопасной форме, описанной в разделе о файлах геобаз; вывод о способе обновления базы не делается. `to_dict()` возвращает JSON-совместимый словарь, представление одного результата не читает источники повторно.
 
@@ -169,6 +172,18 @@ assert "geoip:ru" not in str(result.data.to_dict())
 
 Текст и цепочка исключений источников в результат не попадают, `KeyboardInterrupt` и `SystemExit` проходят наружу. Успех означает только согласованное чтение переданных источников: он не подтверждает принятие конфигурации Xray, загрузку геобаз, работу XKeen, kill-switch, перехват DNS или VPN и не меняет роутер.
 
+## Проверки сводки
+
+Сводка — первый потребитель общего [словаря статусов проверок](application.md#статусы-проверок). Проверки строятся построителями `keenvpn.application.checks` по уже прочитанным моделям: новых чтений, сетевых проб и команд XKeen нет, порядок чтения и коды отказов сценария не менялись. Просмотр пассивен, поэтому `active_network_check` всегда `False`, а проверка с признаком `network` не может быть `passed` или `failed`. Отказ любого источника завершает сценарий кодом области без проверок: недоступный источник никогда не даёт «успешно».
+
+| Код проверки | `network` | Статус и причина |
+|---|---|---|
+| `xray_process_consistent` | нет | `passed` для `stopped` и `running`; `failed` с причиной `process_without_marker`, `marker_without_process` или `multiple_processes`. Подтверждает только согласованность наблюдения, не работу VPN |
+| `geodata_references_resolved` | нет | `not_checked` / `no_references` — ссылок на наборы нет; `failed` / `missing_files` — хотя бы одна ссылка ведёт к отсутствующему файлу; `failed` / `unsupported_references` — хотя бы одну ссылку загрузчик Xray отклонил бы; `unsupported` / `files_not_inventoried` — хотя бы одна ссылка ведёт к файлу, которого источник инвентаря не наблюдал; иначе `passed`. Отсутствующий файл важнее неподдержанной ссылки, та — важнее ненаблюдаемого файла |
+| `vpn_reachable` | да | всегда `not_checked` / `network_check_not_performed`: доступность VPN требует сетевой пробы, которую просмотр не выполняет |
+
+Коды наборов, имена файлов, PID и адреса в проверки не входят. Сопоставление по имени файла не подтверждает, что Xray загрузил базу и что набор существует внутри неё.
+
 ## Ошибки домена
 
 `GeoDataError` и `XrayProcessError` содержат машинный `code` и фиксированный текст без имён файлов, значений правил и вывода команд. Активное чужое исключение не сохраняется в `__context__` и `__cause__`.
@@ -181,10 +196,11 @@ python3 -I -S -B -m unittest discover -s tests -p test_geodata_files.py -v
 python3 -I -S -B -m unittest discover -s tests -p test_xray_process.py -v
 python3 -I -S -B -m unittest discover -s tests -p test_xkeen_runtime.py -v
 python3 -I -S -B -m unittest discover -s tests -p test_application_installation.py -v
+python3 -I -S -B -m unittest discover -s tests -p test_application_checks.py -v
 python3 -I -S -B -m unittest discover -s tests -p test_import_zero_diff.py -v
 ```
 
-Тесты используют [обезличенный снимок](../tests/fixtures/router_snapshot/README.md) для Keenetic, Xray и XKeen и искусственные значения для геобаз и процесса: в снимке нет файлов геобаз и состояния процессов, поэтому `tests/support/snapshot.py` даёт инвентарь с найденным `geoip.dat` неизвестной версии и отсутствующим `geosite.dat` и наблюдение с одним процессом и маркером. Проверяются разбор ссылок по правилам Xray, сопоставление с найденными, отсутствующими и неизвестными файлами, расхождение процесса и маркера, отказ каждого из двенадцати источников, повреждённые модели, отсутствие секретов в результатах и отсутствие терминала, файлов, сети и процессов во время сценария. Роутер и сеть не требуются.
+Тесты используют [обезличенный снимок](../tests/fixtures/router_snapshot/README.md) для Keenetic, Xray и XKeen и искусственные значения для геобаз и процесса: в снимке нет файлов геобаз и состояния процессов, поэтому `tests/support/snapshot.py` даёт инвентарь с найденным `geoip.dat` неизвестной версии и отсутствующим `geosite.dat` и наблюдение с одним процессом и маркером. Проверяются разбор ссылок по правилам Xray, сопоставление с найденными, отсутствующими и неизвестными файлами, расхождение процесса и маркера, отказ каждого из двенадцати источников, повреждённые модели, достижимость каждого из четырёх статусов проверок через сценарий и отсутствие проверок при отказе источника, отсутствие секретов в результатах и отсутствие терминала, файлов, сети и процессов во время сценария. Роутер и сеть не требуются.
 
 `test_import_zero_diff.py` проверяет, что импорт существующей установки меняет только собственные метаданные менеджера и повторяется без изменений. Тест выполняет подряд `InspectInstallation`, [`ImportRoutingScheme`](routing-import.md#прикладной-сценарий) и [`ImportStoragePlacement`](manager-metadata.md#прикладные-сценарии) на одних источниках: на снимке в памяти и на копии его файлов, разложенной по путям роутера во временном каталоге, с настоящим файловым хранилищем метаданных. Размещения хранилищ в снимке нет, его даёт искусственное `synthetic_storage_placement()`. За один запуск источники Keenetic, геобаз и процесса читаются по одному разу, источники Xray и XKeen — дважды: чтением установки и импортом правил.
 

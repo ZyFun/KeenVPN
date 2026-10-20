@@ -13,9 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.adapters.trojan_uri import TrojanLinkParser, TrojanURIErrorCode
 from keenvpn.application.connections import InspectConnectionLink, InspectConnectionLinkHandler, link_rejection_detail
 from keenvpn.application.contract import (
-    CATEGORY_NEXT_STEPS, CODE_NEXT_STEPS, CONTRACT_VERSION, NEXT_STEP_MESSAGES, ErrorCategory, ErrorCode, ErrorDetail,
-    NextStep, NextStepCode, OperationStatus, Result, check_contract_version, failed, invalid_command, next_step_for,
-    succeeded,
+    CATEGORY_NEXT_STEPS, CODE_NEXT_STEPS, CONTRACT_VERSION, NEXT_STEP_MESSAGES, CheckStatus, ErrorCategory, ErrorCode,
+    ErrorDetail, NextStep, NextStepCode, OperationStatus, Result, check_contract_version, failed, invalid_command,
+    next_step_for, succeeded,
 )
 from keenvpn.application.keenetic_policies import POLICIES_UNAVAILABLE
 from keenvpn.application.manager_metadata import InspectManagerMetadata, InspectManagerMetadataHandler
@@ -472,6 +472,8 @@ class ContractVersionSnapshotTests(unittest.TestCase):
             ],
         )
         self.assertEqual([status.value for status in OperationStatus], ["succeeded", "failed"])
+        # Словарь статусов проверок добавлен в версии контракта 1 как совместимое расширение внутри `data`.
+        self.assertEqual([status.value for status in CheckStatus], ["passed", "failed", "not_checked", "unsupported"])
 
     def test_success_payload_is_unchanged_and_json_round_trips(self):
         class View:

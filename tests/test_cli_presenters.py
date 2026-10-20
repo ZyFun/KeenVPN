@@ -11,6 +11,8 @@ from keenvpn.application.contract import (
 )
 from dataclasses import replace
 
+from keenvpn.application.checks import CHECK_STATUS_LABELS, VPN_REACHABLE_CHECK, XRAY_PROCESS_CHECK, CheckView, ChecksView
+from keenvpn.application.contract import CheckStatus
 from keenvpn.application.installation import GeoDatabaseFileView, InspectInstallation, InspectInstallationHandler
 from keenvpn.application.keenetic_state import InspectKeeneticState, InspectKeeneticStateHandler
 from keenvpn.application.manager_metadata import (
@@ -21,7 +23,7 @@ from keenvpn.application.routing_import import ImportRoutingScheme, ImportRoutin
 from keenvpn.interfaces.cli import presenters
 from keenvpn.interfaces.cli.presenters import (
     HIDDEN, MISSING, count, digest, file_name, flag, geo_source, geo_version, identifier, identifiers, interface_id,
-    known_value, optional_count, optional_digest, optional_file_name, optional_flag, optional_identifier, present_about, present_error, present_geodata, present_installation, present_keenetic_state,
+    check_status, known_value, optional_count, optional_digest, optional_file_name, optional_flag, optional_identifier, present_about, present_checks, present_error, present_geodata, present_installation, present_keenetic_state,
     present_manager_metadata, present_port53, present_proxy_summary, present_result, present_routing_scheme,
     present_xray_process, safe_text,
 )
@@ -109,8 +111,13 @@ class SnapshotPresenterTests(PresenterAssertions):
             lines = present_installation(view)
         text = self.assert_safe_lines(lines)
         self.assertEqual(lines[0], "Сводка установки по прочитанным источникам")
-        for area in ("  Keenetic", "  Xray", "  XKeen", "  Геобазы", "  Процесс Xray"):
+        for area in ("  Keenetic", "  Xray", "  XKeen", "  Геобазы", "  Процесс Xray", "  Проверки"):
             self.assertIn(area, lines)
+        self.assertIn("  Активная сетевая проверка: не выполнялась", lines)
+        self.assertIn("    xray_process_consistent: успешно", lines)
+        self.assertIn("    geodata_references_resolved: успешно", lines)
+        self.assertIn("    vpn_reachable: не проверено, причина network_check_not_performed (сетевая проверка)", lines)
+        self.assertLess(lines.index("  Проверки"), len(lines) - 1)
         self.assertIn("Политик: 3; идентификаторы: Policy10, Policy20, Policy30", text)
         self.assertIn("Состояние: running; процессов: 1; маркер готовности: да; согласовано: да", text)
         self.assertIn(f"geoip.dat: найден, размер 1024, SHA-256 {SYNTHETIC_GEOIP_SHA256}", text)
@@ -183,6 +190,35 @@ class SnapshotPresenterTests(PresenterAssertions):
             f"История: размер known {SYNTHETIC_HISTORY_SIZE} байт; срок known {SYNTHETIC_HISTORY_RETENTION} с", text,
         )
         self.assertEqual(absent, ["Метаданные менеджера", "Метаданных нет: размещение хранилищ ещё не записано."])
+
+    def test_checks_presenter_shows_catalog_labels_and_never_derives_status(self):
+        view = ChecksView(False, (
+            CheckView(XRAY_PROCESS_CHECK, CheckStatus.FAILED, False, "process_without_marker"),
+            CheckView("geodata_references_resolved", CheckStatus.UNSUPPORTED, False, "files_not_inventoried"),
+            CheckView(VPN_REACHABLE_CHECK, CheckStatus.NOT_CHECKED, True, "network_check_not_performed"),
+        ))
+        with forbid_external_effects():
+            lines = present_checks(view)
+        self.assert_safe_lines(lines)
+        self.assertEqual(lines, [
+            "Проверки",
+            "Активная сетевая проверка: не выполнялась",
+            "  xray_process_consistent: ошибка, причина process_without_marker",
+            "  geodata_references_resolved: не поддерживается, причина files_not_inventoried",
+            "  vpn_reachable: не проверено, причина network_check_not_performed (сетевая проверка)",
+        ])
+        active = ChecksView(True, (CheckView(VPN_REACHABLE_CHECK, CheckStatus.PASSED, True, None),))
+        self.assertEqual(present_checks(active)[1:], ["Активная сетевая проверка: выполнялась", "  vpn_reachable: успешно (сетевая проверка)"])
+        for status in CheckStatus:
+            self.assertEqual(check_status(status), CHECK_STATUS_LABELS[status])
+        # Статус показывается только из словаря контракта: строка, другое перечисление и код ошибки скрываются.
+        for value in ("passed", "failed", "source_failed", None, 1, _OddCode.BAD):
+            with self.subTest(value=value):
+                self.assertEqual(check_status(value), HIDDEN)
+        with self.assertRaises(TypeError):
+            present_checks(view.items)
+        with self.assertRaises(TypeError):
+            present_checks({"active_network_check": False, "items": []})
 
     def test_geodata_and_process_presenters_accept_only_their_views(self):
         view = self.results["installation"].data

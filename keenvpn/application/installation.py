@@ -6,11 +6,16 @@
 отказов, а не повторяет их. Ничего не записывается, не устанавливается
 и не применяется; команды XKeen и init не вызываются. Успех описывает снимок
 на момент чтения и не подтверждает работу VPN, перехват трафика или маршрут клиента.
+Проверки результата строятся по уже прочитанным данным со статусами общего
+словаря; доступность VPN остаётся «не проверено», сетевые пробы не выполняются.
 """
 
 from dataclasses import dataclass
 from typing import ClassVar
 
+from keenvpn.application.checks import (
+    ChecksView, geodata_references_check, vpn_reachability_not_checked, xray_process_check,
+)
 from keenvpn.application.contract import (
     CONTRACT_VERSION, ErrorCategory, ErrorDetail, OperationIdFactory, Result,
     check_contract_version, failed, invalid_command, new_operation_id, succeeded,
@@ -148,24 +153,29 @@ class XrayProcessView:
 
 @dataclass(frozen=True, slots=True)
 class InstallationView:
-    """Безопасное представление прочитанной установки из четырёх областей.
+    """Безопасное представление прочитанной установки из четырёх областей и проверок по ним.
 
     Состав полей каждой области задают её сценарий и модели. Секреты,
-    домены, адреса правил, MAC и имена устройств сюда не входят.
+    домены, адреса правил, MAC и имена устройств сюда не входят. `checks` —
+    пассивные проверки по прочитанным данным: согласованность процесса Xray
+    и маркера, разрешимость ссылок на геобазы и доступность VPN, которая без
+    сетевой пробы остаётся «не проверено».
     """
 
     keenetic: KeeneticStateView
     proxy: ProxyConfigView
     geodata: GeoDataView
     xray_process: XrayProcessView
+    checks: ChecksView
 
     def to_dict(self) -> dict[str, object]:
-        """Вернуть JSON-совместимое представление."""
+        """Вернуть JSON-совместимое представление; ключ `checks` добавлен в версии контракта 1."""
         return {
             "keenetic": self.keenetic.to_dict(),
             "proxy": self.proxy.to_dict(),
             "geodata": self.geodata.to_dict(),
             "xray_process": self.xray_process.to_dict(),
+            "checks": self.checks.to_dict(),
         }
 
 
@@ -251,10 +261,17 @@ class InspectInstallationHandler:
                 ErrorCategory.INVALID_SOURCE_DATA, "installation_inconsistent",
                 "Прочитанные источники установки не удалось согласовать.", reason=error.code.value,
             ))
+        # Просмотр пассивен: признак активной сетевой проверки всегда выключен, проб нет.
+        checks = ChecksView(False, (
+            xray_process_check(models["process"]),
+            geodata_references_check(geodata),
+            vpn_reachability_not_checked(),
+        ))
         view = InstallationView(
             KeeneticStateView.from_state(keenetic),
             ProxyConfigView.from_models(proxy),
             GeoDataView.from_state(geodata),
             XrayProcessView.from_observation(models["process"]),
+            checks,
         )
         return succeeded(operation_id, name, view)

@@ -9,7 +9,8 @@ from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from keenvpn.application.contract import CONTRACT_VERSION, ErrorCategory
+from keenvpn.application.checks import GEODATA_REFERENCES_CHECK, VPN_REACHABLE_CHECK, XRAY_PROCESS_CHECK, ChecksView
+from keenvpn.application.contract import CONTRACT_VERSION, CheckStatus, ErrorCategory
 from keenvpn.application.installation import InspectInstallation, InspectInstallationHandler, InstallationView
 from keenvpn.application.keenetic_state import InspectKeeneticState, InspectKeeneticStateHandler
 from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler
@@ -67,6 +68,14 @@ EXPECTED_GEODATA = {
 }
 EXPECTED_PROCESS = {
     "process_count": 1, "pids": [SYNTHETIC_XRAY_PID], "ready_marker": True, "state": "running", "consistent": True,
+}
+EXPECTED_CHECKS = {
+    "active_network_check": False,
+    "items": [
+        {"code": XRAY_PROCESS_CHECK, "status": "passed", "network": False, "reason": None},
+        {"code": GEODATA_REFERENCES_CHECK, "status": "passed", "network": False, "reason": None},
+        {"code": VPN_REACHABLE_CHECK, "status": "not_checked", "network": True, "reason": "network_check_not_performed"},
+    ],
 }
 KEENETIC_SOURCES = ("policies", "hotspot", "registrations", "runtime")
 PROXY_SOURCES = ("xray", "settings", "init", "port_exclude", "port_proxying", "ip_exclude")
@@ -164,7 +173,10 @@ class InspectInstallationTests(unittest.TestCase):
         self.assertEqual(data, {
             "contract_version": CONTRACT_VERSION, "operation_id": "op-1", "command": "inspect_installation",
             "status": "succeeded", "error": None,
-            "data": {"keenetic": keenetic, "proxy": proxy, "geodata": EXPECTED_GEODATA, "xray_process": EXPECTED_PROCESS},
+            "data": {
+                "keenetic": keenetic, "proxy": proxy, "geodata": EXPECTED_GEODATA, "xray_process": EXPECTED_PROCESS,
+                "checks": EXPECTED_CHECKS,
+            },
         })
         # Общий сценарий читает те же источники по одному разу; сравнение выше прочитало их ещё раз.
         self.assertEqual(self.sources.calls, ((2, 2, 2, 2), (2, 2, 2, LIST_NAMES * 2), 1, 1))
@@ -305,6 +317,8 @@ class InspectInstallationTests(unittest.TestCase):
             lambda: setattr(result.data.geodata.references[0], "file_status", "missing"),
             lambda: setattr(result.data.xray_process, "state", "stopped"),
             lambda: setattr(result.data.proxy.xkeen.port_53, "port_exclude_entry", False),
+            lambda: setattr(result.data.checks, "active_network_check", True),
+            lambda: setattr(result.data.checks.items[0], "status", CheckStatus.PASSED),
         ):
             with self.assertRaises(FrozenInstanceError):
                 assign()
@@ -325,6 +339,10 @@ class InspectInstallationTests(unittest.TestCase):
                     "consistent": consistent,
                 })
                 self.assert_private(result)
+                # Статус проверки согласованности следует за состоянием: расхождение никогда не «успешно».
+                check = result.data.checks.items[0]
+                self.assertEqual((check.code, check.status), (XRAY_PROCESS_CHECK, CheckStatus.PASSED if consistent else CheckStatus.FAILED))
+                self.assertEqual(check.reason, None if consistent else state)
 
     def test_missing_unknown_and_unsupported_references_are_reported_without_values(self):
         self.sources.geodata.outcome = GeoDatabaseInventory((
@@ -433,6 +451,78 @@ class InspectInstallationTests(unittest.TestCase):
         for word in ("update", "обновл", "xkeen"):
             self.assertNotIn(word, text.lower())
         self.assert_private(result)
+
+
+class InstallationChecksTests(unittest.TestCase):
+    """Сводка установки — первый потребитель словаря статусов: проверки по уже прочитанным данным."""
+
+    def setUp(self):
+        self.sources = snapshot_installation_sources()
+        self.handler = handler_for(self.sources)
+
+    def checks(self):
+        with forbid_external_effects():
+            result = self.handler.execute(InspectInstallation())
+        self.assertTrue(result.succeeded)
+        self.assertIs(type(result.data.checks), ChecksView)
+        self.assertEqual(self.sources.calls, ALL_READ)
+        return result
+
+    def test_snapshot_checks_are_passive_and_vpn_is_not_checked(self):
+        result = self.checks()
+        self.assertEqual(result.data.checks.to_dict(), EXPECTED_CHECKS)
+        self.assertIs(result.data.checks.active_network_check, False)
+        self.assertEqual(result.to_dict()["data"]["checks"], EXPECTED_CHECKS)
+        self.assertEqual(result.data.checks.statuses[VPN_REACHABLE_CHECK], CheckStatus.NOT_CHECKED)
+
+    def test_every_status_is_reachable_through_the_scenario(self):
+        missing = GeoDatabaseInventory((GeoDatabaseFile(GEOIP_FILE_NAME, False), GeoDatabaseFile(GEOSITE_FILE_NAME, False)))
+        cases = (
+            ("passed", None, None, GEODATA_REFERENCES_CHECK, CheckStatus.PASSED, None),
+            ("failed process", XrayProcessObservation((), True), None, XRAY_PROCESS_CHECK, CheckStatus.FAILED, "marker_without_process"),
+            ("failed geodata", None, (missing, None), GEODATA_REFERENCES_CHECK, CheckStatus.FAILED, "missing_files"),
+            ("not checked", None, (None, routing_config("198.51.100.0/24")), GEODATA_REFERENCES_CHECK, CheckStatus.NOT_CHECKED, "no_references"),
+            ("unsupported", None, (None, routing_config("ext:extra-set.dat:fixture-set")), GEODATA_REFERENCES_CHECK, CheckStatus.UNSUPPORTED, "files_not_inventoried"),
+        )
+        seen = set()
+        for name, process, geodata, code, expected, reason in cases:
+            with self.subTest(case=name):
+                self.sources = snapshot_installation_sources()
+                self.handler = handler_for(self.sources)
+                if process is not None:
+                    self.sources.process.outcome = process
+                if geodata is not None:
+                    inventory, config = geodata
+                    if inventory is not None:
+                        self.sources.geodata.outcome = inventory
+                    if config is not None:
+                        self.sources.proxy.xray.outcome = config
+                result = self.checks()
+                statuses = result.data.checks.statuses
+                self.assertEqual(statuses[code], expected)
+                self.assertEqual(result.data.checks.statuses[VPN_REACHABLE_CHECK], CheckStatus.NOT_CHECKED)
+                found = next(item for item in result.data.checks.items if item.code == code)
+                self.assertEqual(found.reason, reason)
+                text = repr(result) + json.dumps(result.to_dict(), ensure_ascii=False)
+                self.assertNotIn("198.51.100", text)
+                checks_text = repr(result.data.checks) + json.dumps(result.data.checks.to_dict(), ensure_ascii=False)
+                for marker in ("fixture-set", "extra-set", "geoip.dat", "4242", "198.51.100"):
+                    self.assertNotIn(marker, checks_text)
+                seen.add(expected)
+        self.assertEqual(seen, set(CheckStatus))
+
+    def test_unavailable_source_gives_no_checks_at_all(self):
+        # Недоступный источник завершает сценарий отказом: ни одна проверка не показывается «успешно».
+        for name in ("process", "geodata", "xray", "policies"):
+            with self.subTest(source=name):
+                sources = snapshot_installation_sources()
+                configure(sources, name, OSError("fixture-private"))
+                with forbid_external_effects():
+                    result = handler_for(sources).execute(InspectInstallation())
+                self.assertFalse(result.succeeded)
+                self.assertIsNone(result.data)
+                self.assertNotIn("passed", json.dumps(result.to_dict(), ensure_ascii=False))
+                self.assertNotIn("checks", result.to_dict()["error"])
 
 
 if __name__ == "__main__":

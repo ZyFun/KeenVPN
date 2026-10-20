@@ -274,6 +274,10 @@ class SnapshotFlowTests(unittest.TestCase):
         self.assertEqual(navigator.depth, 0)
         self.assertIn("Сводка установки по прочитанным источникам", output)
         self.assertIn("Политик: 3; идентификаторы: Policy10, Policy20, Policy30", output)
+        # Блок проверок приходит из сценария: меню показывает статусы, не вычисляя их из состояния или ошибок.
+        self.assertIn("  Активная сетевая проверка: не выполнялась", output)
+        self.assertIn("    vpn_reachable: не проверено, причина network_check_not_performed (сетевая проверка)", output)
+        self.assertIn("    xray_process_consistent: успешно", output)
         self.assertEqual(self.sources.keenetic.calls, (1, 1, 1, 1))
         self.assertEqual(self.sources.proxy.calls[:3], (1, 1, 1))
         self.assertEqual(len(self.sources.proxy.calls[3]), 3)

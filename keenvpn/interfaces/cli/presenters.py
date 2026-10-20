@@ -15,7 +15,8 @@
 from collections.abc import Callable, Iterable
 import re
 
-from keenvpn.application.contract import CONTRACT_VERSION, ErrorDetail, Result
+from keenvpn.application.checks import CHECK_STATUS_LABELS, ChecksView
+from keenvpn.application.contract import CONTRACT_VERSION, CheckStatus, ErrorDetail, Result
 from keenvpn.application.installation import GeoDataView, InstallationView, XrayProcessView
 from keenvpn.application.keenetic_state import KeeneticStateView
 from keenvpn.application.manager_metadata import ManagerMetadataStatusView
@@ -149,6 +150,17 @@ def safe_text(value: object) -> str:
     """Показать заранее заданный текст сценария, если он печатный и не слишком длинный."""
     if type(value) is str and 0 < len(value) <= MAX_TEXT_LENGTH and value.isprintable():
         return value
+    return HIDDEN
+
+
+def check_status(value: object) -> str:
+    """Показать подпись статуса проверки только для точного `CheckStatus`; иначе пометку.
+
+    Подпись берётся из каталога application: меню не выводит статус из состояния
+    или кодов ошибок и не принимает строку вместо перечисления.
+    """
+    if type(value) is CheckStatus:
+        return safe_text(CHECK_STATUS_LABELS[value])
     return HIDDEN
 
 
@@ -313,8 +325,28 @@ def present_xray_process(view: XrayProcessView) -> Lines:
     ]
 
 
+def present_checks(view: ChecksView) -> Lines:
+    """Показать проверки результата: признак активной сетевой проверки и статус каждой проверки.
+
+    Статусы и причины приходят из сценария как есть: меню их не вычисляет.
+    """
+    if type(view) is not ChecksView:
+        raise TypeError("Ожидается ChecksView.")
+    active = view.active_network_check
+    performed = "выполнялась" if active is True else "не выполнялась" if active is False else HIDDEN
+    lines = ["Проверки", f"Активная сетевая проверка: {performed}"]
+    for item in view.items:
+        line = f"{identifier(item.code)}: {check_status(item.status)}"
+        if item.reason is not None:
+            line += f", причина {identifier(item.reason)}"
+        if item.network is True:
+            line += " (сетевая проверка)"
+        lines.append(_INDENT + line)
+    return lines
+
+
 def present_installation(view: InstallationView) -> Lines:
-    """Показать сводку прочитанной установки из четырёх областей."""
+    """Показать сводку прочитанной установки из четырёх областей и проверки по ним."""
     if type(view) is not InstallationView:
         raise TypeError("Ожидается InstallationView.")
     return [
@@ -323,6 +355,7 @@ def present_installation(view: InstallationView) -> Lines:
         *_indent(present_proxy_summary(view.proxy)),
         *_indent(present_geodata(view.geodata)),
         *_indent(present_xray_process(view.xray_process)),
+        *_indent(present_checks(view.checks)),
         "Это снимок источников на момент чтения: работу VPN, перехват трафика и маршрут клиента он не подтверждает.",
     ]
 

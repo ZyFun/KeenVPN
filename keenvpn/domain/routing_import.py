@@ -77,6 +77,27 @@ def _balancer_case_variants(item: dict[str, object]) -> bool:
     )
 
 
+def _balancer_tag(item: object) -> str | None:
+    """Тег балансировщика, если элемент — объект с непустым строковым тегом; иначе `None`."""
+    if type(item) is dict and type(item.get("tag")) is str and item["tag"]:
+        return item["tag"]
+    return None
+
+
+def _balancer_selectors(item: dict[str, object]) -> tuple[str, ...] | None:
+    """Селекторы как `StringList`: отсутствие — пустой набор, другая структура — `None`."""
+    return decode_string_list(item["selector"]) if item.get("selector") is not None else ()
+
+
+def _balancer_invalid(item: dict[str, object], selectors: tuple[str, ...] | None) -> bool:
+    """Структура балансировщика не поддержана: селектор не `StringList`, `fallbackTag` не строка или `strategy` не объект."""
+    fallback = item.get("fallbackTag")
+    strategy = item.get("strategy")
+    return selectors is None or (fallback is not None and type(fallback) is not str) or (
+        strategy is not None and type(strategy) is not dict
+    )
+
+
 class RoutingImportErrorCode(StrEnum):
     """Причины отказа без значений правил, тегов и содержимого частей."""
 
@@ -755,8 +776,9 @@ class _TargetResolver:
         for item in balancers:
             if type(item) is dict and _balancer_case_variants(item):
                 self.case_variant = True
-            if type(item) is dict and type(item.get("tag")) is str and item["tag"]:
-                self._balancers.setdefault(item["tag"], []).append(item)
+            tag = _balancer_tag(item)
+            if tag is not None:
+                self._balancers.setdefault(tag, []).append(item)
             else:
                 self.balancers_supported = False
 
@@ -798,13 +820,11 @@ class _TargetResolver:
         reasons: list[ImportReason] = []
         if _balancer_case_variants(item):
             reasons.append(ImportReason.FIELD_CASE_VARIANT)
-        selectors = decode_string_list(item["selector"]) if item.get("selector") is not None else ()
+        selectors = _balancer_selectors(item)
         fallback = item.get("fallbackTag")
         strategy = item.get("strategy")
         strategy_type = None
-        if selectors is None or (fallback is not None and type(fallback) is not str) or (
-            strategy is not None and type(strategy) is not dict
-        ):
+        if _balancer_invalid(item, selectors):
             reasons.append(ImportReason.BALANCER_INVALID)
             selectors = () if selectors is None else selectors
         elif (
@@ -1070,3 +1090,50 @@ def import_routing_scheme(config: XrayConfigSet) -> RoutingScheme:
         rules = tuple(rule for group in groups[:-1] for rule in group.rules)
         policy = RoutingPolicy(rules, FinalRoutingRule(final.action))
     return RoutingScheme(routing_part, tuple(routing_parts), groups, policy, tuple(reasons))
+
+
+def balancer_fallbacks(config: XrayConfigSet) -> tuple[RuleTarget | None, ...] | None:
+    """Назначение `fallbackTag` каждого балансировщика действующего раздела `routing` в порядке файла.
+
+    Тег сопоставляется так же, как `outboundTag` правила при импорте: с действующими
+    outbound всех частей. Повтор тега, цепочка outbound и протокол без действия дают
+    назначение без действия с причиной. Балансировщик неподдержанной структуры
+    (не объект, тег не непустая строка, селектор не `StringList`, `fallbackTag`
+    не строка, `strategy` не объект — те же проверки, что у назначения правила)
+    или с вариантами регистра полей получает назначение без действия с причиной
+    `balancer_invalid` или `field_case_variant`. `None` в кортеже — `fallbackTag`
+    не задан, пустой кортеж — балансировщиков нет. `None` вместо кортежа — outbound,
+    раздел `routing` или список балансировщиков не читаются однозначно. Назначения
+    содержат исходные теги и предназначены доверенному коду, а не выводу.
+    """
+    if type(config) is not XrayConfigSet:
+        _raise_detached(RoutingImportErrorCode.CONFIG)
+    documents = [(part.name, part.export()) for part in config.parts]
+    outbounds, outbounds_supported, case_variant = _effective_outbounds(documents)
+    routing: object = None
+    for _name, document in documents:
+        case_variant = case_variant or _case_variants(document, _DOCUMENT_FIELDS)
+        if document.get("routing") is not None:
+            routing = document["routing"]
+    if not outbounds_supported or case_variant:
+        return None
+    if routing is None:
+        return ()
+    if type(routing) is not dict or _case_variants(routing, _ROUTING_FIELDS):
+        return None
+    balancers = routing.get("balancers")
+    if balancers is None:
+        return ()
+    if type(balancers) is not list:
+        return None
+    resolver = _TargetResolver(outbounds, balancers)
+    targets: list[RuleTarget | None] = []
+    for item in balancers:
+        if _balancer_tag(item) is None or _balancer_invalid(item, _balancer_selectors(item)):
+            targets.append(_target(RuleTargetKind.OUTBOUND, None, ImportReason.BALANCER_INVALID))
+        elif _balancer_case_variants(item):
+            targets.append(_target(RuleTargetKind.OUTBOUND, None, ImportReason.FIELD_CASE_VARIANT))
+        else:
+            fallback = item.get("fallbackTag")
+            targets.append(resolver._outbound_target(fallback) if fallback else None)
+    return tuple(targets)

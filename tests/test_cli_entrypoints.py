@@ -39,6 +39,12 @@ class EntrypointTests(unittest.TestCase):
                 self.assertTrue(out.startswith(MAIN_MENU_TITLE + "\n"))
                 self.assertEqual(err, "")
                 self.assertNotIn("\x1b", out)
+        # Источники роутера не подключены: шапка показывает области «не проверено», а не исправность.
+        code, out, _ = call(vpn_menu, [], "0\n")
+        self.assertTrue(out.startswith(
+            f"{MAIN_MENU_TITLE}\nСостояние по источникам, активная сетевая проверка не выполнялась:\n"
+            "  Ядро Xray: не проверено\n  Перехват: не поддерживается\n",
+        ))
 
     def test_setup_shows_wizard_items_as_unavailable(self):
         code, out, err = call(vpn_setup, [], "1\n0\n")

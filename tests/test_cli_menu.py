@@ -6,7 +6,7 @@ import unittest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from keenvpn.application.installation import InspectInstallation
+from keenvpn.application.status_summary import InspectStatusSummary
 from keenvpn.application.keenetic_state import InspectKeeneticState
 from keenvpn.application.manager_metadata import InspectManagerMetadata
 from keenvpn.application.proxy_config import InspectProxyConfig
@@ -289,7 +289,7 @@ class TreeTests(unittest.TestCase):
 
     def test_bound_scenarios_match_existing_commands_and_tree(self):
         self.assertEqual(BOUND_SCENARIOS, {
-            "status.summary": InspectInstallation.name,
+            "status.summary": InspectStatusSummary.name,
             "routing.list": ImportRoutingScheme.name,
             "routing.explain": ExplainRoute.name,
             "devices.list": InspectKeeneticState.name,

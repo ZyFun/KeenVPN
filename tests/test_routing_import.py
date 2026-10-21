@@ -18,8 +18,8 @@ from keenvpn.domain.routing import (
 from keenvpn.domain.routing_explanation import DomainSource, ExplanationReason, IPSource, RoutingContext, explain_route
 from keenvpn.domain.routing_import import (
     ImportReason, ImportedRuleGroup, RoutingImportError, RoutingImportErrorCode, RoutingScheme, RuleGroupKind,
-    RuleTarget, ValueReason, _effective_outbounds, _outbound_action, _select_outbounds, import_routing_scheme,
-    validate_routing_scheme,
+    RuleTarget, ValueReason, _effective_outbounds, _outbound_action, _select_outbounds, balancer_fallbacks,
+    import_routing_scheme, validate_routing_scheme,
 )
 from keenvpn.domain.routing_policy import FinalRoutingRule, MatchResult, RoutingPolicy
 from keenvpn.domain.xray_config import RuleTargetKind, XrayConfigSet, validate_xray_config_set
@@ -1152,6 +1152,107 @@ class ValidationAndSafetyTests(unittest.TestCase):
             scheme.to_diagnostic()
             validate_routing_scheme(scheme)
             scheme_for([rule(domain=["domain:a.example"], balancerTag="pool"), FINAL]).to_diagnostic()
+
+
+class BalancerFallbackTests(unittest.TestCase):
+    """Цель `fallbackTag` каждого балансировщика: тот же разрешатель, что у назначений правил."""
+
+    @staticmethod
+    def outcomes(targets):
+        return [None if target is None else (target.action, target.reasons) for target in targets]
+
+    def fallbacks(self, balancers, *, outbounds=OUTBOUNDS, extra_parts=()):
+        parts = [
+            part("04_outbounds.json", {"outbounds": outbounds}), part("05_routing.json", {"routing": {"balancers": balancers}}),
+            *extra_parts,
+        ]
+        return balancer_fallbacks(XrayConfigSet(tuple(sorted(parts, key=lambda item: item.name))))
+
+    def test_snapshot_balancer_falls_back_to_block(self):
+        config = snapshot_xray_config()
+        with forbid_external_effects():
+            targets = balancer_fallbacks(config)
+        self.assertEqual(self.outcomes(targets), [(BLOCK, ())])
+        self.assertEqual(repr(targets[0]), "RuleTarget(kind=outbound, action=BLOCK)")
+
+    def test_targets_follow_outbound_resolution_of_rules(self):
+        chained = {"tag": "chained", "protocol": "freedom", "streamSettings": {"sockopt": {"dialerProxy": "proxy-one"}}}
+        outbounds = [
+            *OUTBOUNDS, {"tag": "twice", "protocol": "freedom"}, {"tag": "twice", "protocol": "freedom"}, chained,
+            {"tag": "odd", "protocol": "loopback"},
+        ]
+        balancers = [
+            {"tag": "a", "selector": ["proxy-"], "fallbackTag": "direct"},
+            {"tag": "b", "selector": ["proxy-"], "fallbackTag": "blocked"},
+            {"tag": "c", "selector": ["proxy-"], "fallbackTag": "proxy-two"},
+            {"tag": "d", "selector": ["proxy-"]},
+            {"tag": "e", "selector": ["proxy-"], "fallbackTag": ""},
+            {"tag": "f", "selector": ["proxy-"], "fallbackTag": None},
+            {"tag": "g", "selector": ["proxy-"], "fallbackTag": "fixture-private-absent"},
+            {"tag": "h", "selector": ["proxy-"], "fallbackTag": "twice"},
+            {"tag": "i", "selector": ["proxy-"], "fallbackTag": "chained"},
+            {"tag": "j", "selector": ["proxy-"], "fallbackTag": "odd"},
+            {"tag": "k", "selector": ["proxy-"], "fallbackTag": 7},
+            "fixture-private",
+            {"tag": "l", "selector": ["proxy-"], "FallbackTag": "direct"},
+        ]
+        R = ImportReason
+        targets = self.fallbacks(balancers, outbounds=outbounds)
+        self.assertEqual(self.outcomes(targets), [
+            (DIRECT, ()), (BLOCK, ()), (VPN, ()), None, None, None, (None, (R.TARGET_UNRESOLVED,)),
+            (None, (R.TARGET_DUPLICATE,)), (None, (R.OUTBOUND_CHAINED,)), (None, (R.OUTBOUND_PROTOCOL_UNSUPPORTED,)),
+            (None, (R.BALANCER_INVALID,)), (None, (R.BALANCER_INVALID,)), (None, (R.FIELD_CASE_VARIANT,)),
+        ])
+        self.assertNotIn("fixture-private", repr(targets))
+
+    def test_unsupported_balancer_structure_has_no_fallback_target(self):
+        # Регрессия review 73-R01: структура проверяется так же, как у назначения правила, до разрешения fallback.
+        R = ImportReason
+        for balancer in (
+            {"tag": "a", "selector": 7, "fallbackTag": "blocked"},
+            {"tag": "a", "selector": ["proxy-", 7], "fallbackTag": "blocked"},
+            {"tag": "a", "selector": ["proxy-"], "strategy": 7, "fallbackTag": "blocked"},
+            {"tag": "a", "selector": ["proxy-"], "strategy": "leastPing", "fallbackTag": "blocked"},
+            {"tag": 7, "selector": ["proxy-"], "fallbackTag": "blocked"},
+            {"tag": "", "selector": ["proxy-"], "fallbackTag": "blocked"},
+            {"selector": ["proxy-"], "fallbackTag": "blocked"},
+        ):
+            with self.subTest(balancer=balancer):
+                self.assertEqual(self.outcomes(self.fallbacks([balancer])), [(None, (R.BALANCER_INVALID,))])
+        # Допустимая группа VPN с резервом BLOCK по-прежнему разрешается: действия селектора и fallback не сравниваются.
+        valid = {"tag": "a", "selector": "proxy-", "fallbackTag": "blocked", "strategy": {"type": "leastPing"}}
+        self.assertEqual(self.outcomes(self.fallbacks([valid])), [(BLOCK, ())])
+
+    def test_effective_outbounds_and_routing_follow_override(self):
+        later = part("06_override.json", {"outbounds": [{"tag": "direct", "protocol": "blackhole"}]})
+        self.assertEqual(
+            self.outcomes(self.fallbacks([{"tag": "a", "selector": ["proxy-"], "fallbackTag": "direct"}], extra_parts=(later,))),
+            [(BLOCK, ())],
+        )
+        # Действует последняя часть с разделом `routing`; `null` в более поздней части его не отменяет.
+        replaced = part("07_routing.json", {"routing": {"balancers": [{"tag": "b", "selector": ["proxy-"]}]}})
+        unset = part("08_none.json", {"routing": None})
+        self.assertEqual(self.outcomes(self.fallbacks(BALANCERS, extra_parts=(replaced, unset))), [None])
+
+    def test_missing_and_unreadable_sections(self):
+        base = part("04_outbounds.json", {"outbounds": OUTBOUNDS})
+        for document, expected in (
+            ({}, ()),
+            ({"routing": {"rules": []}}, ()),
+            ({"routing": {"balancers": []}}, ()),
+            ({"routing": {"balancers": {"tag": "pool"}}}, None),
+            ({"routing": "fixture-private"}, None),
+            ({"routing": {"Balancers": BALANCERS}}, None),
+            ({"Routing": {"balancers": BALANCERS}}, None),
+        ):
+            with self.subTest(document=document):
+                self.assertEqual(balancer_fallbacks(XrayConfigSet((base, part("05_routing.json", document)))), expected)
+        for outbounds in ("fixture-private", [{"tag": "direct", "Protocol": "freedom"}]):
+            with self.subTest(outbounds=outbounds):
+                self.assertIsNone(self.fallbacks(BALANCERS, outbounds=outbounds))
+        with self.assertRaises(RoutingImportError) as caught:
+            balancer_fallbacks(object())
+        self.assertIs(caught.exception.code, RoutingImportErrorCode.CONFIG)
 
 
 if __name__ == "__main__":

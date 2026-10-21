@@ -20,7 +20,11 @@ from keenvpn.application.manager_metadata import (
 )
 from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler
 from keenvpn.application.routing_import import ImportRoutingScheme, ImportRoutingSchemeHandler
+from keenvpn.application.status_summary import PORT_53_HINT, InspectStatusSummary, InspectStatusSummaryHandler
+from keenvpn.domain.config_document import ConfigDocument
+from keenvpn.domain.xray_config import XrayConfigSet
 from keenvpn.interfaces.cli import presenters
+from keenvpn.interfaces.cli.presenters import present_status_header, present_status_summary
 from keenvpn.interfaces.cli.presenters import (
     HIDDEN, MISSING, count, digest, file_name, flag, geo_source, geo_version, identifier, identifiers, interface_id,
     check_status, known_value, optional_count, optional_digest, optional_file_name, optional_flag, optional_identifier, present_about, present_checks, present_error, present_geodata, present_installation, present_keenetic_state,
@@ -555,6 +559,140 @@ class SafeValueTests(unittest.TestCase):
 class _Data:
     def to_dict(self):
         return {}
+
+
+SUMMARY_HEADER = [
+    "Состояние по источникам, активная сетевая проверка не выполнялась:",
+    "  Ядро Xray: работает",
+    "  Перехват: не поддерживается",
+    "  Доступность VPN: не проверено",
+    "  DNS и порт 53: исключение 53 включено, не проверено",
+    "  Автозапуск: включён",
+    "  Режим резерва: без прямого резерва",
+    "  Черновик: не поддерживается",
+]
+
+
+def summary_view(sources=None, *, connected=True):
+    sources = snapshot_installation_sources() if sources is None else sources
+    proxy = None
+    if connected:
+        proxy = InspectProxyConfigHandler(sources.proxy.xray, sources.proxy.settings, sources.proxy.init, sources.proxy.lists)
+    result = InspectStatusSummaryHandler(proxy, sources.process if connected else None).execute(InspectStatusSummary())
+    assert result.succeeded
+    return result.data
+
+
+class StatusSummaryPresenterTests(PresenterAssertions):
+    def test_header_shows_each_area_on_its_own_line_from_catalogs(self):
+        view = summary_view()
+        with forbid_external_effects():
+            lines = present_status_header(view)
+        self.assert_safe_lines(lines)
+        self.assertEqual(lines, SUMMARY_HEADER)
+        # Без источников ни одна область не выглядит исправной: состояние не известно, статус — «не проверено».
+        self.assertEqual(present_status_header(summary_view(connected=False))[1:], [
+            "  Ядро Xray: не проверено", "  Перехват: не поддерживается", "  Доступность VPN: не проверено",
+            "  DNS и порт 53: не проверено", "  Автозапуск: не проверено", "  Режим резерва: не проверено",
+            "  Черновик: не поддерживается",
+        ])
+
+    def test_summary_shows_checks_facts_hint_and_disclaimer(self):
+        view = summary_view()
+        with forbid_external_effects():
+            lines = present_status_summary(view)
+        self.assert_safe_lines(lines)
+        self.assertEqual(lines, [
+            "Сводка состояния по областям",
+            "Активная сетевая проверка: не выполнялась",
+            "Ядро Xray: работает",
+            "  Проверка xray_process_consistent: успешно",
+            "Перехват: не поддерживается",
+            "  Проверка interception_active: не поддерживается, причина interception_not_observed",
+            "Доступность VPN: не проверено",
+            "  Проверка vpn_reachable: не проверено, причина network_check_not_performed (сетевая проверка)",
+            "DNS и порт 53: исключение 53 включено, не проверено",
+            "  Проверка dns_port_53_path: не проверено, причина network_check_not_performed (сетевая проверка)",
+            "  Запись 53 в списке исключённых портов: да; диапазон с этим портом: нет",
+            "  Запись 53 в списке перехватываемых портов: нет; диапазон с этим портом: нет",
+            "  proxy_dns: present (off); proxy_router: present (off)",
+            "  Фактический перехват DNS не проверялся: это факты файлов, а не состояние трафика. "
+            "Отсутствие исключения само по себе не ошибка и не доказательство перехвата.",
+            f"  Подсказка: {PORT_53_HINT}",
+            "Автозапуск: включён",
+            "  Проверка autostart_flag_unambiguous: успешно",
+            "Режим резерва: без прямого резерва",
+            "  Проверка fallback_profile_consistent: успешно",
+            "  kill-switch: present (on); балансировщиков: 1; цель fallback: прямой выход 0, блокировка 1, VPN 0, "
+            "не определена 0, не задана 0",
+            "Черновик: не поддерживается",
+            "  Проверка draft_present: не поддерживается, причина drafts_not_implemented",
+            "Это снимок источников на момент чтения: работу VPN, перехват трафика и маршрут клиента он не подтверждает.",
+        ])
+
+    def test_source_errors_and_unknown_facts_are_shown_with_the_safe_step(self):
+        sources = snapshot_installation_sources()
+        sources.process.outcome = OSError("/opt/etc/TEST_ONLY_SECRET")
+        document = {"outbounds": [], "routing": {"balancers": {"tag": "fixture-private"}}}
+        sources.proxy.xray.outcome = XrayConfigSet((ConfigDocument("04_test.json", json.dumps(document).encode()),))
+        lines = present_status_summary(summary_view(sources))
+        text = self.assert_safe_lines(lines)
+        self.assertEqual(lines[2:7], [
+            "Ядро Xray: не проверено",
+            "  Проверка xray_process_consistent: не проверено, причина xray_process_unavailable",
+            "  Отказ: source_failed / xray_process_unavailable",
+            "  Причина: Не удалось наблюдать процесс Xray и маркер готовности.",
+            f"  Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.CHECK_SOURCE]}",
+        ])
+        self.assertIn(
+            "  kill-switch: present (on); балансировщиков: нет данных; цель fallback: прямой выход нет данных, "
+            "блокировка нет данных, VPN нет данных, не определена нет данных, не задана нет данных", lines,
+        )
+        self.assertIn("Режим резерва: не поддерживается", lines)
+        self.assertNotIn("TEST_ONLY_SECRET", text)
+        self.assertNotIn("fixture-private", text)
+        unconnected = present_status_summary(summary_view(connected=False))
+        dns = unconnected.index("DNS и порт 53: не проверено")
+        self.assertEqual(unconnected[dns + 1:dns + 3], [
+            "  Проверка dns_port_53_path: не проверено, причина source_not_connected (сетевая проверка)",
+            f"  Подсказка: {PORT_53_HINT}",
+        ])
+        self.assertNotIn("Следующий шаг", "\n".join(unconnected))
+
+    def test_unsupported_balancer_is_shown_as_not_supported(self):
+        # Регрессия review 73-R01: шапка и пункт не показывают профиль резерва для неподдержанного балансировщика.
+        sources = snapshot_installation_sources()
+        document = {
+            "outbounds": [{"tag": "block-out", "protocol": "blackhole"}],
+            "routing": {"balancers": [{"tag": "group-a", "selector": 7, "fallbackTag": "block-out"}]},
+        }
+        sources.proxy.xray.outcome = XrayConfigSet((ConfigDocument("04_test.json", json.dumps(document).encode()),))
+        view = summary_view(sources)
+        self.assertIn("  Режим резерва: не поддерживается", present_status_header(view))
+        self.assertIn(
+            "  Проверка fallback_profile_consistent: не поддерживается, причина fallback_not_resolved",
+            present_status_summary(view),
+        )
+
+    def test_values_outside_catalogs_are_hidden_and_never_shown_as_success(self):
+        view = summary_view()
+        payload = view.to_dict()
+        core, interception = view.areas[0], view.areas[1]
+        object.__setattr__(core, "state", "running")
+        object.__setattr__(interception, "area", "interception")
+        self.assertEqual(present_status_header(view)[1:3], [f"  Ядро Xray: {HIDDEN}", f"  {HIDDEN}: не поддерживается"])
+        # Статус строкой вместо перечисления не становится «успешно»: подпись скрыта.
+        object.__setattr__(core.check, "status", "passed")
+        self.assertEqual(present_status_header(view)[1], f"  Ядро Xray: {HIDDEN}, {HIDDEN}")
+        self.assertIn(f"Проверка xray_process_consistent: {HIDDEN}", "\n".join(present_status_summary(view)))
+        object.__setattr__(view, "active_network_check", "no")
+        self.assertEqual(present_status_header(view)[0], f"Состояние по источникам, активная сетевая проверка {HIDDEN}:")
+        for present in (present_status_header, present_status_summary):
+            with self.subTest(presenter=present.__name__):
+                with self.assertRaises(TypeError):
+                    present(view.areas)
+                with self.assertRaises(TypeError):
+                    present(payload)
 
 
 if __name__ == "__main__":

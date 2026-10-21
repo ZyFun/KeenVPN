@@ -9,9 +9,10 @@ from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from keenvpn.application.contract import CONTRACT_VERSION, ErrorCategory
+from keenvpn.application.contract import CONTRACT_VERSION, ErrorCategory, ErrorDetail
 from keenvpn.application.proxy_config import (
-    LIST_NAME_MISMATCH, InspectProxyConfig, InspectProxyConfigHandler, ProxyConfigView, XrayPositionView,
+    LIST_NAME_MISMATCH, InspectProxyConfig, InspectProxyConfigHandler, ProxyConfigSource, ProxyConfigView,
+    XrayPositionView,
 )
 from keenvpn.domain.config_document import ConfigDocument
 from keenvpn.domain.xkeen_config import (
@@ -492,6 +493,43 @@ class InspectProxyConfigTests(unittest.TestCase):
         self.assertEqual(data["xkeen"]["lists"]["port_exclude"]["range_count"], 1)
         self.assertEqual(data["xkeen"]["lists"]["port_proxying"]["comment_count"], 0)
         self.assert_private(result)
+
+
+class ReadSourceTests(unittest.TestCase):
+    """Чтение одного источника: тот же вызов, коды и проверки, что у сценария, без чтения соседних источников."""
+
+    def test_sources_follow_the_reading_order_of_the_scenario(self):
+        self.assertEqual([source.value for source in ProxyConfigSource], list(SOURCES))
+
+    def test_each_source_is_read_alone_with_scenario_codes(self):
+        models = (XrayConfigSet, XKeenSettings, XKeenInitParameters, XKeenList, XKeenList, XKeenList)
+        for index, source in enumerate(ProxyConfigSource):
+            name = source.value
+            scalar = tuple(1 if position == index else 0 for position in range(3))
+            lists = (LIST_NAMES[index - 3],) if index >= 3 else ()
+            with self.subTest(source=name):
+                sources = snapshot_proxy_sources()
+                value = handler_for(sources).read_source(source)
+                self.assertIs(type(value), models[index])
+                self.assertEqual(sources.calls, (*scalar, lists))
+                configure(sources, name, OSError("Отказ источника: fixture-private fixture-password /fixture/ws"))
+                error = handler_for(sources).read_source(source)
+                self.assertIs(type(error), ErrorDetail)
+                self.assertEqual(
+                    (error.category, error.code, error.reason),
+                    (ErrorCategory.SOURCE_FAILED, UNAVAILABLE_CODES[name], None),
+                )
+                self.assertNotIn("fixture", repr(error) + json.dumps(error.to_dict(), ensure_ascii=False))
+                configure(sources, name, object())
+                error = handler_for(sources).read_source(source)
+                self.assertEqual((error.category, error.code), (ErrorCategory.INVALID_SOURCE_DATA, INVALID_CODES[name]))
+        sources = snapshot_proxy_sources()
+        sources.lists.set_response(XKeenListName.IP_EXCLUDE, snapshot_xkeen_list(XKeenListName.PORT_EXCLUDE))
+        error = handler_for(sources).read_source(ProxyConfigSource.IP_EXCLUDE)
+        self.assertEqual((error.code, error.reason), ("invalid_xkeen_ip_exclude", LIST_NAME_MISMATCH))
+        for value in ("xray", None, XKeenListName.PORT_EXCLUDE):
+            with self.subTest(value=value), self.assertRaises(TypeError):
+                handler_for(sources).read_source(value)
 
 
 if __name__ == "__main__":

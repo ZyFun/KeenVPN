@@ -1,6 +1,8 @@
 """Чтение конфигурации прозрачного прокси: части Xray, настройки XKeen, init и списки."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import ClassVar
 
 from keenvpn.application.contract import (
@@ -12,7 +14,7 @@ from keenvpn.application.source_checks import SourceCheck, check_source_model, u
 from keenvpn.application.views import view_dict, view_fields
 from keenvpn.domain.config_document import ConfigDocumentError
 from keenvpn.domain.xkeen_config import (
-    XKeenConfig, XKeenConfigError, XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings,
+    Port53Facts, XKeenConfig, XKeenConfigError, XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings,
     assemble_xkeen_config, validate_xkeen_init, validate_xkeen_list, validate_xkeen_settings,
 )
 from keenvpn.domain.xray_config import XrayConfigError, XrayConfigSet, validate_xray_config_set
@@ -340,6 +342,20 @@ class Port53View:
     proxy_dns: XKeenFlagView
     proxy_router: XKeenFlagView
 
+    @classmethod
+    def from_facts(cls, facts: Port53Facts) -> "Port53View":
+        """Построить представление из фактов домена."""
+        diagnostic = facts.to_diagnostic()
+        return cls(**{
+            **view_fields(cls, {**diagnostic, "proxy_dns": None, "proxy_router": None}),
+            "proxy_dns": XKeenFlagView(**diagnostic["proxy_dns"]),
+            "proxy_router": XKeenFlagView(**diagnostic["proxy_router"]),
+        })
+
+    def to_dict(self) -> dict[str, object]:
+        """Вернуть JSON-совместимое представление."""
+        return {**view_dict(self), "proxy_dns": view_dict(self.proxy_dns), "proxy_router": view_dict(self.proxy_router)}
+
 
 @dataclass(frozen=True, slots=True)
 class XKeenConfigView:
@@ -359,7 +375,6 @@ class XKeenConfigView:
         settings = diagnostic["settings"]
         init = diagnostic["init"]
         lists = diagnostic["lists"]
-        port_53 = diagnostic["port_53"]
         return cls(
             settings=XKeenSettingsView(**{
                 **view_fields(XKeenSettingsView, {**settings, "killswitch": XKeenFlagView(**settings["killswitch"])}),
@@ -374,11 +389,7 @@ class XKeenConfigView:
             port_exclude=XKeenListView(**view_fields(XKeenListView, lists["port_exclude"])),
             port_proxying=XKeenListView(**view_fields(XKeenListView, lists["port_proxying"])),
             ip_exclude=XKeenListView(**view_fields(XKeenListView, lists["ip_exclude"])),
-            port_53=Port53View(**{
-                **view_fields(Port53View, {**port_53, "proxy_dns": None, "proxy_router": None}),
-                "proxy_dns": XKeenFlagView(**port_53["proxy_dns"]),
-                "proxy_router": XKeenFlagView(**port_53["proxy_router"]),
-            }),
+            port_53=Port53View.from_facts(config.port_53),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -401,11 +412,7 @@ class XKeenConfigView:
                 "port_proxying": view_dict(self.port_proxying),
                 "ip_exclude": view_dict(self.ip_exclude),
             },
-            "port_53": {
-                **view_dict(self.port_53),
-                "proxy_dns": view_dict(self.port_53.proxy_dns),
-                "proxy_router": view_dict(self.port_53.proxy_router),
-            },
+            "port_53": self.port_53.to_dict(),
         }
 
 
@@ -442,6 +449,17 @@ class ProxyConfigView:
     def to_dict(self) -> dict[str, object]:
         """Вернуть JSON-совместимое представление."""
         return {"xray": self.xray.to_dict(), "xkeen": self.xkeen.to_dict()}
+
+
+class ProxyConfigSource(StrEnum):
+    """Источник конфигурации прокси; порядок членов — порядок чтения сценария."""
+
+    XRAY = "xray"
+    SETTINGS = "settings"
+    INIT = "init"
+    PORT_EXCLUDE = "port_exclude"
+    PORT_PROXYING = "port_proxying"
+    IP_EXCLUDE = "ip_exclude"
 
 
 _LIST_FIELDS = {
@@ -553,25 +571,11 @@ class InspectProxyConfigHandler:
         Модели содержат домены, адреса и пароли: наружу передаётся только представление.
         """
         models: dict[str, object] = {}
-        reads = [
-            ("xray", self._xray.current_xray_config),
-            ("settings", self._settings.current_xkeen_settings),
-            ("init", self._init.current_xkeen_init),
-        ]
-        reads += [
-            (field_name, lambda list_name=list_name: self._lists.current_xkeen_list(list_name))
-            for list_name, field_name in _LIST_FIELDS.items()
-        ]
-        for source, read in reads:
-            try:
-                value = read()
-            except Exception:
-                # Текст и цепочка исключения источника могут содержать пароли, адреса и пути.
-                return unavailable(*_UNAVAILABLE[source])
-            error = _check_model(source, value)
-            if error is not None:
-                return error
-            models[source] = value
+        for source in ProxyConfigSource:
+            value = self.read_source(source)
+            if isinstance(value, ErrorDetail):
+                return value
+            models[source.value] = value
 
         try:
             xkeen = assemble_xkeen_config(
@@ -584,3 +588,32 @@ class InspectProxyConfigHandler:
                 "Прочитанные файлы Xray и XKeen не удалось согласовать.", reason=error.code.value,
             )
         return ProxyConfigModels(models["xray"], xkeen)
+
+    def read_source(self, source: ProxyConfigSource) -> object | ErrorDetail:
+        """Прочитать один источник и проверить ответ; отказ — ErrorDetail с кодом этого источника.
+
+        Источник вызывается один раз. `read()` читает так все шесть по порядку
+        и останавливается на первом отказе; сводка состояния читает нужные ей
+        источники по одному, чтобы отказ одного не скрывал остальные. Модель
+        содержит секреты конфигурации: наружу передаётся только представление.
+        """
+        if type(source) is not ProxyConfigSource:
+            raise TypeError("Источник задаётся ProxyConfigSource.")
+        read = self._reader(source)
+        try:
+            value = read()
+        except Exception:
+            # Текст и цепочка исключения источника могут содержать пароли, адреса и пути.
+            return unavailable(*_UNAVAILABLE[source.value])
+        error = _check_model(source.value, value)
+        return value if error is None else error
+
+    def _reader(self, source: ProxyConfigSource) -> Callable[[], object]:
+        if source is ProxyConfigSource.XRAY:
+            return self._xray.current_xray_config
+        if source is ProxyConfigSource.SETTINGS:
+            return self._settings.current_xkeen_settings
+        if source is ProxyConfigSource.INIT:
+            return self._init.current_xkeen_init
+        list_name = _LIST_NAME[source.value]
+        return lambda: self._lists.current_xkeen_list(list_name)

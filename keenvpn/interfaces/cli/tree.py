@@ -20,7 +20,7 @@ SETUP_MENU_TITLE = "Мастер установки и настройки KeenVP
 STATISTICS_TITLE = "Статистика проверок"
 
 BOUND_SCENARIOS: Mapping[str, str] = {
-    "status.summary": "inspect_installation",
+    "status.summary": "inspect_status_summary",
     "routing.list": "import_routing_scheme",
     "routing.explain": "explain_route",
     "devices.list": "inspect_keenetic_state",

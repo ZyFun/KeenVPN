@@ -77,6 +77,8 @@
 
 Метод `read()` обработчика возвращает модели для доверенного кода либо `ErrorDetail` с теми же кодами, что и его `execute()`; общий сценарий использует его, а не повторяет чтение. Порядок фиксирован: состояние Keenetic, конфигурация Xray и XKeen, инвентарь геобаз, наблюдение процесса. Каждый источник вызывается один раз; после отказа или некорректного ответа следующие источники не читаются, частичного результата нет. Ссылки на наборы разбираются из прочитанных частей Xray и сопоставляются с инвентарём.
 
+`read_xray_process(processes)` наблюдает процесс один раз и проверяет ответ так же, как сценарий: возвращает `XrayProcessObservation` либо `ErrorDetail` с кодом `xray_process_unavailable` или `invalid_xray_process`. Её использует [сводка состояния](status-summary.md), которая читает источники по одному и не прерывается на отказе.
+
 ```python
 from keenvpn.application.installation import InspectInstallation, InspectInstallationHandler
 from keenvpn.application.keenetic_state import InspectKeeneticStateHandler

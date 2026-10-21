@@ -31,7 +31,7 @@ def _run(command: str, assemble: Assembler, argv: Sequence[str], stdin: TextInpu
         return EXIT_USAGE
     try:
         assembly = assemble()
-        return run_menu(MenuNavigator(assembly.menu), assembly.actions, stdin, stdout)
+        return run_menu(MenuNavigator(assembly.menu), assembly.actions, stdin, stdout, assembly.header)
     except KeyboardInterrupt:
         stderr.write(INTERRUPTED_MESSAGE + "\n")
         return EXIT_INTERRUPTED

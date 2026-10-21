@@ -9,6 +9,8 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application.contract import NEXT_STEP_MESSAGES, NextStepCode, new_operation_id
 from keenvpn.application.ports import ManagerMetadataStoreError, MetadataStoreFailure
+from keenvpn.application.status_summary import PORT_53_HINT
+from keenvpn.domain.xkeen_config import XKeenListName
 from keenvpn.interfaces.cli.composition import (
     MenuAssembly, MenuSources, assemble_main_menu, assemble_setup_menu, default_sources,
 )
@@ -107,6 +109,12 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(section[-1], f"  0. {BACK_LABEL}")
         self.assertTrue(all(line.isprintable() for line in root + section))
 
+    def test_header_is_rendered_only_at_the_root(self):
+        navigator = MenuNavigator(sample_menu())
+        self.assertEqual(render_menu(navigator, ["Шапка"])[:3], ["Корень", "Шапка", "  1. Раздел"])
+        navigator.select(1)
+        self.assertNotIn("Шапка", render_menu(navigator, ["Шапка"]))
+
 
 class RunLoopTests(unittest.TestCase):
     def test_zero_at_root_exits_with_zero(self):
@@ -174,6 +182,30 @@ class RunLoopTests(unittest.TestCase):
         self.assertEqual(output.count("Корень\n"), 4)
         self.assertEqual(output.count("Корень / Раздел\n"), 2)
 
+    def test_header_runs_on_entering_the_root_and_is_reused_for_hints(self):
+        calls = []
+
+        def header():
+            calls.append(1)
+            return [f"Шапка {len(calls)}"]
+
+        stdout = io.StringIO()
+        with forbid_external_effects():
+            code = run_menu(
+                MenuNavigator(sample_menu()), {"root.action": lambda: ["Действие"]},
+                io.StringIO("x\n\n2\n1\n0\n1\n3\n0\n0\n0\n"), stdout, header,
+            )
+        output = stdout.getvalue()
+        self.assertEqual(code, 0)
+        # Шапка выполняется при старте и при каждом возврате в корень; подсказки и действие в корне её не повторяют.
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(output.startswith("Корень\nШапка 1\n  1. Раздел\n"))
+        self.assertEqual(output.count("Корень\nШапка 1\n"), 4)
+        self.assertEqual(output.count("Корень\nШапка 2\n"), 1)
+        self.assertEqual(output.count("Корень\nШапка 3\n"), 1)
+        self.assertNotIn("Раздел\nШапка", output)
+        self.assertNotIn("Вложенное\nШапка", output)
+
     def test_available_action_without_handler_is_a_menu_error(self):
         with self.assertRaises(MenuError):
             run(sample_menu(), "2\n0\n")
@@ -194,19 +226,22 @@ class RunLoopTests(unittest.TestCase):
 
 
 class CompositionTests(unittest.TestCase):
-    def test_default_sources_leave_only_help_available(self):
+    def test_default_sources_leave_summary_and_help_available(self):
         assembly = assemble_main_menu(default_sources())
         found = states(assembly)
         self.assertEqual(set(found), set(ALL_ACTION_IDS))
-        self.assertEqual(set(assembly.actions), {"settings.about"})
+        # Сводка допускает неподключённые источники: пункт доступен и показывает их области «не проверено».
+        self.assertEqual(set(assembly.actions), {"settings.about", "status.summary"})
         self.assertIsNone(found["settings.about"])
+        self.assertIsNone(found["status.summary"])
         self.assertIs(found["routing.explain"], UnavailableReason.INPUT_REQUIRED)
-        for action_id in set(BOUND_SCENARIOS) - {"routing.explain"}:
+        for action_id in set(BOUND_SCENARIOS) - {"routing.explain", "status.summary"}:
             self.assertIs(found[action_id], UnavailableReason.SOURCE_NOT_CONNECTED, action_id)
         for action_id in set(ALL_ACTION_IDS) - set(BOUND_SCENARIOS) - {"settings.about"}:
             self.assertIs(found[action_id], UnavailableReason.NOT_IMPLEMENTED, action_id)
         with self.assertRaises(TypeError):
             assembly.actions["x"] = lambda: []
+        self.assertTrue(callable(assembly.header))
         self.assertEqual(assemble_main_menu().menu.title, MAIN_MENU_TITLE)
 
     def test_connected_sources_make_bound_items_available(self):
@@ -228,7 +263,8 @@ class CompositionTests(unittest.TestCase):
         )
         found = states(assemble_main_menu(keenetic_only))
         self.assertIsNone(found["devices.list"])
-        for action_id in ("status.summary", "routing.list", "failsafe.port53_check", "settings.storage"):
+        self.assertIsNone(found["status.summary"])
+        for action_id in ("routing.list", "failsafe.port53_check", "settings.storage"):
             self.assertIs(found[action_id], UnavailableReason.SOURCE_NOT_CONNECTED, action_id)
         three_of_four = MenuSources(policies=full.policies, hotspot=full.hotspot, registrations=full.registrations)
         self.assertIs(states(assemble_main_menu(three_of_four))["devices.list"], UnavailableReason.SOURCE_NOT_CONNECTED)
@@ -238,7 +274,7 @@ class CompositionTests(unittest.TestCase):
             geodata=full.geodata,
         )
         found = states(assemble_main_menu(without_process))
-        self.assertIs(found["status.summary"], UnavailableReason.SOURCE_NOT_CONNECTED)
+        self.assertIsNone(found["status.summary"])
         self.assertIsNone(found["routing.list"])
         self.assertIsNone(found["failsafe.port53_check"])
         with self.assertRaises(MenuError):
@@ -249,6 +285,7 @@ class CompositionTests(unittest.TestCase):
         assembly = assemble_setup_menu(sources)
         self.assertEqual(assembly.menu.title, SETUP_MENU_TITLE)
         self.assertTrue(all(item.reason is UnavailableReason.NOT_IMPLEMENTED for item in assembly.menu.items))
+        self.assertIsNone(assembly.header)
         self.assertEqual(assemble_setup_menu().menu.title, SETUP_MENU_TITLE)
 
 
@@ -272,16 +309,19 @@ class SnapshotFlowTests(unittest.TestCase):
         code, output, navigator = self.flow("1\n1\n0\n0\n")
         self.assertEqual(code, 0)
         self.assertEqual(navigator.depth, 0)
-        self.assertIn("Сводка установки по прочитанным источникам", output)
-        self.assertIn("Политик: 3; идентификаторы: Policy10, Policy20, Policy30", output)
-        # Блок проверок приходит из сценария: меню показывает статусы, не вычисляя их из состояния или ошибок.
-        self.assertIn("  Активная сетевая проверка: не выполнялась", output)
-        self.assertIn("    vpn_reachable: не проверено, причина network_check_not_performed (сетевая проверка)", output)
-        self.assertIn("    xray_process_consistent: успешно", output)
-        self.assertEqual(self.sources.keenetic.calls, (1, 1, 1, 1))
-        self.assertEqual(self.sources.proxy.calls[:3], (1, 1, 1))
-        self.assertEqual(len(self.sources.proxy.calls[3]), 3)
-        self.assertEqual((self.sources.geodata.calls, self.sources.process.calls), (1, 1))
+        self.assertIn(
+            "Сводка состояния по областям\nАктивная сетевая проверка: не выполнялась\nЯдро Xray: работает\n"
+            "  Проверка xray_process_consistent: успешно\nПерехват: не поддерживается\n", output,
+        )
+        # Статусы приходят из сценария: меню показывает их, не вычисляя из состояния или ошибок.
+        self.assertIn("  Проверка vpn_reachable: не проверено, причина network_check_not_performed (сетевая проверка)", output)
+        self.assertIn("DNS и порт 53: исключение 53 включено, не проверено\n", output)
+        self.assertIn(f"  Подсказка: {PORT_53_HINT}\n", output)
+        self.assertIn("Режим резерва: без прямого резерва\n", output)
+        self.assertEqual(self.sources.proxy.calls, (1, 1, 1, (XKeenListName.PORT_EXCLUDE, XKeenListName.PORT_PROXYING)))
+        self.assertEqual(self.sources.process.calls, 1)
+        self.assertEqual(self.sources.keenetic.calls, (0, 0, 0, 0))
+        self.assertEqual(self.sources.geodata.calls, 0)
 
     def test_rendering_does_not_touch_sources(self):
         code, _, _ = self.flow("1\n0\n4\n0\n5\n0\n6\n0\n10\n0\n0\n")
@@ -420,8 +460,8 @@ class SnapshotFlowTests(unittest.TestCase):
             with self.subTest(value=value):
                 code, output, _ = self.flow("1\n1\n0\n0\n")
                 self.assertEqual(code, 0)
-                self.assertIn("Сводка установки по прочитанным источникам", output)
-                self.assertIn("DNS-теги: <скрыто>; стратегии доменов: <скрыто>", output)
+                self.assertIn("Сводка состояния по областям", output)
+                self.assertIn("Режим резерва: без прямого резерва", output)
                 self.assertNotIn(value, output)
                 self.assertNotIn("TEST_ONLY_TOKEN", output)
 
@@ -429,12 +469,103 @@ class SnapshotFlowTests(unittest.TestCase):
         assembly = assemble_main_menu(default_sources())
         stdout = io.StringIO()
         with forbid_external_effects():
-            code = run_menu(MenuNavigator(assembly.menu), assembly.actions, io.StringIO("1\n1\n0\n10\n5\n0\n0\n"), stdout)
+            code = run_menu(
+                MenuNavigator(assembly.menu), assembly.actions, io.StringIO("1\n1\n0\n4\n1\n0\n10\n5\n0\n0\n"), stdout,
+            )
         output = stdout.getvalue()
         self.assertEqual(code, 0)
         self.assertIn(REASON_MESSAGES[UnavailableReason.SOURCE_NOT_CONNECTED], output)
         self.assertIn("Справка по меню KeenVPN", output)
+        self.assertIn(
+            "Ядро Xray: не проверено\n  Проверка xray_process_consistent: не проверено, причина source_not_connected\n",
+            output,
+        )
         self.assertNotIn("Сводка установки", output)
+
+
+SNAPSHOT_HEADER = [
+    "Состояние по источникам, активная сетевая проверка не выполнялась:",
+    "  Ядро Xray: работает",
+    "  Перехват: не поддерживается",
+    "  Доступность VPN: не проверено",
+    "  DNS и порт 53: исключение 53 включено, не проверено",
+    "  Автозапуск: включён",
+    "  Режим резерва: без прямого резерва",
+    "  Черновик: не поддерживается",
+]
+
+
+class HeaderFlowTests(unittest.TestCase):
+    """Шапка главного меню из сценария сводки: только в корне, при входе в корень, без второго вычисления."""
+
+    def setUp(self):
+        self.sources, menu_sources = snapshot_menu_sources(InMemoryManagerMetadataStore())
+        self.assembly = assemble_main_menu(menu_sources, operation_ids=new_operation_id)
+
+    def flow(self, text: str, assembly: MenuAssembly | None = None):
+        assembly = self.assembly if assembly is None else assembly
+        stdout = io.StringIO()
+        with forbid_external_effects():
+            code = run_menu(MenuNavigator(assembly.menu), assembly.actions, io.StringIO(text), stdout, assembly.header)
+        output = stdout.getvalue()
+        for marker in PRIVATE_MARKERS:
+            self.assertNotIn(marker, output)
+        self.assertTrue(all(line.isprintable() for line in output.splitlines()))
+        return code, output
+
+    def test_root_shows_areas_separately_under_the_title(self):
+        code, output = self.flow("0\n")
+        self.assertEqual(code, 0)
+        self.assertTrue(output.startswith("\n".join([MAIN_MENU_TITLE, *SNAPSHOT_HEADER, "  1. Состояние и быстрые действия"])))
+        self.assertEqual(self.sources.process.calls, 1)
+        self.assertEqual(self.sources.keenetic.calls, (0, 0, 0, 0))
+
+    def test_header_is_read_on_entering_the_root_only(self):
+        code, output = self.flow("x\n\n1\n0\n6\n7\n0\n0\n0\n")
+        self.assertEqual(code, 0)
+        # Запуск и два возврата в корень; подсказки в корне, подменю и пункт 6 → 7 шапку не выполняют.
+        self.assertEqual(self.sources.process.calls, 3)
+        self.assertEqual(output.count(SNAPSHOT_HEADER[1] + "\n"), 5)
+        self.assertNotIn("Состояние и быстрые действия\n" + SNAPSHOT_HEADER[0], output)
+        self.assertNotIn("Автозапуск, DNS и поведение при сбое\n" + SNAPSHOT_HEADER[0], output)
+
+    def test_summary_item_repeats_the_header_from_the_same_scenario(self):
+        code, output = self.flow("1\n1\n0\n0\n")
+        self.assertEqual(code, 0)
+        summary = output.split("Сводка состояния по областям\n", 1)[1]
+        for line in SNAPSHOT_HEADER[1:]:
+            self.assertIn("\n" + line.strip() + "\n", summary)
+        # Шапка выполнена при запуске и при возврате в корень, пункт — один раз.
+        self.assertEqual(self.sources.process.calls, 3)
+
+    def test_header_marks_a_failed_source_without_its_text(self):
+        self.sources.process.outcome = OSError("/opt/etc/TEST_ONLY_SECRET 192.0.2.1")
+        code, output = self.flow("0\n")
+        self.assertEqual(code, 0)
+        self.assertIn("  Ядро Xray: не проверено\n  Перехват: не поддерживается\n", output)
+        self.assertIn("  Автозапуск: включён\n", output)
+        self.assertNotIn("TEST_ONLY_SECRET", output)
+
+    def test_default_assembly_header_reads_nothing_and_never_shows_health(self):
+        code, output = self.flow("0\n", assemble_main_menu(default_sources()))
+        self.assertEqual(code, 0)
+        for line in (
+            "  Ядро Xray: не проверено", "  Перехват: не поддерживается", "  Доступность VPN: не проверено",
+            "  DNS и порт 53: не проверено", "  Автозапуск: не проверено", "  Режим резерва: не проверено",
+            "  Черновик: не поддерживается",
+        ):
+            self.assertIn(line + "\n", output)
+        self.assertNotIn("работает", output)
+        self.assertNotIn("успешно", output)
+
+    def test_setup_menu_has_no_header(self):
+        sources, menu_sources = snapshot_menu_sources()
+        assembly = assemble_setup_menu(menu_sources)
+        self.assertIsNone(assembly.header)
+        code, output = self.flow("0\n", assembly)
+        self.assertEqual(code, 0)
+        self.assertNotIn("Ядро Xray", output)
+        self.assertEqual(sources.process.calls, 0)
 
 
 if __name__ == "__main__":

@@ -143,6 +143,8 @@ XKeen считает включённым только строковое `"on"`
 
 Источники вызываются по одному разу в фиксированном порядке: части Xray, настройки, init, список исключённых портов, список перехватываемых портов, список исключённых адресов. После отказа или некорректного ответа следующие источники не читаются; частичного результата нет. Метод `read()` обработчика выполняет то же чтение и возвращает `ProxyConfigModels` (набор частей Xray и собранные настройки XKeen) для доверенного кода либо `ErrorDetail` с теми же кодами; его использует [чтение существующей установки](installation.md).
 
+Метод `read_source(source)` читает один источник: `source` — член `ProxyConfigSource` (`xray`, `settings`, `init`, `port_exclude`, `port_proxying`, `ip_exclude`; порядок членов — порядок чтения), строка или другой тип отклоняются `TypeError`. Источник вызывается один раз, ответ проверяется так же, как в сценарии; результат — модель источника либо `ErrorDetail` с кодом этого источника из таблицы ниже, включая `xkeen_list_name_mismatch` в `reason`. `read()` читает источники этим методом и останавливается на первом отказе, [сводка состояния](status-summary.md) читает нужные ей источники по одному и продолжает после отказа.
+
 ```python
 from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler, XrayPositionView
 from keenvpn.domain.config_document import ConfigDocument
@@ -191,7 +193,7 @@ assert "vpn.example.test" not in str(result.data.to_dict())
 | `xkeen.settings` | `XKeenSettingsView`: имя, размер, SHA-256, разделы после проверки формата и `hidden_section_count`, `has_xkeen_section`, `settings_keys` после проверки формата и `hidden_settings_key_count`, `killswitch` |
 | `xkeen.init` | `XKeenInitView`: счётчики, `duplicate_names`, `flags` — кортеж `XKeenInitFlagView(name, status, value, indented_count)` |
 | `xkeen.port_exclude`, `xkeen.port_proxying`, `xkeen.ip_exclude` | `XKeenListView` со счётчиками строк и элементов |
-| `xkeen.port_53` | `Port53View`: порт, четыре признака записей и флаги `proxy_dns`, `proxy_router` |
+| `xkeen.port_53` | `Port53View`: порт, четыре признака записей и флаги `proxy_dns`, `proxy_router`; `Port53View.from_facts(facts)` строит его из `Port53Facts`, `to_dict()` даёт словарь с флагами `{status, value}` |
 
 Имена файлов проверяет `valid_document_name`; теги, протоколы, стратегии, имена разделов и ключи `xkeen.json` — значения из файлов, а не доверенные идентификаторы: они показываются только после проверки формата или по списку известных значений Xray по [правилу безопасного вывода](#безопасный-вывод-сводки), скрытое значение — `None` с признаком `*_known`. Домены, адреса, порты слушателей, пути, пароли, теги правил, значения параметров init и записи списков в представление не входят; модели источников недостижимы из результата. `to_dict()` возвращает JSON-совместимый словарь (`sections`, `conditions` и `flags` — словари по именам, позиции — словари `{part, index}`), представление одного результата не читает источники повторно.
 

@@ -10,6 +10,7 @@
 словаря; доступность VPN остаётся «не проверено», сетевые пробы не выполняются.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -198,6 +199,24 @@ _CHECKS = {
 }
 
 
+def _read_checked(source: str, read: Callable[[], object]) -> object | ErrorDetail:
+    try:
+        value = read()
+    except Exception:
+        # Текст и цепочка исключения источника могут содержать пути и вывод команд.
+        return unavailable(*_UNAVAILABLE[source])
+    error = check_source_model(_CHECKS[source], value)
+    return value if error is None else error
+
+
+def read_xray_process(processes: XrayProcessSource) -> XrayProcessObservation | ErrorDetail:
+    """Наблюдать процесс Xray один раз и проверить ответ; отказ — ErrorDetail с кодом источника процесса.
+
+    Чтение установки и сводка состояния используют одни и те же коды отказа.
+    """
+    return _read_checked("process", processes.current_xray_process)
+
+
 class InspectInstallationHandler:
     """Прочитать четыре области в фиксированном порядке и собрать одно представление.
 
@@ -244,14 +263,9 @@ class InspectInstallationHandler:
             ("geodata", self._geodata.current_geo_databases),
             ("process", self._processes.current_xray_process),
         ):
-            try:
-                value = read()
-            except Exception:
-                # Текст и цепочка исключения источника могут содержать пути и вывод команд.
-                return failed(operation_id, name, unavailable(*_UNAVAILABLE[source]))
-            error = check_source_model(_CHECKS[source], value)
-            if error is not None:
-                return failed(operation_id, name, error)
+            value = _read_checked(source, read)
+            if isinstance(value, ErrorDetail):
+                return failed(operation_id, name, value)
             models[source] = value
 
         try:

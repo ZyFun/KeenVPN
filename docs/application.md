@@ -18,6 +18,7 @@
 | `InspectKeeneticState` | `InspectKeeneticStateHandler` | Читает [состояние Keenetic](keenetic-state.md) из четырёх раздельных источников и возвращает счётчики и технические идентификаторы без MAC, имён и адресов |
 | `InspectProxyConfig` | `InspectProxyConfigHandler` | Читает [конфигурацию Xray и XKeen](proxy-config.md): части Xray, `xkeen.json`, параметры init и три списка через раздельные источники и возвращает структурную сводку без доменов, адресов, путей и паролей |
 | `InspectInstallation` | `InspectInstallationHandler` | Читает [существующую установку](installation.md) поверх двух сценариев выше и двух портов: состояние Keenetic, конфигурацию Xray и XKeen, инвентарь геобаз со ссылками правил на наборы и наблюдение процесса Xray, и добавляет пассивные [проверки](#статусы-проверок) по прочитанным данным; отказ любого источника завершает чтение его кодом без частичного результата |
+| `InspectStatusSummary` | `InspectStatusSummaryHandler` | Собирает [сводку состояния](status-summary.md) по семи областям — ядро Xray, перехват, доступность VPN, DNS и порт 53, автозапуск, режим резерва и черновик — для шапки главного меню и пункта «Сводка»: читает источники конфигурации Xray и XKeen по одному и наблюдение процесса; отказ или неподключённый источник даёт «не проверено» только своим областям, сетевые проверки не выполняются |
 | `ImportRoutingScheme` | `ImportRoutingSchemeHandler` | Переводит действующие [правила Xray в модель маршрутизации](routing-import.md) поверх `InspectProxyConfigHandler.read()`: группы условий в порядке файла, явные действия, неизвестные значения и поля только для просмотра, политика без выдуманного финального правила |
 | `InspectManagerMetadata` | `InspectManagerMetadataHandler` | Читает [метаданные менеджера](manager-metadata.md) из хранилища и показывает вариант хранения, состояния ролей и лимиты истории без путей, идентификаторов хранилищ и ревизии |
 | `ImportStoragePlacement` | `ImportStoragePlacementHandler` | Сохраняет обнаруженное размещение хранилищ и лимиты истории в метаданных менеджера как есть: создаёт или дописывает раздел размещения, совпадение не записывает, расхождение отклоняет без перезаписи; раздел записей правил и неизвестные поля файла сохраняет |
@@ -44,13 +45,15 @@ application импортирует доменные модели и собств
 помощниками `keenvpn.application.views`; ответы источников чтения состояния
 Keenetic, конфигурации Xray и XKeen и существующей установки проверяются общим
 `keenvpn.application.source_checks`: точный тип модели, повторная доменная
-проверка и отдельные коды отказа без текста и цепочки исключения. Проверки
+проверка и отдельные коды отказа без текста и цепочки исключения. Сводка
+состояния читает те же источники по одному через `read_source` обработчика
+конфигурации и `read_xray_process` с теми же кодами отказа. Проверки
 внутри данных результата описывает общий `keenvpn.application.checks`:
 статусы словаря контракта, признак активной сетевой проверки и построители
 проверок по уже прочитанным моделям.
 
 `ConnectionLinkView`, `ConnectionProfileView`, `ProtocolSupportView`, `RouteExplanationView`,
-`KeeneticPolicyResolutionView`, `KeeneticStateView`, `ProxyConfigView`, `InstallationView`, `RoutingSchemeView`,
+`KeeneticPolicyResolutionView`, `KeeneticStateView`, `ProxyConfigView`, `InstallationView`, `StatusSummaryView`, `RoutingSchemeView`,
 `ManagerMetadataStatusView`, `StoragePlacementImportView`, `RoutingRulesView`, `RuleIdentityAssignmentView` и `ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
 ошибки и преобразование `to_dict()` относятся к контракту результата: они не добавляют ANSI-оформление,
 заголовки меню или выравнивание для терминала. Отображение и сериализация одного
@@ -66,7 +69,7 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 | --- | --- |
 | `contract_version` | Версия формата команд и результатов, сейчас `1` (`CONTRACT_VERSION`) |
 | `operation_id` | Идентификатор вызова; по умолчанию случайная hex-строка |
-| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_installation`, `import_routing_scheme`, `inspect_manager_metadata`, `import_storage_placement`, `inspect_routing_rules` или `assign_rule_identifiers` |
+| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_installation`, `inspect_status_summary`, `import_routing_scheme`, `inspect_manager_metadata`, `import_storage_placement`, `inspect_routing_rules` или `assign_rule_identifiers` |
 | `status` | `OperationStatus.SUCCEEDED` или `OperationStatus.FAILED` |
 | `data` | Безопасное представление при успехе, иначе `None` |
 | `error` | `ErrorDetail` при отказе, иначе `None` |
@@ -184,6 +187,9 @@ Xray и маркера; `geodata_references_check(state)` — разрешимо
 наборы геобаз; `vpn_reachability_not_checked()` — доступность VPN, всегда
 `not_checked` с причиной `network_check_not_performed`. Их статусы и причины
 описаны в [чтении существующей установки](installation.md#проверки-сводки).
+Сводка состояния использует первый и третий построители для областей ядра
+и доступности VPN; проверки остальных её областей описаны в [сводке
+состояния](status-summary.md#области).
 
 В `to_dict()` набор — словарь `{"active_network_check": bool, "items": [...]}`,
 каждая проверка — `{"code", "status", "network", "reason"}`. Других полей
@@ -548,6 +554,30 @@ inbound/outbound, балансировщики с `fallbackTag`, число пр
 Поля представления, правила разбора ссылок, состояния процесса и пример
 с искусственными источниками описаны в [чтении существующей установки](installation.md).
 
+## Сводка состояния по областям
+
+`InspectStatusSummary` даёт раздельные состояния ядра Xray, перехвата,
+доступности VPN, DNS и порта 53, автозапуска, режима резерва и черновика одним
+сценарием: его результат показывают и шапка главного меню, и пункт «Сводка».
+`InspectStatusSummaryHandler(proxy, processes)` получает обработчик конфигурации
+Xray и XKeen и порт наблюдения процесса; `None` означает неподключённый
+источник. Каждый нужный источник читается один раз, отказ одного не прерывает
+чтение остальных: зависящие от него области получают `not_checked` с кодом
+отказа в причине и описанием отказа со следующим шагом, неподключённый источник —
+причину `source_not_connected`. `StatusSummaryView` содержит
+`active_network_check` (всегда `False`), семь областей `areas` с состоянием,
+проверкой и отказом источника, факты порта 53 `port_53` и факты режима резерва
+`fallback`; PID, теги, имена файлов и адреса в него не входят.
+
+| Ситуация | Результат |
+| --- | --- |
+| Неверный тип команды или версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
+| Источник Xray, XKeen или процесса отказал или вернул некорректные данные | успех; зависящие области `not_checked` с кодом отказа источника и `source_error` |
+| Источник не подключён | успех; зависящие области `not_checked` / `source_not_connected` |
+
+Области, состояния, причины, правило режима резерва и пример описаны в [сводке
+состояния](status-summary.md).
+
 ## Импорт правил маршрутизации
 
 `ImportRoutingScheme` переводит действующий раздел `routing` частей Xray
@@ -828,6 +858,12 @@ ANSI-последовательности в строках и байтах, а 
 вместо `CheckStatus`, инварианты проверки и набора, запрет итога сетевой проверки
 в пассивном результате, формат `to_dict()` и построители проверок по процессу
 Xray и геобазам без значений источников.
+
+`test_application_status_summary.py` проверяет сводку состояния: семь областей
+снимка, однократное чтение источников в фиксированном порядке, отказ каждого
+источника только в его областях без прерывания остальных чтений, неподключённые
+источники без вызовов, каждое состояние и статус каждой области, правило режима
+резерва, точные типы и инварианты моделей и отсутствие приватных значений.
 
 `test_application_profiles.py` отдельно проверяет просмотр профиля без внешних
 эффектов, ошибки источника, соответствие ID, версии и протокола, приватность

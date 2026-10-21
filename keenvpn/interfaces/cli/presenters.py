@@ -15,13 +15,16 @@
 from collections.abc import Callable, Iterable
 import re
 
-from keenvpn.application.checks import CHECK_STATUS_LABELS, ChecksView
+from keenvpn.application.checks import CHECK_STATUS_LABELS, ChecksView, CheckView
 from keenvpn.application.contract import CONTRACT_VERSION, CheckStatus, ErrorDetail, Result
 from keenvpn.application.installation import GeoDataView, InstallationView, XrayProcessView
 from keenvpn.application.keenetic_state import KeeneticStateView
 from keenvpn.application.manager_metadata import ManagerMetadataStatusView
-from keenvpn.application.proxy_config import ProxyConfigView, XKeenFlagView, XKeenListView
+from keenvpn.application.proxy_config import Port53View, ProxyConfigView, XKeenFlagView, XKeenListView
 from keenvpn.application.routing_import import RuleGroupView, RoutingSchemeView
+from keenvpn.application.status_summary import (
+    AREA_LABELS, PORT_53_HINT, STATE_LABELS, AreaState, FallbackView, StatusSummaryView, SummaryArea, SummaryAreaView,
+)
 from keenvpn.interfaces.cli.menu import MAX_ITEM_NUMBER, ListEntry, MenuList
 from keenvpn.interfaces.cli.terminal import UNAVAILABLE_MARK
 
@@ -33,6 +36,13 @@ HIDDEN = "<скрыто>"
 """Пометка вместо строки, не прошедшей проверку формата."""
 MISSING = "нет данных"
 """Пометка вместо отсутствующего значения."""
+SNAPSHOT_NOTE = (
+    "Это снимок источников на момент чтения: работу VPN, перехват трафика и маршрут клиента он не подтверждает."
+)
+PORT_53_NOTE = (
+    "Фактический перехват DNS не проверялся: это факты файлов, а не состояние трафика. "
+    "Отсутствие исключения само по себе не ошибка и не доказательство перехвата."
+)
 MAX_TEXT_LENGTH = 500
 _INDENT = "  "
 
@@ -270,22 +280,26 @@ def present_proxy_summary(view: ProxyConfigView) -> Lines:
     ]
 
 
-def present_port53(view: ProxyConfigView) -> Lines:
-    """Показать раздельные факты о порту 53 из файлов XKeen; фактический перехват не проверяется."""
-    if type(view) is not ProxyConfigView:
-        raise TypeError("Ожидается ProxyConfigView.")
-    facts = view.xkeen.port_53
+def _port53_facts(facts: Port53View) -> Lines:
     return [
-        "Порт 53 по файлам конфигурации XKeen",
         f"Запись {count(facts.port)} в списке исключённых портов: {flag(facts.port_exclude_entry)}; "
         f"диапазон с этим портом: {flag(facts.port_exclude_range)}",
         f"Запись {count(facts.port)} в списке перехватываемых портов: {flag(facts.port_proxying_entry)}; "
         f"диапазон с этим портом: {flag(facts.port_proxying_range)}",
         f"proxy_dns: {_flag_view(facts.proxy_dns)}; proxy_router: {_flag_view(facts.proxy_router)}",
+    ]
+
+
+def present_port53(view: ProxyConfigView) -> Lines:
+    """Показать раздельные факты о порту 53 из файлов XKeen; фактический перехват не проверяется."""
+    if type(view) is not ProxyConfigView:
+        raise TypeError("Ожидается ProxyConfigView.")
+    return [
+        "Порт 53 по файлам конфигурации XKeen",
+        *_port53_facts(view.xkeen.port_53),
         _list_view("Список исключённых портов", view.xkeen.port_exclude),
         _list_view("Список перехватываемых портов", view.xkeen.port_proxying),
-        "Фактический перехват DNS не проверялся: это факты файлов, а не состояние трафика. "
-        "Отсутствие исключения само по себе не ошибка и не доказательство перехвата.",
+        PORT_53_NOTE,
     ]
 
 
@@ -325,6 +339,19 @@ def present_xray_process(view: XrayProcessView) -> Lines:
     ]
 
 
+def _network_check(active: object) -> str:
+    return "выполнялась" if active is True else "не выполнялась" if active is False else HIDDEN
+
+
+def _check_line(item: CheckView) -> str:
+    line = f"{identifier(item.code)}: {check_status(item.status)}"
+    if item.reason is not None:
+        line += f", причина {identifier(item.reason)}"
+    if item.network is True:
+        line += " (сетевая проверка)"
+    return line
+
+
 def present_checks(view: ChecksView) -> Lines:
     """Показать проверки результата: признак активной сетевой проверки и статус каждой проверки.
 
@@ -332,16 +359,8 @@ def present_checks(view: ChecksView) -> Lines:
     """
     if type(view) is not ChecksView:
         raise TypeError("Ожидается ChecksView.")
-    active = view.active_network_check
-    performed = "выполнялась" if active is True else "не выполнялась" if active is False else HIDDEN
-    lines = ["Проверки", f"Активная сетевая проверка: {performed}"]
-    for item in view.items:
-        line = f"{identifier(item.code)}: {check_status(item.status)}"
-        if item.reason is not None:
-            line += f", причина {identifier(item.reason)}"
-        if item.network is True:
-            line += " (сетевая проверка)"
-        lines.append(_INDENT + line)
+    lines = ["Проверки", f"Активная сетевая проверка: {_network_check(view.active_network_check)}"]
+    lines.extend(_INDENT + _check_line(item) for item in view.items)
     return lines
 
 
@@ -356,8 +375,70 @@ def present_installation(view: InstallationView) -> Lines:
         *_indent(present_geodata(view.geodata)),
         *_indent(present_xray_process(view.xray_process)),
         *_indent(present_checks(view.checks)),
-        "Это снимок источников на момент чтения: работу VPN, перехват трафика и маршрут клиента он не подтверждает.",
+        SNAPSHOT_NOTE,
     ]
+
+
+def _area_text(item: SummaryAreaView) -> str:
+    """Состояние области, если оно известно, и подпись статуса, если он не «успешно»."""
+    status = item.check.status
+    if item.state is None:
+        return check_status(status)
+    state = safe_text(STATE_LABELS[item.state]) if type(item.state) is AreaState else HIDDEN
+    return state if status is CheckStatus.PASSED else f"{state}, {check_status(status)}"
+
+
+def _area_line(item: SummaryAreaView) -> str:
+    area = safe_text(AREA_LABELS[item.area]) if type(item.area) is SummaryArea else HIDDEN
+    return f"{area}: {_area_text(item)}"
+
+
+def _fallback_facts(facts: FallbackView) -> str:
+    return (
+        f"kill-switch: {_flag_view(facts.killswitch)}; балансировщиков: {optional_count(facts.balancer_count)}; "
+        f"цель fallback: прямой выход {optional_count(facts.direct_count)}, "
+        f"блокировка {optional_count(facts.blocked_count)}, VPN {optional_count(facts.vpn_count)}, "
+        f"не определена {optional_count(facts.unresolved_count)}, не задана {optional_count(facts.unset_count)}"
+    )
+
+
+def present_status_header(view: StatusSummaryView) -> Lines:
+    """Строки шапки главного меню: по строке на область сводки.
+
+    Подпись состояния показывается, если оно известно, подпись статуса — если он
+    не «успешно». Состояния, статусы и подписи приходят из сценария и каталогов
+    application: меню их не вычисляет, а область без известного состояния
+    никогда не выглядит исправной.
+    """
+    if type(view) is not StatusSummaryView:
+        raise TypeError("Ожидается StatusSummaryView.")
+    title = f"Состояние по источникам, активная сетевая проверка {_network_check(view.active_network_check)}:"
+    return [title, *_indent(_area_line(item) for item in view.areas)]
+
+
+def present_status_summary(view: StatusSummaryView) -> Lines:
+    """Показать сводку по областям: строку шапки, проверку и отказ источника каждой области и её факты.
+
+    Под областью DNS — факты порта 53 и подсказка о его исключении, под режимом
+    резерва — kill-switch и цели fallback по видам. Отказ источника показывается
+    так же, как отказ сценария, со следующим шагом из каталога application.
+    """
+    if type(view) is not StatusSummaryView:
+        raise TypeError("Ожидается StatusSummaryView.")
+    lines = ["Сводка состояния по областям", f"Активная сетевая проверка: {_network_check(view.active_network_check)}"]
+    for item in view.areas:
+        details = [f"Проверка {_check_line(item.check)}"]
+        if item.source_error is not None:
+            details += present_error(item.source_error)
+        if item.area is SummaryArea.DNS:
+            if view.port_53 is not None:
+                details += [*_port53_facts(view.port_53), PORT_53_NOTE]
+            details.append(f"Подсказка: {safe_text(PORT_53_HINT)}")
+        if item.area is SummaryArea.FALLBACK and view.fallback is not None:
+            details.append(_fallback_facts(view.fallback))
+        lines += [_area_line(item), *_indent(details)]
+    lines.append(SNAPSHOT_NOTE)
+    return lines
 
 
 ROUTING_LIST_TITLE = "Группы правил"

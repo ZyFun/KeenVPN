@@ -2,11 +2,14 @@
 
 Единственный модуль интерфейса, которому разрешён импорт конкретных адаптеров.
 Транспорта чтения роутера в этой версии нет, поэтому сборка по умолчанию
-не подключает ни одного источника: пункты с привязанным сценарием показываются
-недоступными, доступна только справка. Каждое действие выполняет сценарий
+не подключает ни одного источника: пункты, сценарию которых нужен источник,
+показываются недоступными. Сводка состояния допускает неподключённые
+источники, поэтому пункт «Сводка» и шапка главного меню доступны всегда
+и показывают такие области «не проверено». Каждое действие выполняет сценарий
 заново при каждом выборе пункта и не хранит результаты между выборами: список,
 который вернуло действие, существует, пока он открыт, а возврат из карточки
-или поиска источники не читает.
+или поиска источники не читает. Шапка выполняет тот же сценарий сводки при
+входе в корень главного меню.
 """
 
 from collections.abc import Mapping
@@ -14,7 +17,6 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from keenvpn.application.contract import OperationIdFactory, new_operation_id
-from keenvpn.application.installation import InspectInstallation, InspectInstallationHandler
 from keenvpn.application.keenetic_state import InspectKeeneticState, InspectKeeneticStateHandler
 from keenvpn.application.manager_metadata import InspectManagerMetadata, InspectManagerMetadataHandler
 from keenvpn.application.ports import (
@@ -24,12 +26,13 @@ from keenvpn.application.ports import (
 )
 from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler
 from keenvpn.application.routing_import import ImportRoutingScheme, ImportRoutingSchemeHandler
+from keenvpn.application.status_summary import InspectStatusSummary, InspectStatusSummaryHandler
 from keenvpn.interfaces.cli.menu import Menu, MenuError, UnavailableReason
 from keenvpn.interfaces.cli.presenters import (
-    present_about, present_installation, present_keenetic_state, present_manager_metadata, present_port53,
-    present_result, present_routing_scheme,
+    present_about, present_keenetic_state, present_manager_metadata, present_port53, present_result,
+    present_routing_scheme, present_status_header, present_status_summary,
 )
-from keenvpn.interfaces.cli.terminal import Action
+from keenvpn.interfaces.cli.terminal import Action, Header
 from keenvpn.interfaces.cli.tree import (
     BOUND_SCENARIOS, BUILTIN_ACTIONS, ActionStates, build_main_menu, build_setup_menu,
 )
@@ -68,10 +71,11 @@ class MenuSources:
 
 @dataclass(frozen=True, slots=True)
 class MenuAssembly:
-    """Собранное меню и обработчики его доступных действий."""
+    """Собранное меню, обработчики его доступных действий и шапка корня; у меню мастера шапки нет."""
 
     menu: Menu
     actions: Mapping[str, Action]
+    header: Header | None = None
 
 
 def default_sources() -> MenuSources:
@@ -79,8 +83,10 @@ def default_sources() -> MenuSources:
     return MenuSources()
 
 
-def _bindings(sources: MenuSources, operation_ids: OperationIdFactory) -> tuple[ActionStates, dict[str, Action]]:
-    """Решить для каждой привязки, доступна ли она, и собрать её действие."""
+def _bindings(
+    sources: MenuSources, operation_ids: OperationIdFactory,
+) -> tuple[ActionStates, dict[str, Action], Header]:
+    """Решить для каждой привязки, доступна ли она, и собрать её действие и шапку корня."""
     if type(sources) is not MenuSources:
         raise MenuError("Источники меню задаются объектом MenuSources.")
     keenetic = None
@@ -103,11 +109,13 @@ def _bindings(sources: MenuSources, operation_ids: OperationIdFactory) -> tuple[
         states[action_id] = None
         actions[action_id] = action
 
-    if keenetic is not None and proxy is not None and sources.geodata is not None and sources.process is not None:
-        installation = InspectInstallationHandler(
-            keenetic, proxy, sources.geodata, sources.process, operation_ids=operation_ids,
-        )
-        bind("status.summary", lambda: present_result(installation.execute(InspectInstallation()), present_installation))
+    # Сводка допускает неподключённые источники: пункт и шапка — один сценарий, который читает то, что подключено.
+    summary = InspectStatusSummaryHandler(proxy, sources.process, operation_ids=operation_ids)
+    bind("status.summary", lambda: present_result(summary.execute(InspectStatusSummary()), present_status_summary))
+
+    def header() -> list[str]:
+        return present_result(summary.execute(InspectStatusSummary()), present_status_header)
+
     if proxy is not None:
         routing = ImportRoutingSchemeHandler(proxy, operation_ids=operation_ids)
         bind("routing.list", lambda: present_result(routing.execute(ImportRoutingScheme()), present_routing_scheme))
@@ -124,20 +132,20 @@ def _bindings(sources: MenuSources, operation_ids: OperationIdFactory) -> tuple[
     states["routing.explain"] = UnavailableReason.INPUT_REQUIRED
     for action_id in BUILTIN_ACTIONS:
         bind(action_id, present_about)
-    return states, actions
+    return states, actions, header
 
 
 def assemble_main_menu(
     sources: MenuSources | None = None, *, operation_ids: OperationIdFactory = new_operation_id,
 ) -> MenuAssembly:
-    """Собрать главное меню `vpn-menu` для переданных источников."""
-    states, actions = _bindings(default_sources() if sources is None else sources, operation_ids)
-    return MenuAssembly(build_main_menu(states), MappingProxyType(actions))
+    """Собрать главное меню `vpn-menu` с шапкой сводки состояния для переданных источников."""
+    states, actions, header = _bindings(default_sources() if sources is None else sources, operation_ids)
+    return MenuAssembly(build_main_menu(states), MappingProxyType(actions), header)
 
 
 def assemble_setup_menu(
     sources: MenuSources | None = None, *, operation_ids: OperationIdFactory = new_operation_id,
 ) -> MenuAssembly:
-    """Собрать корневое меню `vpn-setup`: пункты мастера; действий мастера в этой версии нет."""
-    states, actions = _bindings(default_sources() if sources is None else sources, operation_ids)
+    """Собрать корневое меню `vpn-setup`: пункты мастера без шапки; действий мастера в этой версии нет."""
+    states, actions, _header = _bindings(default_sources() if sources is None else sources, operation_ids)
     return MenuAssembly(build_setup_menu(states), MappingProxyType(actions))

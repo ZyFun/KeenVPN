@@ -2,13 +2,13 @@
 
 Потоки ввода и вывода внедряются, поэтому цикл одинаково работает с терминалом
 и тестовыми потоками. В вывод попадают только фиксированные тексты, заголовки
-дерева и строки, которые вернуло действие; введённые строки, в том числе
-запросы поиска, не повторяются. Один цикл обслуживает все уровни: подменю,
-список, результаты поиска и карточку элемента. Цвет и запросы значений здесь
-отсутствуют.
+дерева, строки шапки корня и строки, которые вернуло действие; введённые строки,
+в том числе запросы поиска, не повторяются. Один цикл обслуживает все уровни:
+подменю, список, результаты поиска и карточку элемента. Цвет и запросы значений
+здесь отсутствуют.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 import re
 from typing import Protocol
 
@@ -20,6 +20,8 @@ from keenvpn.interfaces.cli.search import MAX_QUERY_CHARS, MAX_QUERY_WORDS, is_n
 
 Action = Callable[[], list[str] | MenuList]
 """Доступное действие пункта: возвращает строки для вывода или список элементов, ничего не печатает само."""
+Header = Callable[[], list[str]]
+"""Шапка корня: возвращает строки под заголовком корневого меню, ничего не печатает сама."""
 
 UNAVAILABLE_MARK = "[недоступно]"
 """Пометка пункта, который показан, но не выполняется."""
@@ -92,9 +94,11 @@ def read_line(stdin: TextInput) -> tuple[str | None, bool]:
     return "", True
 
 
-def render_menu(navigator: MenuNavigator) -> list[str]:
-    """Собрать строки текущего уровня: путь, все пункты с пометками и `0`."""
+def render_menu(navigator: MenuNavigator, header: Sequence[str] = ()) -> list[str]:
+    """Собрать строки текущего уровня: путь, шапку в корне, все пункты с пометками и `0`."""
     lines = [" / ".join(navigator.titles)]
+    if navigator.depth == 0:
+        lines.extend(header)
     for item in navigator.current.items:
         mark = "" if item.available else f" {UNAVAILABLE_MARK}"
         lines.append(f"{item.number:>3}. {item.title}{mark}")
@@ -131,14 +135,35 @@ def render_card(navigator: MenuNavigator) -> list[str]:
     return [" / ".join(navigator.titles), *level.entry.card, f"  0. {BACK_LABEL}"]
 
 
-def render_level(navigator: MenuNavigator) -> list[str]:
-    """Собрать строки открытого уровня любого вида."""
+def render_level(navigator: MenuNavigator, header: Sequence[str] = ()) -> list[str]:
+    """Собрать строки открытого уровня любого вида; шапка показывается только в корневом меню."""
     level = navigator.current
     if type(level) is ListLevel:
         return render_list(navigator)
     if type(level) is CardLevel:
         return render_card(navigator)
-    return render_menu(navigator)
+    return render_menu(navigator, header)
+
+
+class _RootHeader:
+    """Строки шапки корня: выполняются при входе в корень и повторяются без вызова, пока корень открыт."""
+
+    def __init__(self, header: Header | None) -> None:
+        self._header = header
+        self._lines: list[str] | None = None
+
+    def lines(self, navigator: MenuNavigator) -> list[str]:
+        """Строки для текущего уровня; вне корня шапки нет и она не выполняется."""
+        if self._header is None or navigator.depth != 0:
+            return []
+        if self._lines is None:
+            self._lines = list(self._header())
+        return self._lines
+
+    def track(self, navigator: MenuNavigator) -> None:
+        """Забыть строки после выхода из корня: следующий вход в корень выполнит шапку заново."""
+        if navigator.depth != 0:
+            self._lines = None
 
 
 def _flush(stream: TextOutput) -> None:
@@ -147,17 +172,19 @@ def _flush(stream: TextOutput) -> None:
         flush()
 
 
-def _menu_step(navigator: MenuNavigator, actions: Mapping[str, Action], line: str) -> list[str] | None:
+def _menu_step(
+    navigator: MenuNavigator, actions: Mapping[str, Action], line: str, root: _RootHeader,
+) -> list[str] | None:
     choice = parse_choice(line)
     if choice is None:
-        return [HINT, "", *render_menu(navigator)]
+        return [HINT, "", *render_menu(navigator, root.lines(navigator))]
     selection = navigator.select(choice)
     if selection.kind is SelectionKind.EXIT:
         return None
     if selection.kind is SelectionKind.UNKNOWN:
-        return [HINT, "", *render_menu(navigator)]
+        return [HINT, "", *render_menu(navigator, root.lines(navigator))]
     if selection.kind is SelectionKind.UNAVAILABLE:
-        return [REASON_MESSAGES[selection.reason], "", *render_menu(navigator)]
+        return [REASON_MESSAGES[selection.reason], "", *render_menu(navigator, root.lines(navigator))]
     if selection.kind is SelectionKind.ACTION:
         action = actions.get(selection.action_id)
         if action is None:
@@ -166,17 +193,17 @@ def _menu_step(navigator: MenuNavigator, actions: Mapping[str, Action], line: st
         if type(result) is MenuList:
             navigator.open_list(result)
             return ["", *render_list(navigator)]
-        return ["", *result, "", *render_menu(navigator)]
-    return render_level(navigator)
+        return ["", *result, "", *render_menu(navigator, root.lines(navigator))]
+    return render_level(navigator, root.lines(navigator))
 
 
-def _list_step(navigator: MenuNavigator, line: str) -> list[str]:
+def _list_step(navigator: MenuNavigator, line: str, root: _RootHeader) -> list[str]:
     choice = parse_choice(line)
     if choice is not None:
         selection = navigator.select(choice)
         if selection.kind is SelectionKind.UNKNOWN:
             return [LIST_HINT, "", *render_list(navigator)]
-        return render_level(navigator)
+        return render_level(navigator, root.lines(navigator))
     text = line.strip()
     if not text or is_number_like(text):
         return [LIST_HINT, "", *render_list(navigator)]
@@ -188,14 +215,17 @@ def _list_step(navigator: MenuNavigator, line: str) -> list[str]:
     return render_list(navigator)
 
 
-def _card_step(navigator: MenuNavigator, line: str) -> list[str]:
+def _card_step(navigator: MenuNavigator, line: str, root: _RootHeader) -> list[str]:
     if parse_choice(line) == 0:
         navigator.back()
-        return render_level(navigator)
+        return render_level(navigator, root.lines(navigator))
     return [CARD_HINT, "", *render_card(navigator)]
 
 
-def run_menu(navigator: MenuNavigator, actions: Mapping[str, Action], stdin: TextInput, stdout: TextOutput) -> int:
+def run_menu(
+    navigator: MenuNavigator, actions: Mapping[str, Action], stdin: TextInput, stdout: TextOutput,
+    header: Header | None = None,
+) -> int:
     """Выполнять цикл до `0` в корне или конца ввода; вернуть код завершения.
 
     В подменю нераспознанная строка, включая пустую, и неизвестный номер дают
@@ -203,14 +233,17 @@ def run_menu(navigator: MenuNavigator, actions: Mapping[str, Action], stdin: Tex
     показывает заранее заданную причину. В списке номер открывает карточку,
     другой текст — поиск по показанным строкам, `0` возвращает на один уровень;
     пустая строка и ошибочный ввод ничего не меняют. Строка длиннее предела
-    отбрасывается на любом уровне. `KeyboardInterrupt` не перехватывается:
-    его обрабатывает точка входа.
+    отбрасывается на любом уровне. Шапка корня выполняется при старте и при
+    каждом возврате в корень; повторный показ корня после подсказки или
+    действия в нём выводит те же строки без нового вызова. `KeyboardInterrupt`
+    не перехватывается: его обрабатывает точка входа.
     """
     def show(lines: list[str]) -> None:
         stdout.write("\n".join(lines) + "\n")
         _flush(stdout)
 
-    show(render_level(navigator))
+    root = _RootHeader(header)
+    show(render_level(navigator, root.lines(navigator)))
     while True:
         stdout.write(PROMPT)
         _flush(stdout)
@@ -220,15 +253,16 @@ def run_menu(navigator: MenuNavigator, actions: Mapping[str, Action], stdin: Tex
             _flush(stdout)
             return EXIT_OK
         if too_long:
-            show([LINE_TOO_LONG, "", *render_level(navigator)])
+            show([LINE_TOO_LONG, "", *render_level(navigator, root.lines(navigator))])
             continue
         level = navigator.current
         if type(level) is ListLevel:
-            show(_list_step(navigator, line))
+            show(_list_step(navigator, line, root))
         elif type(level) is CardLevel:
-            show(_card_step(navigator, line))
+            show(_card_step(navigator, line, root))
         else:
-            lines = _menu_step(navigator, actions, line)
+            lines = _menu_step(navigator, actions, line, root)
             if lines is None:
                 return EXIT_OK
             show(lines)
+        root.track(navigator)

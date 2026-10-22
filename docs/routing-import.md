@@ -170,7 +170,7 @@ assert "example.test" not in json.dumps(scheme.to_diagnostic())
 
 ## Прикладной сценарий
 
-`ImportRoutingScheme()` не имеет параметров, кроме версии контракта. `ImportRoutingSchemeHandler(proxy)` принимает обработчик `InspectProxyConfigHandler` и читает источники его методом `read()` в том же порядке и с теми же кодами отказов; метод `read()` самого обработчика импорта возвращает `RoutingScheme` для доверенного кода либо `ErrorDetail`.
+`ImportRoutingScheme()` не имеет параметров, кроме версии контракта. `ImportRoutingSchemeHandler(proxy)` принимает обработчик `InspectProxyConfigHandler` и читает источники его методом `read()` в том же порядке и с теми же кодами отказов; метод `read()` самого обработчика импорта возвращает `RoutingScheme` для доверенного кода либо `ErrorDetail`. Метод `import_models(models)` переводит уже прочитанные `ProxyConfigModels` в схему с тем же кодом отказа `routing_import_failed`; `read()` вызывает его после чтения, а [список правил для меню](#список-правил-для-меню) читает модели один раз сам через свойство `proxy` обработчика и использует их и для схемы, и для позиций назначений в структурной сводке.
 
 ```python
 from keenvpn.application.proxy_config import InspectProxyConfigHandler
@@ -329,6 +329,81 @@ print(rule.rule_id == store.read_metadata().metadata.rules[0].rule_id)
 | `unbound_records` | Кортеж `UnboundRecordView`: `rule_id`, `has_name`, `name_length`, `reason` |
 
 `AssignRuleIdentifiers` возвращает `RuleIdentityAssignmentView(outcome, assigned_count, rules)`: `created` — записи добавлены и раздел записан, `unchanged` — присваивать нечего (без новых записей операция завершается до кодирования, поэтому допустимый компактный файл, чья форматированная копия превысила бы предел размера, повтор не блокирует) или кандидат совпал с файлом по каноническим байтам, записи не было; `rules` — представление после операции. Кандидат — прочитанные метаданные с дополненным разделом: размещение, неизвестные поля, прежние записи, в том числе без правила, сохраняются; новые записи идут после прежних в порядке правил. Ревизию в последний момент сверяет хранилище; ревизия, которую вернула запись, должна совпасть с SHA-256 кандидата. Домены, адреса, коды наборов, названия и ключи в представления не входят; идентификаторы показываются после проверки формата. Коды отказов перечислены в [описании прикладных сценариев](application.md#правила-с-названиями-и-идентификаторами). Просмотр не вызывает запись ни при каких данных, поэтому первое подключение к действующей установке не создаёт раздел `rules` и не пишет метаданные, пока идентификаторы не присвоены явно.
+
+### Список правил для меню
+
+`ListRoutingRules` — третья читающая команда модуля `keenvpn.application.routing_rules`, за которой закреплён пункт меню «Все правила по порядку / поиск». `ListRoutingRulesHandler(routing, store)` принимает обработчик `ImportRoutingSchemeHandler` и порт `ManagerMetadataStore` либо `None`, если хранилище не подключено. Источники Xray и XKeen читаются один раз обработчиком конфигурации прокси в его порядке и с его кодами, схема строится `import_models()`, а позиции назначений групп берутся из структурной сводки тех же моделей. Хранилище читается один раз, когда подключено; запись не вызывается ни при каких данных.
+
+```python
+import os
+import tempfile
+
+from keenvpn.adapters.manager_metadata_files import ManagerMetadataFiles
+from keenvpn.application.proxy_config import InspectProxyConfigHandler
+from keenvpn.application.routing_import import ImportRoutingSchemeHandler
+from keenvpn.application.routing_rules import (
+    AssignRuleIdentifiers, AssignRuleIdentifiersHandler, ListRoutingRules, ListRoutingRulesHandler, MetadataState,
+    TargetPositionState,
+)
+from keenvpn.domain.config_document import ConfigDocument
+from keenvpn.domain.xkeen_config import XKeenList, XKeenListName, XKeenSettings, parse_xkeen_init
+from keenvpn.domain.xray_config import XrayConfigSet
+
+
+class FixedSources:
+    """Искусственные данные; реальные файлы читает адаптер роутера."""
+
+    def current_xray_config(self):
+        return XrayConfigSet((
+            ConfigDocument("04_outbounds.json", b'{"outbounds": [{"tag": "proxy-out", "protocol": "trojan"}, '
+                           b'{"tag": "direct", "protocol": "freedom"}]}'),
+            ConfigDocument("05_routing.json", b'{"routing": {"rules": [{"type": "field", "domain": ["domain:example.test"], '
+                           b'"outboundTag": "direct"}, {"type": "field", "network": "tcp,udp", "outboundTag": "proxy-out"}]}}'),
+        ))
+
+    def current_xkeen_settings(self):
+        return XKeenSettings(ConfigDocument("xkeen.json", b'{"xkeen": {"killswitch": "on"}}'))
+
+    def current_xkeen_init(self):
+        return parse_xkeen_init(b'start_auto="on"\nproxy_dns="off"\nproxy_router="off"\nipv6_support="on"\n')
+
+    def current_xkeen_list(self, name):
+        return XKeenList(name, b"53\n" if name is XKeenListName.PORT_EXCLUDE else b"")
+
+
+sources = FixedSources()
+routing = ImportRoutingSchemeHandler(InspectProxyConfigHandler(sources, sources, sources, sources))
+store = ManagerMetadataFiles(os.path.realpath(tempfile.mkdtemp()) + "/keenvpn")
+
+view = ListRoutingRulesHandler(routing, None).execute(ListRoutingRules()).data
+assert view.metadata_state is MetadataState.NOT_CONNECTED and view.identity is None
+assert [group.rule_count for group in view.groups] == [1, 0]  # Финальная группа правил модели не даёт.
+assert view.groups[0].target_position_state is TargetPositionState.RESOLVED
+assert (view.groups[0].target_position.part, view.groups[0].target_position.index) == ("04_outbounds.json", 1)
+
+view = ListRoutingRulesHandler(routing, store).execute(ListRoutingRules()).data
+assert view.metadata_state is MetadataState.ABSENT
+assert view.groups[0].rules[0].binding == "record_missing" and store.read_metadata() is None
+
+assert AssignRuleIdentifiersHandler(routing, store).execute(AssignRuleIdentifiers()).data.outcome == "created"
+view = ListRoutingRulesHandler(routing, store).execute(ListRoutingRules()).data
+rule = view.groups[0].rules[0]
+assert (view.metadata_state, view.identity.bound_rule_count, rule.binding, rule.has_name, rule.name) == (MetadataState.PRESENT, 1, "bound", False, None)
+assert "example.test" not in str(view.to_dict())
+print(rule.rule_id == store.read_metadata().metadata.rules[0].rule_id)
+```
+
+`RuleListView`:
+
+| Поле | Содержимое |
+|---|---|
+| `scheme` | `RoutingSchemeView` схемы импорта: группы в фактическом порядке действующего раздела `routing` |
+| `metadata_state` | `MetadataState`: `not_connected` — хранилище не передано, `absent` — файла метаданных нет, `present` — метаданные прочитаны (раздел `rules` может отсутствовать), `failed` — хранилище отказало или ответило не по контракту |
+| `metadata_error` | `ErrorDetail` отказа хранилища с тем же кодом, что у сценариев метаданных, и безопасным следующим шагом; только при `failed` |
+| `identity` | `RuleIdentitySummaryView(bound_rule_count, named_rule_count, unbound_rule_count, record_count, unbound_record_count)`; только при `absent` и `present`, `record_count` — `None`, если раздел `rules` не записан |
+| `groups` | Кортеж `RuleGroupIdentityView` в порядке групп схемы: `index` правила Xray, `rule_count` правил модели, `target_position_state` и `target_position`, `rules` |
+
+`target_position_state` (`TargetPositionState`): `resolved` — тег носит ровно один outbound или балансировщик среди всех частей, и `target_position` указывает его; `ambiguous` — тег повторяется, позиция не выбирается по первому; `unresolved` — тега нет ни в одной части; `absent` — у правила нет ни `outboundTag`, ни `balancerTag`; `unsupported` — заданы оба тега; `unavailable` — сводка не описывает правило, например оно не объект. Скрытый как небезопасный тег позицию не теряет. `rules` — кортеж `RuleListEntryView(index, offset, condition_type, action, read_only, has_id, rule_id, has_name, name, binding)` либо `None` при `not_connected` и `failed`: тогда ни одно правило не помечается ни привязанным, ни непривязанным. Название — пользовательский текст, проверенный `valid_rule_name` при построении; идентификатор проходит проверку формата. Домены, адреса, коды наборов и ключи записей в представление не входят. Контракт `InspectRoutingRules` не меняется: его представление по-прежнему несёт только признак и длину названия.
 
 ## Локальная проверка
 

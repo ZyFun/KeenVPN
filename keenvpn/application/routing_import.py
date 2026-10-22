@@ -14,7 +14,7 @@ from keenvpn.application.contract import (
     CONTRACT_VERSION, ErrorCategory, ErrorDetail, OperationIdFactory, Result,
     check_contract_version, failed, invalid_command, new_operation_id, succeeded,
 )
-from keenvpn.application.proxy_config import InspectProxyConfigHandler
+from keenvpn.application.proxy_config import InspectProxyConfigHandler, ProxyConfigModels
 from keenvpn.application.views import view_dict, view_fields
 from keenvpn.domain.config_document import ConfigDocumentError
 from keenvpn.domain.geodata import GeoDataError
@@ -218,6 +218,11 @@ class ImportRoutingSchemeHandler:
             return failed(operation_id, name, scheme)
         return succeeded(operation_id, name, RoutingSchemeView.from_scheme(scheme))
 
+    @property
+    def proxy(self) -> InspectProxyConfigHandler:
+        """Обработчик чтения конфигурации прокси, которым читается схема."""
+        return self._proxy
+
     def read(self) -> RoutingScheme | ErrorDetail:
         """Прочитать источники и вернуть схему для доверенного кода; отказ — ErrorDetail.
 
@@ -227,6 +232,17 @@ class ImportRoutingSchemeHandler:
         models = self._proxy.read()
         if isinstance(models, ErrorDetail):
             return models
+        return self.import_models(models)
+
+    def import_models(self, models: ProxyConfigModels) -> RoutingScheme | ErrorDetail:
+        """Перевести уже прочитанные модели в схему; отказ перевода — ErrorDetail с кодом `routing_import_failed`.
+
+        `read()` вызывает этот метод после чтения; список правил с идентичностью
+        читает модели один раз сам и использует их и для схемы, и для позиций
+        назначений в структурной сводке.
+        """
+        if type(models) is not ProxyConfigModels:
+            raise TypeError("Перевод принимает ProxyConfigModels.")
         try:
             return import_routing_scheme(models.xray)
         except _DOMAIN_ERRORS as error:

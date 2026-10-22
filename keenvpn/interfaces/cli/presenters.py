@@ -20,8 +20,14 @@ from keenvpn.application.contract import CONTRACT_VERSION, CheckStatus, ErrorDet
 from keenvpn.application.installation import GeoDataView, InstallationView, XrayProcessView
 from keenvpn.application.keenetic_state import KeeneticStateView
 from keenvpn.application.manager_metadata import ManagerMetadataStatusView
-from keenvpn.application.proxy_config import Port53View, ProxyConfigView, XKeenFlagView, XKeenListView
+from keenvpn.application.proxy_config import (
+    Port53View, ProxyConfigView, XKeenFlagView, XKeenListView, XrayPositionView,
+)
+from keenvpn.application.proxy_connections import BalancerConnectionView, ConnectionsView, OutboundConnectionView
 from keenvpn.application.routing_import import RuleGroupView, RoutingSchemeView
+from keenvpn.application.routing_rules import (
+    MetadataState, RuleGroupIdentityView, RuleListEntryView, RuleListView, TargetPositionState,
+)
 from keenvpn.application.status_summary import (
     AREA_LABELS, PORT_53_HINT, STATE_LABELS, AreaState, FallbackView, StatusSummaryView, SummaryArea, SummaryAreaView,
 )
@@ -61,6 +67,10 @@ _GEO_SOURCE = re.compile(
 """Источник геобазы в форме, которую оставляет домен: идентификатор либо схема и хост без пути."""
 _GEO_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
 """Версия геобазы: короткий идентификатор, как у домена."""
+_RULE_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+"""Идентификатор правила: UUID 8-4-4-4-12 в нижнем регистре, как проверяет домен."""
+MAX_RULE_NAME_LENGTH = 64
+"""Предел названия правила в символах: тот же, что у модели маршрутизации."""
 
 
 def _shown(pattern: re.Pattern[str], value: object) -> str:
@@ -112,6 +122,25 @@ def geo_version(value: object) -> str:
 def optional_identifier(value: object) -> str:
     """Идентификатор или пометка отсутствия."""
     return MISSING if value is None else identifier(value)
+
+
+def rule_id(value: object) -> str:
+    """Показать идентификатор правила только в канонической форме UUID; иначе пометку."""
+    return _shown(_RULE_ID, value)
+
+
+def rule_name(value: object) -> str:
+    """Показать название правила — пользовательский текст — только печатным и в пределе длины; иначе пометку.
+
+    Управляющие символы, ESC, невидимые символы, пробелы по краям, пустая
+    и слишком длинная строка не выводятся: правило то же, что у модели.
+    """
+    if (
+        type(value) is str and 1 <= len(value) <= MAX_RULE_NAME_LENGTH
+        and value.isprintable() and value == value.strip()
+    ):
+        return value
+    return HIDDEN
 
 
 def identifiers(values: Iterable[object]) -> str:
@@ -548,6 +577,206 @@ def present_routing_scheme(view: RoutingSchemeView) -> MenuList:
         ListEntry(number, _group_label(group), _group_card(group)) for number, group in enumerate(groups, start=1)
     )
     return MenuList(ROUTING_LIST_TITLE, ROUTING_ITEM_NAME, tuple(header), entries)
+
+
+CONNECTIONS_LIST_TITLE = "Подключения"
+CONNECTIONS_ITEM_NAME = "Подключение"
+SELECTORS_PER_LINE = 10
+"""Сколько селекторов балансировщика в строке карточки; селектор после фильтра не длиннее 64 символов."""
+CONNECTIONS_NOTE = (
+    "Адреса серверов, порты, идентификаторы, пароли, SNI, пути и ссылки не читаются и не показываются; "
+    "разбор ссылок не выполняется."
+)
+CONNECTIONS_HEALTH_NOTE = "Список не подтверждает доступность подключений: это снимок конфигурации на момент чтения."
+
+
+def _position(value: object) -> str:
+    """Позиция элемента Xray: имя части после фильтра и индекс; иной тип — пометка."""
+    if type(value) is not XrayPositionView:
+        return HIDDEN
+    return f"часть {file_name(value.part)}, индекс {count(value.index)}"
+
+
+def _selector(value: object) -> str:
+    return "пустой" if value == "" else identifier(value)
+
+
+def _connection_label(item: object) -> str:
+    if type(item) is OutboundConnectionView:
+        return (
+            f"outbound: тег {known_value(item.tag_known, item.tag, identifier, 'без тега')}, "
+            f"протокол {known_value(item.protocol_known, item.protocol, identifier, 'не задан')}, {_position(item.position)}"
+        )
+    if type(item) is BalancerConnectionView:
+        return (
+            f"балансировщик: тег {known_value(item.tag_known, item.tag, identifier, 'без тега')}, "
+            f"селекторов {count(len(item.selector))}, совпадений {count(item.selector_match_count)}, "
+            f"fallback {known_value(item.fallback_known, item.fallback_tag, identifier, 'не задан')}, "
+            f"стратегия {known_value(item.strategy_known, item.strategy, identifier, 'не задана')}, {_position(item.position)}"
+        )
+    return HIDDEN
+
+
+def _fallback_position(item: BalancerConnectionView) -> str:
+    if item.fallback_known is not True:
+        return "не задан"
+    if item.fallback_resolved is not True:
+        return "не найден"
+    return "не определена однозначно" if item.fallback_position is None else _position(item.fallback_position)
+
+
+def _connection_card(item: object) -> tuple[str, ...]:
+    if type(item) is OutboundConnectionView:
+        return (
+            "Вид: outbound",
+            f"Позиция: {_position(item.position)}",
+            f"Тег: {known_value(item.tag_known, item.tag, identifier, 'без тега')}",
+            f"Протокол: {known_value(item.protocol_known, item.protocol, identifier, 'не задан')}",
+            CONNECTIONS_NOTE,
+        )
+    if type(item) is BalancerConnectionView:
+        selectors = [f"Селекторов: {count(len(item.selector))}; совпадений outbound: {count(item.selector_match_count)}"]
+        for start in range(0, len(item.selector), SELECTORS_PER_LINE):
+            selectors.append(_INDENT + ", ".join(_selector(value) for value in item.selector[start:start + SELECTORS_PER_LINE]))
+        return (
+            "Вид: балансировщик",
+            f"Позиция: {_position(item.position)}",
+            f"Тег: {known_value(item.tag_known, item.tag, identifier, 'без тега')}",
+            *selectors,
+            f"Fallback: {known_value(item.fallback_known, item.fallback_tag, identifier, 'не задан')}; "
+            f"позиция цели: {_fallback_position(item)}",
+            f"Стратегия: {known_value(item.strategy_known, item.strategy, identifier, 'не задана')}",
+            CONNECTIONS_NOTE,
+        )
+    return (HIDDEN,)
+
+
+def present_connections(view: ConnectionsView) -> MenuList:
+    """Показать outbound и балансировщики списком: номер — позиция в списке сценария, начиная с 1.
+
+    Строка списка и карточка собраны из одних отфильтрованных значений;
+    адреса, порты, пароли и ссылки в представление не входят.
+    """
+    if type(view) is not ConnectionsView:
+        raise TypeError("Ожидается ConnectionsView.")
+    header = [
+        "Подключения по конфигурации Xray",
+        f"Частей: {count(view.part_count)}; outbound: {count(view.outbound_count)}; "
+        f"балансировщиков: {count(view.balancer_count)}",
+        f"Повторов тегов outbound: {count(view.duplicate_outbound_tag_count)}; "
+        f"повторов тегов балансировщиков: {count(view.duplicate_balancer_tag_count)}; "
+        f"скрытых тегов: {count(view.hidden_tag_count)}",
+        CONNECTIONS_NOTE,
+        CONNECTIONS_HEALTH_NOTE,
+    ]
+    items = view.connections[:MAX_ITEM_NUMBER]
+    if len(view.connections) > MAX_ITEM_NUMBER:
+        header.append(f"Подключений больше {MAX_ITEM_NUMBER}: в списке первые {MAX_ITEM_NUMBER}, остальные не показываются.")
+    entries = tuple(
+        ListEntry(number, _connection_label(item), _connection_card(item)) for number, item in enumerate(items, start=1)
+    )
+    return MenuList(CONNECTIONS_LIST_TITLE, CONNECTIONS_ITEM_NAME, tuple(header), entries)
+
+
+NAMES_PER_LABEL = 10
+"""Сколько названий правил входит в строку группы: название не длиннее 64 символов, строка остаётся в пределе."""
+METADATA_NOTES: dict[MetadataState, str] = {
+    MetadataState.NOT_CONNECTED: "Хранилище метаданных не подключено: названия и идентификаторы правил не показываются.",
+    MetadataState.ABSENT: "Метаданные менеджера не записаны: идентификаторы правилам ещё не присвоены.",
+    MetadataState.PRESENT: "Метаданные менеджера прочитаны.",
+    MetadataState.FAILED: "Названия и идентификаторы недоступны: хранилище метаданных отказало, список показан без них.",
+}
+TARGET_POSITION_LABELS: dict[TargetPositionState, str] = {
+    TargetPositionState.AMBIGUOUS: "не определена однозначно: тег повторяется",
+    TargetPositionState.UNRESOLVED: "не найдена: тега нет ни в одной части",
+    TargetPositionState.ABSENT: "без тега",
+    TargetPositionState.UNSUPPORTED: "не определена: заданы оба тега",
+    TargetPositionState.UNAVAILABLE: "сводка не описывает это правило",
+}
+
+
+def _target_position(group: RuleGroupIdentityView) -> str:
+    state = group.target_position_state
+    if type(state) is not TargetPositionState:
+        return HIDDEN
+    if state is TargetPositionState.RESOLVED:
+        return _position(group.target_position)
+    return safe_text(TARGET_POSITION_LABELS[state])
+
+
+def _rule_name_text(item: RuleListEntryView) -> str:
+    return f"«{rule_name(item.name)}»" if item.has_name is True else "не задано"
+
+
+def _identity_label(group: RuleGroupIdentityView) -> str:
+    line = f", правил {count(group.rule_count)}"
+    rules = group.rules
+    if rules is None:
+        return line
+    with_id = sum(item.has_id is True for item in rules)
+    names = [item for item in rules if item.has_name is True]
+    line += f", с ID {count(with_id)}, с названием {count(len(names))}"
+    if names:
+        shown = ", ".join(_rule_name_text(item) for item in names[:NAMES_PER_LABEL])
+        line += f", названия: {shown}"
+        if len(names) > NAMES_PER_LABEL:
+            line += f" (ещё {count(len(names) - NAMES_PER_LABEL)})"
+    return line
+
+
+def _rule_line(item: RuleListEntryView) -> str:
+    return (
+        f"{count(item.index)}: {identifier(item.condition_type)}, действие {identifier(item.action)}, "
+        f"только просмотр {flag(item.read_only)}, ID {rule_id(item.rule_id) if item.has_id is True else 'не присвоен'}, "
+        f"название {_rule_name_text(item)}, привязка {identifier(item.binding)}"
+    )
+
+
+def _identity_card(group: RuleGroupIdentityView) -> list[str]:
+    lines = [f"Назначение по позиции: {_target_position(group)}"]
+    if group.rules is None:
+        lines.append(f"Правил модели: {count(group.rule_count)}; названия и идентификаторы недоступны")
+        return lines
+    lines.append(f"Правил модели: {count(group.rule_count)} (позиция в схеме, счёт с нуля)")
+    lines.extend(_INDENT + _rule_line(item) for item in group.rules)
+    return lines
+
+
+def _metadata_lines(view: RuleListView) -> Lines:
+    state = view.metadata_state
+    if type(state) is not MetadataState:
+        return [HIDDEN]
+    lines = [safe_text(METADATA_NOTES[state])]
+    if view.metadata_error is not None:
+        lines += _indent(present_error(view.metadata_error))
+    identity = view.identity
+    if identity is not None:
+        records = "раздел записей не записан" if identity.record_count is None else f"записей правил {count(identity.record_count)}"
+        lines.append(
+            f"Идентичность: {records}; привязано {count(identity.bound_rule_count)}, "
+            f"с названием {count(identity.named_rule_count)}, без привязки {count(identity.unbound_rule_count)}; "
+            f"записей без правила {count(identity.unbound_record_count)}"
+        )
+    return lines
+
+
+def present_rule_list(view: RuleListView) -> MenuList:
+    """Показать группы правил в фактическом порядке с названиями и идентификаторами, когда они доступны.
+
+    Список, строки и карточки групп те же, что у представления схемы; к строке
+    добавляются число правил, счётчики идентичности и до `NAMES_PER_LABEL`
+    названий, к карточке — позиция назначения и по строке на правило модели.
+    Названия проходят фильтр `rule_name`, идентификаторы — `rule_id`.
+    """
+    if type(view) is not RuleListView:
+        raise TypeError("Ожидается RuleListView.")
+    base = present_routing_scheme(view.scheme)
+    header = (*base.header, *_metadata_lines(view))
+    entries = tuple(
+        ListEntry(entry.number, entry.label + _identity_label(group), (*entry.card, *_identity_card(group)))
+        for entry, group in zip(base.entries, view.groups[:MAX_ITEM_NUMBER], strict=True)
+    )
+    return MenuList(base.title, base.item_name, header, entries)
 
 
 def present_manager_metadata(view: ManagerMetadataStatusView) -> Lines:

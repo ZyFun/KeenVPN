@@ -124,6 +124,84 @@ ID политик и интерфейсов сегментов — технич�
 
 Текст и цепочка исключений источников в результат не попадают, `KeyboardInterrupt` и `SystemExit` проходят наружу. Успех означает только согласованное чтение переданных источников: он не подтверждает разрешённые подключения политик, фактическое наследование, работу XKeen или VPN и не меняет роутер.
 
+## Список устройств для меню
+
+`ListKeeneticDevices()` из `keenvpn.application.keenetic_devices` показывает записи `ip/hotspot.host` списком для пункта меню «Список, поиск, текущие назначения». `ListKeeneticDevicesHandler(keenetic)` принимает `InspectKeeneticStateHandler` и читает источники его методом `read()`: порядок чтения, коды отказов и правило «без частичного результата» те же, что у `InspectKeeneticState`. Список строится из собранного состояния в памяти; домен и представление `KeeneticStateView` не меняются.
+
+```python
+from keenvpn.application.keenetic_devices import ListKeeneticDevices, ListKeeneticDevicesHandler
+from keenvpn.application.keenetic_state import InspectKeeneticStateHandler
+from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
+from keenvpn.domain.keenetic_policy import KeeneticPolicy, KeeneticPolicySet
+
+
+class FixedSources:
+    """Искусственные данные; реальные ресурсы читает адаптер роутера."""
+
+    def current_policies(self):
+        return KeeneticPolicySet((KeeneticPolicy("Policy0", "NoVPN"), KeeneticPolicy("Policy2", "xkeen")))
+
+    def current_hotspot_settings(self):
+        return KeeneticHotspotSettings({
+            "policy": [{"interface": "Bridge0", "policy": "Policy0"}, {"interface": "Bridge1", "access": "deny"}],
+            "host": [
+                {"mac": "02:00:00:00:00:01", "access": "permit", "permit": True, "policy": "Policy2"},
+                {"mac": "02:00:00:00:00:02", "access": "deny", "deny": True},
+            ],
+        })
+
+    def current_registrations(self):
+        return KeeneticRegistrations({"fixture-phone": {"mac": "02:00:00:00:00:01"}})
+
+    def current_hotspot_runtime(self):
+        return KeeneticHotspotRuntime({"host": [
+            {"mac": "02:00:00:00:00:01", "active": True, "hostname": "phone-host", "interface": {"id": "Bridge0"}},
+        ]})
+
+
+sources = FixedSources()
+keenetic = InspectKeeneticStateHandler(sources, sources, sources, sources)
+result = ListKeeneticDevicesHandler(keenetic).execute(ListKeeneticDevices())
+assert result.succeeded
+first, second = result.data.devices
+assert (first.name, first.assignment, first.policy_id, first.policy_present) == ("fixture-phone", "explicit", "Policy2", True)
+assert (first.presence, first.observed_interface_id, first.segment_match) == ("online", "Bridge0", "matched")
+assert first.segment.policy_id == "Policy0"
+assert (second.name_known, second.registration_count, second.access_denied) == (False, 0, True)
+assert (second.presence, second.presence_reason, second.segment_match) == ("unknown", "no_observation", "not_observed")
+assert "phone-host" not in str(result.data.to_dict())
+```
+
+При успехе `data` — `DeviceListView`:
+
+| Поле | Содержимое |
+|---|---|
+| `policy_count`, `policy_ids` | Число и технические ID политик в порядке источника |
+| `segments`, `segment_missing_policy_count` | `KeeneticSegmentView` для каждого назначения `ip/hotspot.policy` и число назначений с ID, которого нет в списке политик |
+| `counts` | `DeviceCountsView`: `record_count`, `distinct_mac_count`, `duplicate_mac_count` (записи, чей MAC повторяется), `online_count`, `offline_count`, `unknown_count`, `explicit_count`, `inherit_count`, `unassigned_count`, `unknown_assignment_count`, `missing_policy_count`, `access_denied_count`, `read_only_count`, `hidden_name_count`, `ambiguous_observation_count`, `registrations_without_device_count`, `runtime_without_device_count` |
+| `devices` | `DeviceEntryView` для каждой записи `ip/hotspot.host` в порядке источника |
+
+Поля `DeviceEntryView`:
+
+| Поле | Содержимое |
+|---|---|
+| `position` | Индекс записи в `ip/hotspot.host`, счёт с нуля; различает записи с одинаковыми или скрытыми именами |
+| `registration_count`, `registration_names` | Имена регистраций `known/host` того же MAC в порядке реестра; имя вне формата (пустое, с пробелами по краям, непечатное или длиннее 64 символов) — `None` |
+| `name_known`, `name` | `name` задано только при единственной регистрации; при нескольких имена перечислены в `registration_names`, первое не выбирается |
+| `assignment`, `policy_id`, `policy_present` | Режим сохранённого назначения (`explicit`, `inherit`, `unassigned`, `unknown`), ID политики только для `explicit` и признак её наличия в `policy_ids`; для других режимов `None` |
+| `presence`, `presence_reason` | `online`, `offline` или `unknown` по наблюдению; причина только для `unknown`: `no_observation`, `ambiguous_observation` (MAC повторяется среди записей или наблюдений) или `active_unknown` (признак активности не булев) |
+| `access_denied`, `read_only`, `mac_duplicate` | Запрет доступа, «только просмотр» по правилам записи устройства и повтор MAC среди записей |
+| `observed_interface_known`, `observed_interface_id` | Наблюдался ли интерфейс и его технический ID; ID показан, только когда наблюдаемое значение совпало с интерфейсом одного из назначений `segments` (`matched` или `ambiguous`), иначе `None`: наблюдение может содержать MAC, адрес или имя хоста вместо ID интерфейса |
+| `segment_match`, `segment` | `not_observed`, `unassigned`, `matched` или `ambiguous`; `segment` — `KeeneticSegmentView` назначения с тем же интерфейсом только при `matched` |
+
+Сопоставление сегмента выполняется по техническому ID наблюдаемого интерфейса и не выводит состав сегмента и действующую политику устройства: при нескольких назначениях с одним интерфейсом ни одно не выбирается. Наблюдаемое значение без назначения сегмента остаётся известным, но скрытым: представление показывает только ID, которые уже присутствуют в `ip/hotspot.policy`. `unknown` у online не означает offline. Каталоги подписей `ASSIGNMENT_LABELS`, `PRESENCE_LABELS`, `PRESENCE_REASON_LABELS` и `SEGMENT_MATCH_LABELS` только для чтения; меню показывает их, а не вычисляет состояния. `to_dict()` возвращает JSON-совместимый словарь с ключами `policy_count`, `policy_ids`, `segments`, `segment_missing_policy_count`, `counts` и `devices`; имя регистрации встречается только в полях `name` и `registration_names`. Модели источников и собранное состояние недостижимы из результата.
+
+| Ситуация | Категория и код |
+|---|---|
+| Неверный тип команды или версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
+| Отказ, некорректный ответ или несогласованность источников | коды сценария `inspect_keenetic_state` из таблицы выше без изменения |
+| Список не удалось собрать из прочитанного состояния | `invalid_source_data` / `device_list_inconsistent` |
+
 ## Ошибки домена
 
 `KeeneticNativeError` содержит машинный `code` из `KeeneticNativeErrorCode` и фиксированный текст без исходных значений. Активное чужое исключение не сохраняется в `__context__` и `__cause__`.
@@ -145,6 +223,7 @@ ID политик и интерфейсов сегментов — технич�
 python3 -I -S -B -m unittest discover -s tests -p test_keenetic_native.py -v
 python3 -I -S -B -m unittest discover -s tests -p test_keenetic_rci.py -v
 python3 -I -S -B -m unittest discover -s tests -p test_application_keenetic_state.py -v
+python3 -I -S -B -m unittest discover -s tests -p test_application_keenetic_devices.py -v
 ```
 
-Тесты используют искусственные записи и [обезличенный снимок](../tests/fixtures/router_snapshot/README.md), из которого `tests/support/snapshot.py` собирает модели и управляемые источники. Проверяются сопоставление по MAC, записи без пары, неоднозначные наблюдения, отсутствующие политики, повреждённые модели, отказ каждого источника и отсутствие терминала, файлов, сети и процессов во время сценария. Роутер и сеть не требуются.
+Тесты используют искусственные записи и [обезличенный снимок](../tests/fixtures/router_snapshot/README.md), из которого `tests/support/snapshot.py` собирает модели и управляемые источники. Проверяются сопоставление по MAC, записи без пары, неоднозначные наблюдения, отсутствующие политики, повреждённые модели, отказ каждого источника и отсутствие терминала, файлов, сети и процессов во время сценария. Список устройств проверяется на снимке и на искусственных источниках, где имена регистраций отличаются от имён хостов: порядок и поля записей, каждое состояние online, назначения и сопоставления сегмента, скрытые имена, повтор MAC, отсутствие имён хостов, адресов и MAC в результате. Роутер и сеть не требуются.

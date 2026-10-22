@@ -65,6 +65,11 @@ def _valid_segment_id(value: object) -> bool:
     return type(value) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}", value) is not None
 
 
+def valid_segment_id(value: object) -> bool:
+    """Проверить формат технического ID интерфейса сегмента без преобразований."""
+    return _valid_segment_id(value)
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class KeeneticSegment:
     """Явно сопоставленный состав одного сегмента, включая offline-записи.

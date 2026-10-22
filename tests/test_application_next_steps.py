@@ -100,6 +100,7 @@ LITERAL_PAIRS = sorted({
     ("invalid_source_data", "invalid_keenetic_registrations"),
     ("invalid_source_data", "invalid_keenetic_runtime"),
     ("invalid_source_data", "keenetic_state_inconsistent"),
+    ("invalid_source_data", "device_list_inconsistent"),
     ("source_failed", "xray_config_unavailable"),
     ("source_failed", "xkeen_settings_unavailable"),
     ("source_failed", "xkeen_init_unavailable"),

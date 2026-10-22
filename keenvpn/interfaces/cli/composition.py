@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from keenvpn.application.contract import OperationIdFactory, new_operation_id
-from keenvpn.application.keenetic_state import InspectKeeneticState, InspectKeeneticStateHandler
+from keenvpn.application.keenetic_devices import ListKeeneticDevices, ListKeeneticDevicesHandler
+from keenvpn.application.keenetic_state import InspectKeeneticStateHandler
 from keenvpn.application.manager_metadata import InspectManagerMetadata, InspectManagerMetadataHandler
 from keenvpn.application.ports import (
     GeoDatabaseSource, KeeneticHotspotRuntimeSource, KeeneticHotspotSettingsSource, KeeneticPolicySource,
@@ -31,7 +32,7 @@ from keenvpn.application.routing_rules import ListRoutingRules, ListRoutingRules
 from keenvpn.application.status_summary import InspectStatusSummary, InspectStatusSummaryHandler
 from keenvpn.interfaces.cli.menu import Menu, MenuError, UnavailableReason
 from keenvpn.interfaces.cli.presenters import (
-    present_about, present_connections, present_keenetic_state, present_manager_metadata, present_port53,
+    present_about, present_connections, present_device_list, present_manager_metadata, present_port53,
     present_result, present_rule_list, present_status_header, present_status_summary,
 )
 from keenvpn.interfaces.cli.terminal import Action, Header
@@ -128,7 +129,9 @@ def _bindings(
         bind("routing.list", lambda: present_result(rules.execute(ListRoutingRules()), present_rule_list))
         bind("failsafe.port53_check", lambda: present_result(proxy.execute(InspectProxyConfig()), present_port53))
     if keenetic is not None:
-        bind("devices.list", lambda: present_result(keenetic.execute(InspectKeeneticState()), present_keenetic_state))
+        # Список устройств читает те же четыре источника тем же обработчиком состояния Keenetic.
+        devices = ListKeeneticDevicesHandler(keenetic, operation_ids=operation_ids)
+        bind("devices.list", lambda: present_result(devices.execute(ListKeeneticDevices()), present_device_list))
     if sources.metadata is not None:
         metadata = InspectManagerMetadataHandler(sources.metadata, operation_ids=operation_ids)
         bind(

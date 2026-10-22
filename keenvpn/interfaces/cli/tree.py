@@ -24,7 +24,7 @@ BOUND_SCENARIOS: Mapping[str, str] = {
     "connections.list": "inspect_connections",
     "routing.list": "list_routing_rules",
     "routing.explain": "explain_route",
-    "devices.list": "inspect_keenetic_state",
+    "devices.list": "list_keenetic_devices",
     "failsafe.port53_check": "inspect_proxy_config",
     "settings.storage": "inspect_manager_metadata",
 }

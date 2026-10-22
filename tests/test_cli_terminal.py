@@ -12,7 +12,13 @@ from keenvpn.application.routing_rules import AssignRuleIdentifiers, AssignRuleI
 from keenvpn.application.proxy_config import InspectProxyConfigHandler
 from keenvpn.application.routing_import import ImportRoutingSchemeHandler
 from keenvpn.domain.manager_metadata import ManagerMetadata, RuleRecord, decode_manager_metadata, encode_manager_metadata
-from keenvpn.interfaces.cli.presenters import CONNECTIONS_NOTE, METADATA_NOTES
+from keenvpn.interfaces.cli.presenters import CONNECTIONS_NOTE, DEVICES_NOTE, METADATA_NOTES, SEGMENT_MATCH_NOTE
+from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
+from keenvpn.domain.keenetic_policy import KeeneticPolicy, KeeneticPolicySet
+from tests.support.in_memory import (
+    InMemoryKeeneticHotspotRuntimeSource, InMemoryKeeneticHotspotSettingsSource, InMemoryKeeneticPolicySource,
+    InMemoryKeeneticRegistrationSource,
+)
 from keenvpn.application.routing_rules import MetadataState
 from keenvpn.application.ports import ManagerMetadataStoreError, MetadataStoreFailure
 from keenvpn.application.status_summary import PORT_53_HINT
@@ -341,16 +347,17 @@ class SnapshotFlowTests(unittest.TestCase):
         self.assertEqual(self.sources.proxy.calls[:3], (0, 0, 0))
         self.assertEqual((self.sources.geodata.calls, self.sources.process.calls), (0, 0))
 
-    def test_rules_devices_port53_storage_and_help_items(self):
-        code, output, _ = self.flow("4\n1\n0\n0\n5\n1\n0\n6\n7\n0\n10\n1\n5\n0\n0\n")
+    def test_rules_port53_storage_and_help_items(self):
+        code, output, _ = self.flow("4\n1\n0\n0\n6\n7\n0\n10\n1\n5\n0\n0\n")
         self.assertEqual(code, 0)
         for text in (
-            "Правила маршрутизации по конфигурации Xray", "Keenetic", "Порт 53 по файлам конфигурации XKeen",
+            "Правила маршрутизации по конфигурации Xray", "Порт 53 по файлам конфигурации XKeen",
             "Метаданные менеджера", "Метаданных нет: размещение хранилищ ещё не записано.", "Справка по меню KeenVPN",
         ):
             self.assertIn(text, output)
         self.assertEqual(self.sources.proxy.calls[:3], (2, 2, 2))
-        self.assertEqual(self.sources.keenetic.calls, (1, 1, 1, 1))
+        # Устройства Keenetic здесь не открывались: их список проверяет отдельный класс ниже.
+        self.assertEqual(self.sources.keenetic.calls, (0, 0, 0, 0))
 
     def test_rule_groups_open_as_list_with_search_and_cards(self):
         code, output, navigator = self.flow("4\n1\nfallback_mixed\n3\n0\n0\n0\n0\n0\n")
@@ -710,6 +717,158 @@ class ConnectionsAndRulesFlowTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Найдено: 1 из 8.", output)
         self.assertIn("название «ok-name», привязка bound", output)
+
+
+DEVICE_NAME = "TEST_ONLY_DEVICE"
+DEVICE_HOSTNAME = "private-host.example.test"
+DEVICE_MAC_A, DEVICE_MAC_B, DEVICE_MAC_C = "02:00:00:00:00:a1", "02:00:00:00:00:b2", "02:00:00:00:00:c3"
+DEVICE_INTERFACE_HOST = "privatehost.example.test"
+DEVICE_PRIVATE_MARKERS = (
+    DEVICE_HOSTNAME, "guest-host", "198.51.100", "2001:db8", "02:00:00", "fixture-private", "fixture-interface",
+    "privatehost", "\x1b",
+)
+# На снимке имена регистраций совпадают с именами хостов, поэтому там маркер `device-` не проверяется.
+SNAPSHOT_DEVICE_MARKERS = ("02:00:00:54", "192.0.2.", "2001:db8", "fixture-interface", "fixture-policy", "\x1b")
+
+
+def synthetic_keenetic_sources():
+    """Искусственные источники Keenetic: имена регистраций отличаются от имён хостов, адреса документальные."""
+    return dict(
+        policies=InMemoryKeeneticPolicySource(KeeneticPolicySet((KeeneticPolicy("Policy7", "fixture-private-vpn"),))),
+        hotspot=InMemoryKeeneticHotspotSettingsSource(KeeneticHotspotSettings({
+            "host": [
+                {"mac": DEVICE_MAC_A, "policy": "Policy7"}, {"mac": DEVICE_MAC_B, "access": "deny", "deny": True},
+                {"mac": DEVICE_MAC_C},
+            ],
+            "policy": [
+                {"interface": "Bridge0", "policy": "Policy7"}, {"interface": "Bridge1", "access": "deny"},
+                {"interface": "Bridge1", "policy": "Policy7"},
+            ],
+        })),
+        registrations=InMemoryKeeneticRegistrationSource(KeeneticRegistrations({
+            DEVICE_NAME: {"mac": DEVICE_MAC_A}, "Гость": {"mac": DEVICE_MAC_B}, " в пробелах ": {"mac": DEVICE_MAC_B.upper()},
+        })),
+        runtime=InMemoryKeeneticHotspotRuntimeSource(KeeneticHotspotRuntime({"host": [
+            {"mac": DEVICE_MAC_A, "active": True, "hostname": DEVICE_HOSTNAME, "ip": "198.51.100.7",
+             "ip6": ["2001:db8::7"], "interface": {"id": "Bridge0", "name": "fixture-interface"}},
+            {"mac": DEVICE_MAC_B, "active": False, "hostname": "guest-host", "interface": {"id": "Bridge1"}},
+            # Регрессия review 75-R01: наблюдение подставило имя хоста вместо ID интерфейса.
+            {"mac": DEVICE_MAC_C, "active": True, "interface": {"id": DEVICE_INTERFACE_HOST}},
+        ]})),
+    )
+
+
+class DevicesFlowTests(unittest.TestCase):
+    """Пункт 5 → 1 на снимке и искусственных источниках: список, поиск по имени, карточка, отказ источника."""
+
+    def setUp(self):
+        self.sources, self.menu_sources = snapshot_menu_sources()
+
+    def flow(self, text: str, menu_sources=None, markers=SNAPSHOT_DEVICE_MARKERS):
+        assembly = assemble_main_menu(self.menu_sources if menu_sources is None else menu_sources)
+        stdout = io.StringIO()
+        navigator = MenuNavigator(assembly.menu)
+        with forbid_external_effects():
+            code = run_menu(navigator, assembly.actions, io.StringIO(text), stdout)
+        output = stdout.getvalue()
+        for marker in markers:
+            self.assertNotIn(marker, output)
+        self.assertTrue(all(line.isprintable() for line in output.splitlines()))
+        return code, output, navigator
+
+    def test_devices_open_as_list_with_search_and_card_on_snapshot(self):
+        code, output, navigator = self.flow("5\n1\noffline\n6\n0\n0\n12\n0\n0\n0\n0\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(navigator.depth, 0)
+        path = "Главное меню KeenVPN / Устройства и политики / Устройства"
+        self.assertIn(
+            f"{path}\nУстройства Keenetic по прочитанному состоянию\nПолитик: 3\n  Policy10, Policy20, Policy30\n"
+            "Назначений сегментов: 2; без политики в списке: 0\n"
+            "  Сегмент Bridge0: назначение explicit, политика Policy10, запрет доступа нет, только просмотр нет\n"
+            "  Сегмент Bridge1: назначение unassigned, политика нет данных, запрет доступа да, только просмотр нет\n"
+            "Записей устройств: всего 19; online 12, offline 7, online неизвестно 0; разных MAC 19, записей с повтором MAC 0\n",
+            output,
+        )
+        self.assertIn(f"{DEVICES_NOTE}\n", output)
+        self.assertIn("  1. device-01: явная политика Policy10, online, запрет доступа нет, интерфейс Bridge0\n", output)
+        self.assertIn("  6. device-06: без назначения, offline, запрет доступа да, интерфейс не наблюдался\n", output)
+        self.assertIn(f"{path} / Результаты поиска\nНайдено: 7 из 19.\n  3. device-03:", output)
+        self.assertIn(
+            f"{path} / Результаты поиска / Устройство 6\nПозиция записи: 5 (счёт с нуля в ip/hotspot)\nРегистраций: 1\n  device-06\n"
+            "Назначение: unassigned — без назначения; в списке политик: нет данных\nOnline: offline; причина: нет\n"
+            "Запрет доступа: да; только просмотр: нет; MAC повторяется: нет\nНаблюдаемый интерфейс: не наблюдался\n"
+            f"Сегмент по интерфейсу: интерфейс не наблюдался\n{SEGMENT_MATCH_NOTE}\n{DEVICES_NOTE}\n", output,
+        )
+        self.assertIn(
+            f"{path} / Устройство 12\nПозиция записи: 11 (счёт с нуля в ip/hotspot)\nРегистраций: 1\n  device-12\n"
+            "Назначение: inherit — наследует политику сегмента; в списке политик: нет данных\nOnline: online; причина: нет\n"
+            "Запрет доступа: нет; только просмотр: нет; MAC повторяется: нет\nНаблюдаемый интерфейс: Bridge0\n"
+            "Сегмент по интерфейсу: назначение сегмента с этим интерфейсом\n"
+            "  Сегмент Bridge0: назначение explicit, политика Policy10, запрет доступа нет, только просмотр нет\n", output,
+        )
+        # Сценарий выполнен один раз: поиск, карточки и возвраты источники не читают.
+        self.assertEqual(self.sources.keenetic.calls, (1, 1, 1, 1))
+
+    def test_devices_search_matches_registration_name_and_never_hosts_or_addresses(self):
+        menu_sources = MenuSources(**synthetic_keenetic_sources())
+        code, output, navigator = self.flow("5\n1\ntest_only\n1\n0\n0\n2\n0\n0\n0\n0\n", menu_sources, DEVICE_PRIVATE_MARKERS)
+        self.assertEqual(code, 0)
+        self.assertEqual(navigator.depth, 0)
+        path = "Главное меню KeenVPN / Устройства и политики / Устройства"
+        self.assertIn(f"  1. {DEVICE_NAME}: явная политика Policy7, online, запрет доступа нет, интерфейс Bridge0\n", output)
+        self.assertIn("  2. регистраций 2: без назначения, offline, запрет доступа да, интерфейс Bridge1\n", output)
+        self.assertIn("  3. без регистрации: без назначения, online, запрет доступа нет, интерфейс <скрыто>\n", output)
+        self.assertIn(f"{path} / Результаты поиска\nНайдено: 1 из 3.\n  1. {DEVICE_NAME}:", output)
+        self.assertIn(f"{path} / Результаты поиска / Устройство 1\nПозиция записи: 0 (счёт с нуля в ip/hotspot)\nРегистраций: 1\n  {DEVICE_NAME}\n", output)
+        self.assertIn(
+            f"{path} / Устройство 2\nПозиция записи: 1 (счёт с нуля в ip/hotspot)\nРегистраций: 2\n  Гость\n  <скрыто>\n",
+            output,
+        )
+        self.assertIn("Сегмент по интерфейсу: несколько назначений сегментов с этим интерфейсом\n", output)
+        self.assertIn("Назначений сегментов: 3; без политики в списке: 0\n", output)
+        code, output, _ = self.flow("5\n1\n3\n0\n0\n0\n0\n", menu_sources, DEVICE_PRIVATE_MARKERS)
+        self.assertEqual(code, 0)
+        self.assertIn("Наблюдаемый интерфейс: <скрыто>\nСегмент по интерфейсу: назначения сегмента с этим интерфейсом нет\n", output)
+        for value in (
+            DEVICE_HOSTNAME, "198.51.100.7", DEVICE_MAC_A, "guest-host", "fixture-private-vpn", "в пробелах",
+            DEVICE_INTERFACE_HOST, "privatehost",
+        ):
+            with self.subTest(value=value):
+                code, output, _ = self.flow(f"5\n1\n{value}\n0\n0\n0\n", menu_sources, DEVICE_PRIVATE_MARKERS)
+                self.assertEqual(code, 0)
+                self.assertIn(NO_MATCHES, output)
+                self.assertNotIn("Найдено:", output)
+
+    def test_many_long_policy_ids_keep_the_devices_menu_running(self):
+        # Регрессия review 75-R02: 31 допустимый ID по 64 символа завершал меню кодом 1 при открытии 5 → 1.
+        sources = synthetic_keenetic_sources()
+        long_ids = [f"Policy{number:02d}" + "x" * 56 for number in range(31)]
+        sources["policies"].outcome = KeeneticPolicySet((
+            KeeneticPolicy("Policy7", "fixture-private-vpn"), *(KeeneticPolicy(policy_id) for policy_id in long_ids),
+        ))
+        code, output, navigator = self.flow("5\n1\n1\n0\n0\n0\n0\n", MenuSources(**sources), DEVICE_PRIVATE_MARKERS)
+        self.assertEqual(code, 0)
+        self.assertEqual(navigator.depth, 0)
+        self.assertIn("Политик: 32\n  Policy7, " + ", ".join(long_ids[:9]) + "\n  " + ", ".join(long_ids[9:19]) + "\n", output)
+        self.assertIn("\n  " + ", ".join(long_ids[29:31]) + "\nНазначений сегментов: 3", output)
+        self.assertIn("Устройство 1\nПозиция записи: 0", output)
+        self.assertTrue(all(len(line) <= MAX_LIST_LINE_LENGTH for line in output.splitlines()))
+        self.assertNotIn("Внутренняя ошибка", output)
+
+    def test_devices_failure_shows_error_with_next_step_instead_of_list(self):
+        self.sources.keenetic.runtime.outcome = OSError(f"Отказ: {DEVICE_HOSTNAME} 192.0.2.20 02:00:00:54:00:01")
+        code, output, navigator = self.flow("5\n1\n0\n0\n", markers=SNAPSHOT_DEVICE_MARKERS + (DEVICE_HOSTNAME,))
+        self.assertEqual(code, 0)
+        self.assertEqual(navigator.depth, 0)
+        self.assertIn(
+            "Отказ: source_failed / keenetic_runtime_unavailable\n"
+            "Причина: Не удалось прочитать наблюдаемое состояние клиентов Keenetic.\n"
+            f"Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.CHECK_SOURCE]}\n\nГлавное меню KeenVPN / Устройства и политики\n",
+            output,
+        )
+        self.assertNotIn("Устройства Keenetic", output)
+        self.assertNotIn("Номер — карточка", output)
+        self.assertEqual(self.sources.keenetic.calls, (1, 1, 1, 1))
 
 
 if __name__ == "__main__":

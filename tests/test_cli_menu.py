@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application.status_summary import InspectStatusSummary
-from keenvpn.application.keenetic_state import InspectKeeneticState
+from keenvpn.application.keenetic_devices import ListKeeneticDevices
 from keenvpn.application.manager_metadata import InspectManagerMetadata
 from keenvpn.application.proxy_config import InspectProxyConfig
 from keenvpn.application.proxy_connections import InspectConnections
@@ -294,7 +294,7 @@ class TreeTests(unittest.TestCase):
             "connections.list": InspectConnections.name,
             "routing.list": ListRoutingRules.name,
             "routing.explain": ExplainRoute.name,
-            "devices.list": InspectKeeneticState.name,
+            "devices.list": ListKeeneticDevices.name,
             "failsafe.port53_check": InspectProxyConfig.name,
             "settings.storage": InspectManagerMetadata.name,
         })

@@ -26,6 +26,7 @@
 | `InspectRoutingRules` | `InspectRoutingRulesHandler` | Показывает [правила с названиями и идентификаторами](routing-import.md#названия-и-идентификаторы-правил) из метаданных менеджера поверх `ImportRoutingSchemeHandler.read()` и порта хранилища: привязка по семантическому ключу, позиции, признак и длина названия, причины отсутствия привязки; ничего не записывает |
 | `AssignRuleIdentifiers` | `AssignRuleIdentifiersHandler` | Присваивает идентификаторы правилам без записи в метаданных: генерирует их подставляемой фабрикой `uuid4`, дописывает записи без названия и записывает раздел `rules` один раз только при изменениях |
 | `ListRoutingRules` | `ListRoutingRulesHandler` | Показывает [группы правил для меню](routing-import.md#список-правил-для-меню) в фактическом порядке вместе с названиями и идентификаторами из метаданных, когда хранилище подключено и прочитано: отказ или отсутствие хранилища не отказывает списку, позиции назначений берутся из структурной сводки; ничего не записывает |
+| `ListKeeneticDevices` | `ListKeeneticDevicesHandler` | Показывает [список устройств для меню](keenetic-state.md#список-устройств-для-меню) поверх `InspectKeeneticStateHandler.read()`: записи `ip/hotspot.host` в порядке источника с именем регистрации после проверки формата, назначением и ID политики, online по наблюдению, запретом доступа, наблюдаемым интерфейсом и сопоставлением с назначением сегмента; MAC, имена хостов, адреса и описания политик не входят |
 
 Сценарии работают в памяти. Они не устанавливают соединения, не выполняют DNS,
 не запускают Xray, не записывают файлы и не меняют конфигурацию роутера.
@@ -71,7 +72,7 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 | --- | --- |
 | `contract_version` | Версия формата команд и результатов, сейчас `1` (`CONTRACT_VERSION`) |
 | `operation_id` | Идентификатор вызова; по умолчанию случайная hex-строка |
-| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_connections`, `inspect_installation`, `inspect_status_summary`, `import_routing_scheme`, `inspect_manager_metadata`, `import_storage_placement`, `inspect_routing_rules`, `assign_rule_identifiers` или `list_routing_rules` |
+| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_connections`, `inspect_installation`, `inspect_status_summary`, `import_routing_scheme`, `inspect_manager_metadata`, `import_storage_placement`, `inspect_routing_rules`, `assign_rule_identifiers`, `list_routing_rules` или `list_keenetic_devices` |
 | `status` | `OperationStatus.SUCCEEDED` или `OperationStatus.FAILED` |
 | `data` | Безопасное представление при успехе, иначе `None` |
 | `error` | `ErrorDetail` при отказе, иначе `None` |
@@ -505,6 +506,35 @@ assert handler.execute(ResolveKeeneticPolicy("VPN")).data.outcome == "missing"
 
 Поля представления, правила сопоставления и пример с искусственными источниками
 описаны в [чтении состояния Keenetic](keenetic-state.md#прикладной-сценарий).
+
+## Список устройств для меню
+
+`ListKeeneticDevices` показывает записи устройств списком для пункта меню
+«Список, поиск, текущие назначения» и будущего Web.
+`ListKeeneticDevicesHandler(keenetic)` принимает `InspectKeeneticStateHandler`
+и читает четыре источника его методом `read()` с теми же порядком и кодами
+отказов; частичного результата нет. `DeviceListView` содержит технические ID
+политик, назначения сегментов, счётчики и кортеж `devices` в порядке
+`ip/hotspot.host`: позиция записи, имена регистраций `known/host` того же MAC
+после проверки формата, сохранённое назначение с ID политики и признаком её
+наличия в списке политик, online по наблюдению с причиной неизвестного
+состояния, запрет доступа, признаки «только просмотр» и «MAC повторяется»,
+наблюдаемый интерфейс и сопоставление с назначением сегмента по его
+техническому ID; ID интерфейса показывается только при совпадении
+с назначением сегмента того же чтения, иначе скрыт. Имя регистрации —
+пользовательский текст: оно допустимо только в полях `name` и `registration_names`. MAC, имена хостов, адреса
+и описания политик в представление не входят; состав сегмента и действующая
+политика устройства не вычисляются. Ничего не записывается, успех не
+подтверждает маршрут клиента или работу VPN.
+
+| Ситуация | Категория и код |
+| --- | --- |
+| Неверный тип команды или версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
+| Отказ, некорректный ответ или несогласованность источников Keenetic | коды сценария `inspect_keenetic_state` без изменения |
+| Список не удалось собрать из прочитанного состояния | `invalid_source_data` / `device_list_inconsistent` |
+
+Поля представления и пример с искусственными источниками описаны
+в [списке устройств для меню](keenetic-state.md#список-устройств-для-меню).
 
 ## Чтение конфигурации Xray и XKeen
 

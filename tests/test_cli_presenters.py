@@ -48,6 +48,13 @@ from keenvpn.interfaces.cli.presenters import (
 )
 from keenvpn.interfaces.cli.menu import MAX_ITEM_NUMBER, MAX_LIST_LINE_LENGTH, MenuList
 from keenvpn.interfaces.cli.presenters import ROUTING_ITEM_NAME, ROUTING_LIST_TITLE
+from keenvpn.application.keenetic_devices import (
+    DeviceCountsView, DeviceEntryView, DeviceListView, ListKeeneticDevices, ListKeeneticDevicesHandler,
+)
+from keenvpn.application.keenetic_state import KeeneticSegmentView
+from keenvpn.interfaces.cli.presenters import (
+    DEVICES_ITEM_NAME, DEVICES_LIST_TITLE, DEVICES_NOTE, SEGMENT_MATCH_NOTE, device_name, present_device_list,
+)
 from keenvpn.interfaces.cli.terminal import UNAVAILABLE_MARK
 from enum import StrEnum
 import json
@@ -945,6 +952,187 @@ class StatusSummaryPresenterTests(PresenterAssertions):
                     present(view.areas)
                 with self.assertRaises(TypeError):
                     present(payload)
+
+
+DEVICE_SAFE_MARKERS = tuple(marker for marker in PRIVATE_MARKERS if marker != "device-")
+"""Маркеры снимка без `device-`: имена регистраций снимка совпадают с именами хостов и показываются по решению."""
+
+
+class DeviceListPresenterTests(PresenterAssertions):
+    """Список устройств 5 → 1 на снимке: вводные строки, строки, карточки, фильтр имени и предел номеров."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        sources = snapshot_installation_sources()
+        keenetic = InspectKeeneticStateHandler(
+            sources.keenetic.policies, sources.keenetic.hotspot, sources.keenetic.registrations, sources.keenetic.runtime,
+        )
+        result = ListKeeneticDevicesHandler(keenetic).execute(ListKeeneticDevices())
+        assert result.succeeded, result.error
+        cls.devices = result.data
+
+    def listing(self, view=None):
+        with forbid_external_effects():
+            listing = present_device_list(self.devices if view is None else view)
+        self.assertIs(type(listing), MenuList)
+        self.assertEqual((listing.title, listing.item_name), (DEVICES_LIST_TITLE, DEVICES_ITEM_NAME))
+        lines = list_lines(listing)
+        text = "\n".join(lines)
+        self.assertTrue(all(line.isprintable() for line in lines))
+        for marker in DEVICE_SAFE_MARKERS:
+            self.assertNotIn(marker, text)
+        return listing
+
+    def test_snapshot_list_has_header_labels_and_cards_without_macs_or_hosts(self):
+        listing = self.listing()
+        self.assertEqual(listing.header[:5], (
+            "Устройства Keenetic по прочитанному состоянию", "Политик: 3", "  Policy10, Policy20, Policy30",
+            "Назначений сегментов: 2; без политики в списке: 0",
+            "  Сегмент Bridge0: назначение explicit, политика Policy10, запрет доступа нет, только просмотр нет",
+        ))
+        self.assertIn(
+            "Записей устройств: всего 19; online 12, offline 7, online неизвестно 0; разных MAC 19, записей с повтором MAC 0",
+            listing.header,
+        )
+        self.assertIn(
+            "Назначения: явных 15, наследуют 2, без назначения 2, не распознано 0; политики нет в списке 0; "
+            "запрет доступа 1; только просмотр 0", listing.header,
+        )
+        self.assertIn("Регистраций без записи: 0; наблюдений без записи: 0; неоднозначных наблюдений: 0; скрытых имён: 0", listing.header)
+        self.assertEqual(listing.header[-2:], (DEVICES_NOTE, presenters.SNAPSHOT_NOTE))
+        self.assertEqual([entry.number for entry in listing.entries], list(range(1, 20)))
+        self.assertEqual(listing.entries[0].label, "device-01: явная политика Policy10, online, запрет доступа нет, интерфейс Bridge0")
+        self.assertEqual(listing.entries[5].label, "device-06: без назначения, offline, запрет доступа да, интерфейс не наблюдался")
+        self.assertEqual(listing.entries[11].label, "device-12: наследует политику сегмента, online, запрет доступа нет, интерфейс Bridge0")
+        self.assertEqual(listing.entries[16].card, (
+            "Позиция записи: 16 (счёт с нуля в ip/hotspot)", "Регистраций: 1", "  device-17",
+            "Назначение: explicit — явная политика Policy30; в списке политик: да", "Online: offline; причина: нет",
+            "Запрет доступа: нет; только просмотр: нет; MAC повторяется: нет", "Наблюдаемый интерфейс: Bridge0",
+            "Сегмент по интерфейсу: назначение сегмента с этим интерфейсом",
+            "  Сегмент Bridge0: назначение explicit, политика Policy10, запрет доступа нет, только просмотр нет",
+            SEGMENT_MATCH_NOTE, DEVICES_NOTE,
+        ))
+        # Строка и карточка собраны из одних значений: имя в строке совпадает с единственной регистрацией карточки.
+        for entry in listing.entries:
+            self.assertEqual(entry.label.split(":")[0], entry.card[2].strip())
+        for wrong in (self.devices.devices, self.devices.devices[0], self.results["keenetic"].data):
+            with self.subTest(wrong=type(wrong).__name__), self.assertRaises(TypeError):
+                present_device_list(wrong)
+
+    def test_hidden_absent_and_several_names_and_each_catalog_value_are_shown(self):
+        first = self.devices.devices[0]
+        hidden = replace(first, registration_names=(None,), name=None)
+        absent = replace(first, registration_count=0, registration_names=(), name_known=False, name=None)
+        several = replace(first, registration_count=2, registration_names=("Телефон", None), name_known=False, name=None)
+        missing = replace(first, policy_id="Policy9", policy_present=False)
+        inherit = replace(first, assignment="inherit", policy_id=None, policy_present=None)
+        unknown = replace(first, assignment="unknown", policy_id=None, policy_present=None, read_only=True)
+        unseen = replace(
+            first, presence="unknown", presence_reason="no_observation", observed_interface_known=False,
+            observed_interface_id=None, segment_match="not_observed", segment=None,
+        )
+        ambiguous = replace(first, presence="unknown", presence_reason="ambiguous_observation", mac_duplicate=True)
+        active = replace(first, presence="unknown", presence_reason="active_unknown", segment_match="ambiguous", segment=None)
+        hidden_interface = replace(first, observed_interface_id=None, segment_match="unassigned", segment=None)
+        entries = (hidden, absent, several, missing, inherit, unknown, unseen, ambiguous, active, hidden_interface)
+        entries = tuple(replace(item, position=position) for position, item in enumerate(entries))
+        counts = DeviceCountsView(
+            record_count=10, distinct_mac_count=10, duplicate_mac_count=1, online_count=7, offline_count=0, unknown_count=3,
+            explicit_count=8, inherit_count=1, unassigned_count=0, unknown_assignment_count=1, missing_policy_count=1,
+            access_denied_count=0, read_only_count=1, hidden_name_count=2, ambiguous_observation_count=1,
+            registrations_without_device_count=0, runtime_without_device_count=0,
+        )
+        view = DeviceListView(
+            2, ("Policy10", "Policy30"), self.devices.segments, 0, counts, entries,
+        )
+        listing = self.listing(view)
+        labels = [entry.label for entry in listing.entries]
+        self.assertEqual(labels[0], "<скрыто>: явная политика Policy10, online, запрет доступа нет, интерфейс Bridge0")
+        self.assertTrue(labels[1].startswith("без регистрации: "))
+        self.assertTrue(labels[2].startswith("регистраций 2: "))
+        self.assertIn(": явная политика Policy9 (нет в списке политик), online", labels[3])
+        self.assertIn(": наследует политику сегмента, online", labels[4])
+        self.assertIn(": назначение не распознано, online", labels[5])
+        self.assertIn(", online неизвестно, запрет доступа нет, интерфейс не наблюдался", labels[6])
+        cards = [entry.card for entry in listing.entries]
+        self.assertEqual(cards[0][1:3], ("Регистраций: 1", "  <скрыто>"))
+        self.assertEqual(cards[1][1:2], ("Регистраций: 0",))
+        self.assertEqual(cards[2][1:4], ("Регистраций: 2", "  Телефон", "  <скрыто>"))
+        self.assertIn("Назначение: explicit — явная политика Policy9 (нет в списке политик); в списке политик: нет", cards[3])
+        self.assertIn("Назначение: unknown — назначение не распознано; в списке политик: нет данных", cards[5])
+        self.assertIn("Запрет доступа: нет; только просмотр: да; MAC повторяется: нет", cards[5])
+        self.assertIn("Online: online неизвестно; причина: наблюдения нет", cards[6])
+        self.assertIn("Сегмент по интерфейсу: интерфейс не наблюдался", cards[6])
+        self.assertIn("Online: online неизвестно; причина: наблюдение неоднозначно: MAC повторяется", cards[7])
+        self.assertIn("Запрет доступа: нет; только просмотр: нет; MAC повторяется: да", cards[7])
+        self.assertIn("Online: online неизвестно; причина: признак активности не распознан", cards[8])
+        self.assertIn("Сегмент по интерфейсу: несколько назначений сегментов с этим интерфейсом", cards[8])
+        self.assertIn("Наблюдаемый интерфейс: <скрыто>", cards[9])
+        self.assertIn("Сегмент по интерфейсу: назначения сегмента с этим интерфейсом нет", cards[9])
+        self.assertTrue(all("  Сегмент " not in line for index in (6, 8, 9) for line in cards[index]))
+        self.assertTrue(any(line.startswith("  Сегмент Bridge0") for line in cards[7]))
+        # Подписи берутся только из каталогов application: чужое значение не выводится.
+        for value in ("direct", "online ", None, 1, presenters.HIDDEN):
+            with self.subTest(value=value):
+                self.assertEqual(presenters._catalog(presenters.ASSIGNMENT_LABELS, value), HIDDEN)
+
+    def test_device_name_follows_the_user_text_rule(self):
+        for value in ("Телефон", "a", "x" * 64, "name with spaces", "«кавычки»", "1"):
+            with self.subTest(value=value):
+                self.assertEqual(device_name(value), value)
+        for value in ("", " x", "x ", "x" * 65, "a\x1bb", "a\nb", "a\tb", "​x", None, 5, b"x", "\ud800"):
+            with self.subTest(value=repr(value)):
+                self.assertEqual(device_name(value), HIDDEN)
+
+    def test_keenetic_state_segment_lines_are_unchanged_after_sharing_the_helper(self):
+        lines = present_keenetic_state(self.results["keenetic"].data)
+        self.assertEqual(
+            lines[3:5],
+            ["  Сегмент Bridge0: назначение explicit, политика Policy10, запрет доступа нет, только просмотр нет",
+             "  Сегмент Bridge1: назначение unassigned, политика нет данных, запрет доступа да, только просмотр нет"],
+        )
+
+    def test_many_long_policy_ids_are_split_into_lines_within_the_limit(self):
+        # Регрессия review 75-R02: 31 ID по 64 символа в одной строке превышали предел строки списка.
+        long_ids = tuple(f"Policy{number:02d}" + "x" * 56 for number in range(31))
+        view = replace(self.devices, policy_count=3 + len(long_ids), policy_ids=(*self.devices.policy_ids, *long_ids))
+        listing = self.listing(view)
+        self.assertEqual(listing.header[1], "Политик: 34")
+        self.assertEqual(listing.header[2], "  Policy10, Policy20, Policy30, " + ", ".join(long_ids[:7]))
+        self.assertEqual(listing.header[5], "  " + ", ".join(long_ids[27:31]))
+        self.assertTrue(listing.header[6].startswith("Назначений сегментов: "))
+        self.assertTrue(all(len(line) <= MAX_LIST_LINE_LENGTH for line in list_lines(listing)))
+        empty = replace(
+            self.devices, policy_count=0, policy_ids=(), segments=(), segment_missing_policy_count=0,
+            counts=replace(self.devices.counts, missing_policy_count=15),
+            devices=tuple(
+                replace(item, policy_present=False if item.policy_present is not None else None,
+                        observed_interface_id=None, segment_match="unassigned" if item.observed_interface_known else "not_observed",
+                        segment=None)
+                for item in self.devices.devices
+            ),
+        )
+        self.assertEqual(self.listing(empty).header[1:3], ("Политик: 0", "  нет"))
+
+    def test_more_records_than_numbers_are_cut_with_a_note(self):
+        template = DeviceEntryView(
+            0, 0, (), False, None, "unassigned", None, None, "online", None, False, False, False, False, None,
+            "not_observed", None,
+        )
+        entries = tuple(replace(template, position=position) for position in range(MAX_ITEM_NUMBER + 1))
+        counts = DeviceCountsView(
+            record_count=len(entries), distinct_mac_count=len(entries), duplicate_mac_count=0, online_count=len(entries),
+            offline_count=0, unknown_count=0, explicit_count=0, inherit_count=0, unassigned_count=len(entries),
+            unknown_assignment_count=0, missing_policy_count=0, access_denied_count=0, read_only_count=0,
+            hidden_name_count=0, ambiguous_observation_count=0, registrations_without_device_count=0,
+            runtime_without_device_count=0,
+        )
+        listing = self.listing(DeviceListView(0, (), (), 0, counts, entries))
+        self.assertEqual(len(listing.entries), MAX_ITEM_NUMBER)
+        self.assertEqual(listing.entries[-1].number, MAX_ITEM_NUMBER)
+        self.assertEqual(listing.header[-1], f"Записей больше {MAX_ITEM_NUMBER}: в списке первые {MAX_ITEM_NUMBER}, остальные не показываются.")
+        self.assertTrue(all(len(line) <= MAX_LIST_LINE_LENGTH for line in list_lines(listing)))
 
 
 if __name__ == "__main__":

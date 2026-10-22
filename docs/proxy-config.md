@@ -209,6 +209,63 @@ assert "vpn.example.test" not in str(result.data.to_dict())
 
 Текст и цепочка исключений источников в результат не попадают, `KeyboardInterrupt` и `SystemExit` проходят наружу. Успех означает только согласованное чтение переданных файлов: он не подтверждает принятие конфигурации Xray, работу XKeen, фактический перехват DNS, kill-switch или VPN и не меняет роутер.
 
+## Список подключений
+
+`InspectConnections()` не имеет параметров, кроме версии контракта. `InspectConnectionsHandler(proxy)` принимает обработчик `InspectProxyConfigHandler`, читает источники его методом `read()` — тот же порядок, те же коды отказов, без частичного результата — и строит `ConnectionsView` из `XrayConfigView` тех же моделей: домен не читается повторно и ничего не вычисляет заново.
+
+```python
+from keenvpn.application.proxy_config import InspectProxyConfigHandler, XrayPositionView
+from keenvpn.application.proxy_connections import InspectConnections, InspectConnectionsHandler
+from keenvpn.domain.config_document import ConfigDocument
+from keenvpn.domain.xkeen_config import XKeenList, XKeenListName, XKeenSettings, parse_xkeen_init
+from keenvpn.domain.xray_config import XrayConfigSet
+
+
+class FixedSources:
+    """Искусственные данные; реальные файлы читает адаптер роутера."""
+
+    def current_xray_config(self):
+        return XrayConfigSet((
+            ConfigDocument("04_outbounds.json", b'{"outbounds": [{"tag": "proxy-out", "protocol": "trojan", '
+                           b'"settings": {"servers": [{"address": "vpn.example.test", "password": "TEST_ONLY"}]}}, '
+                           b'{"tag": "direct", "protocol": "freedom"}]}'),
+            ConfigDocument("05_routing.json", b'{"routing": {"balancers": [{"tag": "pool", "selector": ["proxy-"], '
+                           b'"fallbackTag": "direct", "strategy": {"type": "leastPing"}}]}}'),
+        ))
+
+    def current_xkeen_settings(self):
+        return XKeenSettings(ConfigDocument("xkeen.json", b'{"xkeen": {"killswitch": "on"}}'))
+
+    def current_xkeen_init(self):
+        return parse_xkeen_init(b'start_auto="on"\nproxy_dns="off"\nproxy_router="off"\nipv6_support="on"\n')
+
+    def current_xkeen_list(self, name):
+        return XKeenList(name, b"53\n" if name is XKeenListName.PORT_EXCLUDE else b"")
+
+
+sources = FixedSources()
+proxy = InspectProxyConfigHandler(sources, sources, sources, sources)
+result = InspectConnectionsHandler(proxy).execute(InspectConnections())
+assert result.succeeded
+view = result.data
+assert (view.outbound_count, view.balancer_count, view.hidden_tag_count) == (2, 1, 0)
+assert [item.kind.value for item in view.connections] == ["outbound", "outbound", "balancer"]
+assert (view.connections[0].tag, view.connections[0].protocol) == ("proxy-out", "trojan")
+assert view.connections[2].fallback_position == XrayPositionView("04_outbounds.json", 1)
+assert "vpn.example.test" not in str(view.to_dict()) and "TEST_ONLY" not in str(view.to_dict())
+```
+
+`ConnectionsView`:
+
+| Поле | Содержимое |
+|---|---|
+| `part_count`, `outbound_count`, `balancer_count` | Число частей набора, outbound и балансировщиков во всех частях |
+| `duplicate_outbound_tag_count`, `duplicate_balancer_tag_count` | Число повторяющихся тегов по исходным значениям, как в сводке |
+| `hidden_tag_count` | Число элементов, чей тег задан, но скрыт как небезопасный |
+| `connections` | Кортеж: сначала все outbound в порядке частей и индексов сводки, затем все балансировщики; номер элемента в меню — его позиция здесь, начиная с 1 |
+
+Элемент `OutboundConnectionView`: `kind` (`outbound`), `position` — `XrayPositionView(part, index)`, `tag_known`, `tag`, `protocol_known`, `protocol`. Элемент `BalancerConnectionView`: `kind` (`balancer`), `position`, `tag_known`, `tag`, `selector` (скрытый селектор — `None` на своей позиции, пустой — `""`), `selector_match_count`, `fallback_known`, `fallback_tag`, `fallback_resolved`, `fallback_position`, `strategy_known`, `strategy`. Значения те же, что у `XrayEndpointView` и `XrayBalancerView` сводки, по [правилу безопасного вывода](#безопасный-вывод-сводки): скрытое значение — `None` с признаком `*_known`, поэтому два outbound со скрытыми тегами различаются только позицией. Вид действия outbound (прямой выход, блокировка, VPN) в список не входит: по одному протоколу без разрешателя [импорта правил](routing-import.md) его нельзя определить безопасно — outbound `freedom` с `proxySettings` или `dialerProxy` передаёт соединение дальше. Адреса серверов, порты, идентификаторы, пароли, SNI, пути и ссылки не читаются, разбор ссылок не выполняется, поля настроек outbound не учитываются даже по именам. `to_dict()` возвращает JSON-совместимый словарь, где каждый элемент несёт `kind`, а позиции — словари `{part, index}`. Коды отказов — коды `InspectProxyConfig` без изменения плюс `invalid_command` и `unsupported_contract_version`. Успех не подтверждает доступность подключений, работу Xray, XKeen или VPN.
+
 ## Ошибки домена
 
 `ConfigDocumentError`, `XrayConfigError` и `XKeenConfigError` содержат машинный `code` и фиксированный текст без имён файлов, содержимого и значений. Активное чужое исключение не сохраняется в `__context__` и `__cause__`.

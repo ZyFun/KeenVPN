@@ -18,8 +18,18 @@ from keenvpn.application.keenetic_state import InspectKeeneticState, InspectKeen
 from keenvpn.application.manager_metadata import (
     ImportStoragePlacement, ImportStoragePlacementHandler, InspectManagerMetadata, InspectManagerMetadataHandler,
 )
-from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler
+from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler, XrayPositionView
+from keenvpn.application.proxy_connections import (
+    BalancerConnectionView, ConnectionsView, InspectConnections, InspectConnectionsHandler, OutboundConnectionView,
+)
 from keenvpn.application.routing_import import ImportRoutingScheme, ImportRoutingSchemeHandler
+from keenvpn.application.routing_rules import (
+    ListRoutingRules, ListRoutingRulesHandler, MetadataState, RuleGroupIdentityView, RuleListEntryView,
+    TargetPositionState,
+)
+from keenvpn.domain.manager_metadata import ManagerMetadata, RuleRecord, UnknownFields, encode_manager_metadata
+from keenvpn.domain.rule_binding import rule_key, scheme_rules
+from keenvpn.domain.routing_import import import_routing_scheme
 from keenvpn.application.status_summary import PORT_53_HINT, InspectStatusSummary, InspectStatusSummaryHandler
 from keenvpn.domain.config_document import ConfigDocument
 from keenvpn.domain.xray_config import XrayConfigSet
@@ -31,6 +41,11 @@ from keenvpn.interfaces.cli.presenters import (
     present_manager_metadata, present_port53, present_proxy_summary, present_result, present_routing_scheme,
     present_xray_process, safe_text,
 )
+from keenvpn.interfaces.cli.presenters import (
+    CONNECTIONS_HEALTH_NOTE, CONNECTIONS_ITEM_NAME, CONNECTIONS_LIST_TITLE, CONNECTIONS_NOTE, METADATA_NOTES,
+    NAMES_PER_LABEL, SELECTORS_PER_LINE, TARGET_POSITION_LABELS, present_connections, present_rule_list, rule_id,
+    rule_name,
+)
 from keenvpn.interfaces.cli.menu import MAX_ITEM_NUMBER, MAX_LIST_LINE_LENGTH, MenuList
 from keenvpn.interfaces.cli.presenters import ROUTING_ITEM_NAME, ROUTING_LIST_TITLE
 from keenvpn.interfaces.cli.terminal import UNAVAILABLE_MARK
@@ -38,12 +53,13 @@ from enum import StrEnum
 import json
 
 from keenvpn.adapters.xray_configs import xray_config_from_files
-from keenvpn.application.ports import MetadataStoreFailure
+from keenvpn.application.ports import ManagerMetadataStoreError, MetadataStoreFailure
 from tests.support.in_memory import InMemoryManagerMetadataStore, InMemoryStoragePlacementSource
 from tests.support.isolation import forbid_external_effects
 from tests.support.snapshot import (
     SYNTHETIC_GEOIP_SHA256, SYNTHETIC_HISTORY_RETENTION, SYNTHETIC_HISTORY_SIZE, SYNTHETIC_STORAGE_ID,
-    SYNTHETIC_STORAGE_ROOT, load_xray_snapshot_files, snapshot_installation_sources, synthetic_storage_placement,
+    SYNTHETIC_STORAGE_ROOT, load_xray_snapshot_files, snapshot_installation_sources, snapshot_xray_config,
+    synthetic_storage_placement,
 )
 
 
@@ -386,6 +402,242 @@ class RoutingCardTests(PresenterAssertions):
         self.assertEqual(groups.entries[-1].number, MAX_ITEM_NUMBER)
         self.assertIn(f"Групп больше {MAX_ITEM_NUMBER}: в списке первые {MAX_ITEM_NUMBER}, остальные не показываются.",
                       groups.header)
+
+
+NAME_MARKER = "TEST_ONLY_PRIVATE_NAME"
+RULE_ID = "0000abcd-0000-4000-8000-ffff00000001"
+
+
+def fixed_id(index: int) -> str:
+    return f"0000abcd-0000-4000-8000-ffff{index:08x}"
+
+
+class ConnectionsPresenterTests(PresenterAssertions):
+    """Список подключений: строки и карточки из тех же отфильтрованных значений, скрытое отличается от отсутствующего."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        sources = snapshot_installation_sources()
+        proxy = InspectProxyConfigHandler(sources.proxy.xray, sources.proxy.settings, sources.proxy.init, sources.proxy.lists)
+        result = InspectConnectionsHandler(proxy).execute(InspectConnections())
+        assert result.succeeded
+        cls.connections = result.data
+
+    def test_snapshot_list_has_outbounds_then_balancer_with_positions(self):
+        with forbid_external_effects():
+            listing = present_connections(self.connections)
+        self.assertIs(type(listing), MenuList)
+        self.assertEqual((listing.title, listing.item_name), (CONNECTIONS_LIST_TITLE, CONNECTIONS_ITEM_NAME))
+        text = self.assert_safe_lines(list_lines(listing))
+        self.assertEqual(listing.header[0], "Подключения по конфигурации Xray")
+        self.assertIn("Частей: 7; outbound: 3; балансировщиков: 1", text)
+        self.assertIn("Повторов тегов outbound: 0; повторов тегов балансировщиков: 0; скрытых тегов: 0", text)
+        self.assertIn(CONNECTIONS_NOTE, listing.header)
+        self.assertIn(CONNECTIONS_HEALTH_NOTE, listing.header)
+        self.assertEqual([entry.number for entry in listing.entries], [1, 2, 3, 4])
+        self.assertEqual(listing.entries[0].label, "outbound: тег trojan-out, протокол trojan, часть 04_outbounds.json, индекс 0")
+        self.assertEqual(
+            listing.entries[3].label,
+            "балансировщик: тег vpn-group, селекторов 1, совпадений 1, fallback blocked, стратегия leastPing, "
+            "часть 05_routing.json, индекс 0",
+        )
+        self.assertEqual(listing.entries[1].card, (
+            "Вид: outbound", "Позиция: часть 04_outbounds.json, индекс 1", "Тег: direct", "Протокол: freedom",
+            CONNECTIONS_NOTE,
+        ))
+        self.assertEqual(listing.entries[3].card, (
+            "Вид: балансировщик", "Позиция: часть 05_routing.json, индекс 0", "Тег: vpn-group",
+            "Селекторов: 1; совпадений outbound: 1", "  trojan-out",
+            "Fallback: blocked; позиция цели: часть 04_outbounds.json, индекс 2", "Стратегия: leastPing",
+            CONNECTIONS_NOTE,
+        ))
+        with self.assertRaises(TypeError):
+            present_connections(self.connections.connections)
+
+    def test_hidden_and_absent_values_are_distinguished_and_positions_tell_hidden_apart(self):
+        position = XrayPositionView("04_outbounds.json", 5)
+        hidden = OutboundConnectionView(position, True, None, True, None)
+        other = OutboundConnectionView(XrayPositionView("04_outbounds.json", 6), True, None, True, None)
+        absent = OutboundConnectionView(XrayPositionView("tail_outbounds.json", 0), False, None, False, None)
+        shown = OutboundConnectionView(XrayPositionView("../x.json", 0), True, "probe.example", True, "trojan")
+        view = ConnectionsView(2, 4, 0, 0, 0, 2, (hidden, other, absent, shown))
+        with forbid_external_effects():
+            listing = present_connections(view)
+        labels = [entry.label for entry in listing.entries]
+        self.assertEqual(labels[0], f"outbound: тег {HIDDEN}, протокол {HIDDEN}, часть 04_outbounds.json, индекс 5")
+        self.assertEqual(labels[1], f"outbound: тег {HIDDEN}, протокол {HIDDEN}, часть 04_outbounds.json, индекс 6")
+        self.assertNotEqual(labels[0], labels[1])
+        self.assertEqual(labels[2], "outbound: тег без тега, протокол не задан, часть tail_outbounds.json, индекс 0")
+        # Тег в форме домена и имя части с каталогом не проходят фильтры даже если application их пропустил бы.
+        self.assertEqual(labels[3], f"outbound: тег {HIDDEN}, протокол trojan, часть {HIDDEN}, индекс 0")
+        self.assertNotIn("probe.example", "\n".join(list_lines(listing)))
+        self.assertIn("скрытых тегов: 2", listing.header[2])
+        self.assertNotIn(MISSING, "\n".join(labels))
+
+    def test_balancer_card_splits_selectors_and_names_fallback_states(self):
+        def balancer(**changes):
+            values = {
+                "position": XrayPositionView("05_routing.json", 0), "tag_known": True, "tag": "pool",
+                "selector": tuple(f"sel-{number:02d}-" + "a" * 50 for number in range(21)) + ("", None, "probe.example"),
+                "selector_match_count": 7, "fallback_known": True, "fallback_tag": "direct", "fallback_resolved": True,
+                "fallback_position": XrayPositionView("04_outbounds.json", 1), "strategy_known": True,
+                "strategy": "leastPing",
+            }
+            values.update(changes)
+            return BalancerConnectionView(**values)
+
+        def card(**changes):
+            item = balancer(**changes)
+            view = ConnectionsView(1, 0, 1, 0, 0, int(item.tag_known and item.tag is None), (item,))
+            with forbid_external_effects():
+                return present_connections(view).entries[0].card
+
+        shown = card()
+        self.assertIn("Селекторов: 24; совпадений outbound: 7", shown)
+        selector_lines = [line for line in shown if line.startswith("  ")]
+        self.assertEqual([len(line[2:].split(", ")) for line in selector_lines], [10, 10, 4])
+        self.assertTrue(all(len(line) <= MAX_LIST_LINE_LENGTH for line in shown))
+        self.assertTrue(selector_lines[2].endswith(f", пустой, {HIDDEN}, {HIDDEN}"))
+        self.assertIn("Fallback: direct; позиция цели: часть 04_outbounds.json, индекс 1", shown)
+        self.assertIn("Стратегия: leastPing", shown)
+        self.assertNotIn("probe.example", "\n".join(shown))
+        self.assertIn(
+            "Fallback: не задан; позиция цели: не задан",
+            card(fallback_known=False, fallback_tag=None, fallback_resolved=None, fallback_position=None),
+        )
+        self.assertIn("Fallback: missing; позиция цели: не найден", card(fallback_tag="missing", fallback_resolved=False, fallback_position=None))
+        self.assertIn(f"Fallback: {HIDDEN}; позиция цели: не определена однозначно", card(fallback_tag=None, fallback_position=None))
+        self.assertIn(f"Стратегия: {HIDDEN}", card(strategy=None))
+        self.assertIn("Стратегия: не задана", card(strategy_known=False, strategy=None))
+        self.assertIn(f"Тег: {HIDDEN}", card(tag=None))
+        self.assertEqual(card(selector=())[3:5], ("Селекторов: 0; совпадений outbound: 7", "Fallback: direct; позиция цели: часть 04_outbounds.json, индекс 1"))
+
+    def test_more_connections_than_numbers_are_cut_with_a_note(self):
+        item = self.connections.connections[0]
+        many = ConnectionsView(1, MAX_ITEM_NUMBER + 1, 0, 0, 0, 0, (item,) * (MAX_ITEM_NUMBER + 1))
+        with forbid_external_effects():
+            listing = present_connections(many)
+        self.assertEqual(len(listing.entries), MAX_ITEM_NUMBER)
+        self.assertIn(f"Подключений больше {MAX_ITEM_NUMBER}: в списке первые {MAX_ITEM_NUMBER}, остальные не показываются.",
+                      listing.header)
+
+
+class RuleListPresenterTests(PresenterAssertions):
+    """Список правил: строки и карточки групп с названиями и идентификаторами из метаданных."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        sources = snapshot_installation_sources()
+        proxy = InspectProxyConfigHandler(sources.proxy.xray, sources.proxy.settings, sources.proxy.init, sources.proxy.lists)
+        cls.routing = ImportRoutingSchemeHandler(proxy)
+        rules = scheme_rules(import_routing_scheme(snapshot_xray_config()))
+        records = tuple(RuleRecord(fixed_id(number), None, rule_key(rule)) for number, rule in enumerate(rules))
+        records = (
+            RuleRecord(fixed_id(0), NAME_MARKER, records[0].key), RuleRecord(fixed_id(1), "Рабочий сервис напрямую", records[1].key),
+            *records[2:],
+        )
+        store = InMemoryManagerMetadataStore(encode_manager_metadata(ManagerMetadata(None, UnknownFields(), rules=records)))
+        cls.present = ListRoutingRulesHandler(cls.routing, store).execute(ListRoutingRules()).data
+        cls.absent = ListRoutingRulesHandler(cls.routing, InMemoryManagerMetadataStore()).execute(ListRoutingRules()).data
+        cls.not_connected = ListRoutingRulesHandler(cls.routing, None).execute(ListRoutingRules()).data
+        failing = InMemoryManagerMetadataStore()
+        failing.read_failure = ManagerMetadataStoreError(MetadataStoreFailure.BUSY)
+        cls.failed = ListRoutingRulesHandler(cls.routing, failing).execute(ListRoutingRules()).data
+
+    def listing(self, view):
+        with forbid_external_effects():
+            return present_rule_list(view)
+
+    def test_present_metadata_adds_counts_names_and_rule_lines_to_groups(self):
+        listing = self.listing(self.present)
+        base = present_routing_scheme(self.present.scheme)
+        self.assertEqual((listing.title, listing.item_name), (ROUTING_LIST_TITLE, ROUTING_ITEM_NAME))
+        self.assertEqual(listing.header[:len(base.header)], base.header)
+        self.assertIn(METADATA_NOTES[MetadataState.PRESENT], listing.header)
+        self.assertIn("Идентичность: записей правил 40; привязано 40, с названием 2, без привязки 0; записей без правила 0", listing.header)
+        text = "\n".join(list_lines(listing))
+        for marker in PRIVATE_MARKERS:
+            self.assertNotIn(marker, text)
+        self.assertTrue(all(line.isprintable() for line in text.splitlines()))
+        self.assertEqual([entry.number for entry in listing.entries], list(range(1, 9)))
+        first, second = listing.entries[0], listing.entries[1]
+        self.assertEqual(first.label, base.entries[0].label + f", правил 1, с ID 1, с названием 1, названия: «{NAME_MARKER}»")
+        self.assertEqual(second.label, base.entries[1].label + ", правил 3, с ID 3, с названием 1, названия: «Рабочий сервис напрямую»")
+        self.assertEqual(listing.entries[2].label, base.entries[2].label + ", правил 0, с ID 0, с названием 0")
+        self.assertEqual(first.card[:len(base.entries[0].card)], base.entries[0].card)
+        self.assertEqual(first.card[len(base.entries[0].card):], (
+            "Назначение по позиции: часть 04_outbounds.json, индекс 1",
+            "Правил модели: 1 (позиция в схеме, счёт с нуля)",
+            f"  0: UnsupportedRuleCondition, действие DIRECT, только просмотр да, ID {fixed_id(0)}, "
+            f"название «{NAME_MARKER}», привязка bound",
+        ))
+        self.assertIn(
+            f"  1: DomainCondition, действие DIRECT, только просмотр нет, ID {fixed_id(1)}, "
+            "название «Рабочий сервис напрямую», привязка bound", second.card,
+        )
+        self.assertIn(f"  2: DomainCondition, действие DIRECT, только просмотр нет, ID {fixed_id(2)}, название не задано, привязка bound", second.card)
+        self.assertIn("Назначение по позиции: часть 05_routing.json, индекс 0", listing.entries[2].card)
+        with self.assertRaises(TypeError):
+            present_rule_list(self.present.scheme)
+
+    def test_absent_not_connected_and_failed_metadata_keep_the_list(self):
+        absent = self.listing(self.absent)
+        self.assertIn(METADATA_NOTES[MetadataState.ABSENT], absent.header)
+        self.assertIn("Идентичность: раздел записей не записан; привязано 0, с названием 0, без привязки 40; записей без правила 0", absent.header)
+        self.assertTrue(absent.entries[0].label.endswith(", правил 1, с ID 0, с названием 0"))
+        self.assertIn("  0: UnsupportedRuleCondition, действие DIRECT, только просмотр да, ID не присвоен, название не задано, привязка record_missing", absent.entries[0].card)
+        not_connected = self.listing(self.not_connected)
+        self.assertIn(METADATA_NOTES[MetadataState.NOT_CONNECTED], not_connected.header)
+        self.assertNotIn("Идентичность:", "\n".join(not_connected.header))
+        self.assertTrue(not_connected.entries[0].label.endswith(", правил 1"))
+        self.assertNotIn("с ID", not_connected.entries[0].label)
+        self.assertIn("Правил модели: 1; названия и идентификаторы недоступны", not_connected.entries[0].card)
+        self.assertFalse([line for line in not_connected.entries[1].card if "привязка" in line])
+        failed = self.listing(self.failed)
+        self.assertIn(METADATA_NOTES[MetadataState.FAILED], failed.header)
+        self.assertIn("  Отказ: source_failed / metadata_store_busy", failed.header)
+        self.assertIn(f"  Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.RETRY_LATER]}", failed.header)
+        self.assertEqual(len(failed.entries), 8)
+        self.assertIn("Правил модели: 3; названия и идентификаторы недоступны", failed.entries[1].card)
+
+    def test_names_pass_only_the_filter_and_label_stays_within_the_limit(self):
+        for value in ("Рабочий сервис", "a", "x" * 64, "name with spaces", "«кавычки»", "1"):
+            with self.subTest(value=value):
+                self.assertEqual(rule_name(value), value)
+        for value in ("", " x", "x ", "x" * 65, "a\x1bb", "a\nb", "a\tb", "\u200bx", None, 5, b"x", "\ud800"):
+            with self.subTest(value=repr(value)):
+                self.assertEqual(rule_name(value), HIDDEN)
+        self.assertEqual(rule_id(RULE_ID), RULE_ID)
+        for value in (RULE_ID.upper(), RULE_ID.replace("-", ""), "x", None, RULE_ID + "x"):
+            with self.subTest(value=value):
+                self.assertEqual(rule_id(value), HIDDEN)
+        view = self.present
+        group = view.groups[5]
+        long_name = "н" * 64
+        rules = tuple(
+            replace(item, has_name=True, name=long_name) for item in group.rules
+        )
+        changed = replace(view, groups=(*view.groups[:5], replace(group, rules=rules), *view.groups[6:]))
+        listing = self.listing(changed)
+        label = listing.entries[5].label
+        self.assertLessEqual(len(label), MAX_LIST_LINE_LENGTH)
+        self.assertIn(f", с ID 19, с названием 19, названия: " + ", ".join([f"«{long_name}»"] * NAMES_PER_LABEL) + " (ещё 9)", label)
+        self.assertEqual(sum(line.count(long_name) for line in listing.entries[5].card), 19)
+
+    def test_entry_values_outside_formats_are_hidden_in_lines(self):
+        view = self.present
+        group = view.groups[0]
+        odd = RuleListEntryView(0, 0, "DomainCondition", "DIRECT", False, True, fixed_id(9), True, "ok", "bound")
+        changed = replace(view, groups=(replace(group, rules=(odd,)), *view.groups[1:]))
+        card = self.listing(changed).entries[0].card
+        self.assertIn(f"  0: DomainCondition, действие DIRECT, только просмотр нет, ID {fixed_id(9)}, название «ok», привязка bound", card)
+        for state, label in TARGET_POSITION_LABELS.items():
+            with self.subTest(state=state.value):
+                group_state = replace(group, target_position_state=state, target_position=None)
+                listing = self.listing(replace(view, groups=(group_state, *view.groups[1:])))
+                self.assertIn(f"Назначение по позиции: {label}", listing.entries[0].card)
 
 
 class RoutingReasonTests(unittest.TestCase):

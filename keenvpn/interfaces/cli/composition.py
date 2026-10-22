@@ -25,12 +25,14 @@ from keenvpn.application.ports import (
     XrayConfigSource, XrayProcessSource,
 )
 from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler
-from keenvpn.application.routing_import import ImportRoutingScheme, ImportRoutingSchemeHandler
+from keenvpn.application.proxy_connections import InspectConnections, InspectConnectionsHandler
+from keenvpn.application.routing_import import ImportRoutingSchemeHandler
+from keenvpn.application.routing_rules import ListRoutingRules, ListRoutingRulesHandler
 from keenvpn.application.status_summary import InspectStatusSummary, InspectStatusSummaryHandler
 from keenvpn.interfaces.cli.menu import Menu, MenuError, UnavailableReason
 from keenvpn.interfaces.cli.presenters import (
-    present_about, present_keenetic_state, present_manager_metadata, present_port53, present_result,
-    present_routing_scheme, present_status_header, present_status_summary,
+    present_about, present_connections, present_keenetic_state, present_manager_metadata, present_port53,
+    present_result, present_rule_list, present_status_header, present_status_summary,
 )
 from keenvpn.interfaces.cli.terminal import Action, Header
 from keenvpn.interfaces.cli.tree import (
@@ -117,8 +119,13 @@ def _bindings(
         return present_result(summary.execute(InspectStatusSummary()), present_status_header)
 
     if proxy is not None:
-        routing = ImportRoutingSchemeHandler(proxy, operation_ids=operation_ids)
-        bind("routing.list", lambda: present_result(routing.execute(ImportRoutingScheme()), present_routing_scheme))
+        connections = InspectConnectionsHandler(proxy, operation_ids=operation_ids)
+        bind("connections.list", lambda: present_result(connections.execute(InspectConnections()), present_connections))
+        # Список правил допускает неподключённое хранилище метаданных: тогда он показывается без идентичности.
+        rules = ListRoutingRulesHandler(
+            ImportRoutingSchemeHandler(proxy, operation_ids=operation_ids), sources.metadata, operation_ids=operation_ids,
+        )
+        bind("routing.list", lambda: present_result(rules.execute(ListRoutingRules()), present_rule_list))
         bind("failsafe.port53_check", lambda: present_result(proxy.execute(InspectProxyConfig()), present_port53))
     if keenetic is not None:
         bind("devices.list", lambda: present_result(keenetic.execute(InspectKeeneticState()), present_keenetic_state))

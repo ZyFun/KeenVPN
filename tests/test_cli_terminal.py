@@ -8,6 +8,12 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application.contract import NEXT_STEP_MESSAGES, NextStepCode, new_operation_id
+from keenvpn.application.routing_rules import AssignRuleIdentifiers, AssignRuleIdentifiersHandler
+from keenvpn.application.proxy_config import InspectProxyConfigHandler
+from keenvpn.application.routing_import import ImportRoutingSchemeHandler
+from keenvpn.domain.manager_metadata import ManagerMetadata, RuleRecord, decode_manager_metadata, encode_manager_metadata
+from keenvpn.interfaces.cli.presenters import CONNECTIONS_NOTE, METADATA_NOTES
+from keenvpn.application.routing_rules import MetadataState
 from keenvpn.application.ports import ManagerMetadataStoreError, MetadataStoreFailure
 from keenvpn.application.status_summary import PORT_53_HINT
 from keenvpn.domain.xkeen_config import XKeenListName
@@ -247,13 +253,16 @@ class CompositionTests(unittest.TestCase):
     def test_connected_sources_make_bound_items_available(self):
         _, sources = snapshot_menu_sources(InMemoryManagerMetadataStore())
         found = states(assemble_main_menu(sources))
-        for action_id in ("status.summary", "routing.list", "devices.list", "failsafe.port53_check", "settings.storage"):
+        for action_id in (
+            "status.summary", "connections.list", "routing.list", "devices.list", "failsafe.port53_check",
+            "settings.storage",
+        ):
             self.assertIsNone(found[action_id], action_id)
         self.assertIs(found["routing.explain"], UnavailableReason.INPUT_REQUIRED)
         self.assertEqual(
             set(assemble_main_menu(sources).actions),
-            {"status.summary", "routing.list", "devices.list", "failsafe.port53_check", "settings.storage",
-             "settings.about"},
+            {"status.summary", "connections.list", "routing.list", "devices.list", "failsafe.port53_check",
+             "settings.storage", "settings.about"},
         )
 
     def test_partial_sources_enable_only_what_they_cover(self):
@@ -264,7 +273,7 @@ class CompositionTests(unittest.TestCase):
         found = states(assemble_main_menu(keenetic_only))
         self.assertIsNone(found["devices.list"])
         self.assertIsNone(found["status.summary"])
-        for action_id in ("routing.list", "failsafe.port53_check", "settings.storage"):
+        for action_id in ("connections.list", "routing.list", "failsafe.port53_check", "settings.storage"):
             self.assertIs(found[action_id], UnavailableReason.SOURCE_NOT_CONNECTED, action_id)
         three_of_four = MenuSources(policies=full.policies, hotspot=full.hotspot, registrations=full.registrations)
         self.assertIs(states(assemble_main_menu(three_of_four))["devices.list"], UnavailableReason.SOURCE_NOT_CONNECTED)
@@ -275,6 +284,8 @@ class CompositionTests(unittest.TestCase):
         )
         found = states(assemble_main_menu(without_process))
         self.assertIsNone(found["status.summary"])
+        self.assertIsNone(found["connections.list"])
+        # Список правил не требует хранилища метаданных: без него он показывается без названий и идентификаторов.
         self.assertIsNone(found["routing.list"])
         self.assertIsNone(found["failsafe.port53_check"])
         with self.assertRaises(MenuError):
@@ -566,6 +577,139 @@ class HeaderFlowTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("Ядро Xray", output)
         self.assertEqual(sources.process.calls, 0)
+
+
+NAME_MARKER = "TEST_ONLY_PRIVATE_NAME"
+
+
+def assign_snapshot_ids(sources, store, names=()):
+    """Присвоить идентификаторы правилам снимка явной командой и дописать названия прямо в файл хранилища."""
+    proxy = InspectProxyConfigHandler(sources.proxy.xray, sources.proxy.settings, sources.proxy.init, sources.proxy.lists)
+    result = AssignRuleIdentifiersHandler(ImportRoutingSchemeHandler(proxy), store).execute(AssignRuleIdentifiers())
+    assert result.succeeded, result.error
+    metadata = decode_manager_metadata(store.content).metadata
+    records = list(metadata.rules)
+    for index, name in names:
+        records[index] = RuleRecord(records[index].rule_id, name, records[index].key, records[index].extra)
+    store.content = encode_manager_metadata(ManagerMetadata(metadata.storage, metadata.extra, rules=tuple(records)))
+    return [record.rule_id for record in records]
+
+
+class ConnectionsAndRulesFlowTests(unittest.TestCase):
+    """Пункты 3 → 1 и 4 → 1 на снимке: списки, поиск, карточки, идентичность правил и её недоступность."""
+
+    def setUp(self):
+        self.store = InMemoryManagerMetadataStore()
+        self.sources, self.menu_sources = snapshot_menu_sources(self.store)
+
+    def flow(self, text: str, menu_sources=None):
+        assembly = assemble_main_menu(self.menu_sources if menu_sources is None else menu_sources)
+        stdout = io.StringIO()
+        navigator = MenuNavigator(assembly.menu)
+        with forbid_external_effects():
+            code = run_menu(navigator, assembly.actions, io.StringIO(text), stdout)
+        output = stdout.getvalue()
+        for marker in PRIVATE_MARKERS:
+            self.assertNotIn(marker, output)
+        self.assertTrue(all(line.isprintable() for line in output.splitlines()))
+        return code, output, navigator
+
+    def test_connections_open_as_list_with_search_and_card(self):
+        code, output, navigator = self.flow("3\n1\nбалансировщик\n4\n0\n0\n2\n0\n0\n0\n0\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(navigator.depth, 0)
+        path = "Главное меню KeenVPN / VPN-подключения / Подключения"
+        self.assertIn(
+            f"{path}\nПодключения по конфигурации Xray\nЧастей: 7; outbound: 3; балансировщиков: 1\n"
+            "Повторов тегов outbound: 0; повторов тегов балансировщиков: 0; скрытых тегов: 0\n", output,
+        )
+        self.assertIn("  1. outbound: тег trojan-out, протокол trojan, часть 04_outbounds.json, индекс 0\n", output)
+        self.assertIn(f"{path} / Результаты поиска\nНайдено: 1 из 4.\n  4. балансировщик: тег vpn-group", output)
+        self.assertIn(
+            f"{path} / Результаты поиска / Подключение 4\nВид: балансировщик\nПозиция: часть 05_routing.json, индекс 0\n"
+            "Тег: vpn-group\nСелекторов: 1; совпадений outbound: 1\n  trojan-out\n"
+            f"Fallback: blocked; позиция цели: часть 04_outbounds.json, индекс 2\nСтратегия: leastPing\n{CONNECTIONS_NOTE}\n",
+            output,
+        )
+        self.assertIn(f"{path} / Подключение 2\nВид: outbound\nПозиция: часть 04_outbounds.json, индекс 1\nТег: direct\nПротокол: freedom\n", output)
+        # Сценарий выполнен один раз: поиск, карточки и возвраты источники не читают; процесс и Keenetic не нужны.
+        self.assertEqual(self.sources.proxy.calls[:3], (1, 1, 1))
+        self.assertEqual((self.sources.process.calls, self.sources.keenetic.calls), (0, (0, 0, 0, 0)))
+        self.assertEqual(self.store.read_calls, 0)
+
+    def test_connections_search_never_matches_server_values(self):
+        for value in ("host-0", "fixture-password", "/fixture/ws", "127.0.0.1", "serverName", "streamSettings", "trojan://"):
+            with self.subTest(value=value):
+                code, output, _ = self.flow(f"3\n1\n{value}\n0\n0\n0\n")
+                self.assertEqual(code, 0)
+                self.assertIn(NO_MATCHES, output)
+                self.assertNotIn("Найдено:", output)
+
+    def test_rules_show_names_and_ids_from_metadata_without_write(self):
+        ids = assign_snapshot_ids(self.sources, self.store, names=((0, NAME_MARKER), (1, "Рабочий сервис напрямую")))
+        code, output, navigator = self.flow("4\n1\nрабочий сервис\n2\n0\n0\n0\n0\n0\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(navigator.depth, 0)
+        path = "Главное меню KeenVPN / Правила маршрутизации / Группы правил"
+        self.assertIn(f"{METADATA_NOTES[MetadataState.PRESENT]}\nИдентичность: записей правил 40; привязано 40, с названием 2", output)
+        self.assertIn(f", правил 1, с ID 1, с названием 1, названия: «{NAME_MARKER}»\n", output)
+        self.assertIn(f"{path} / Результаты поиска\nНайдено: 1 из 8.\n  2. rules:", output)
+        self.assertIn(
+            f"{path} / Результаты поиска / Группа правил 2\nЧасть: 05_routing.json; индекс правила Xray: 1 (счёт с нуля)\n",
+            output,
+        )
+        self.assertIn(
+            "Назначение по позиции: часть 04_outbounds.json, индекс 1\nПравил модели: 3 (позиция в схеме, счёт с нуля)\n"
+            f"  1: DomainCondition, действие DIRECT, только просмотр нет, ID {ids[1]}, название «Рабочий сервис напрямую», привязка bound\n"
+            f"  2: DomainCondition, действие DIRECT, только просмотр нет, ID {ids[2]}, название не задано, привязка bound\n",
+            output,
+        )
+        # Присвоение прочитало источники один раз, выбор пункта — ещё один; меню хранилище читает один раз и не пишет.
+        self.assertEqual(self.sources.proxy.calls[:3], (2, 2, 2))
+        self.assertEqual(self.store.read_calls, 2)
+        self.assertEqual(len(self.store.write_calls), 1)
+
+    def test_rules_without_store_and_with_failing_store_still_open_the_list(self):
+        without_store = MenuSources(
+            xray=self.sources.proxy.xray, xkeen_settings=self.sources.proxy.settings, xkeen_init=self.sources.proxy.init,
+            xkeen_lists=self.sources.proxy.lists,
+        )
+        code, output, navigator = self.flow("4\n1\n2\n0\n0\n0\n0\n", without_store)
+        self.assertEqual(code, 0)
+        self.assertEqual(navigator.depth, 0)
+        self.assertIn(f"{METADATA_NOTES[MetadataState.NOT_CONNECTED]}\n  1. rules:", output)
+        self.assertIn(", только просмотр нет, правил 3\n", output)
+        self.assertIn("Правил модели: 3; названия и идентификаторы недоступны\n", output)
+        self.assertNotIn("привязка", output)
+        self.store.read_failure = ManagerMetadataStoreError(MetadataStoreFailure.UNAVAILABLE)
+        code, output, navigator = self.flow("4\n1\n1\n0\n0\n0\n0\n")
+        self.assertEqual(code, 0)
+        self.assertIn(
+            f"{METADATA_NOTES[MetadataState.FAILED]}\n  Отказ: source_failed / metadata_store_unavailable\n"
+            "  Причина: Хранилище метаданных менеджера недоступно.\n"
+            f"  Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.CHECK_SOURCE]}\n  1. rules:", output,
+        )
+        self.assertIn("Правил модели: 1; названия и идентификаторы недоступны\n", output)
+        self.assertEqual(self.store.write_calls, ())
+
+    def test_rules_without_metadata_mark_ids_as_unassigned(self):
+        code, output, _ = self.flow("4\n1\n1\n0\n0\n0\n0\n")
+        self.assertEqual(code, 0)
+        self.assertIn(f"{METADATA_NOTES[MetadataState.ABSENT]}\nИдентичность: раздел записей не записан; привязано 0", output)
+        self.assertIn("  0: UnsupportedRuleCondition, действие DIRECT, только просмотр да, ID не присвоен, название не задано, привязка record_missing\n", output)
+        self.assertEqual((self.store.read_calls, self.store.write_calls, self.store.content), (1, (), None))
+
+    def test_unsafe_names_in_metadata_do_not_reach_the_terminal(self):
+        # Название записи — пользовательский текст: до меню доходят только печатные названия в пределе длины.
+        assign_snapshot_ids(self.sources, self.store)
+        metadata = decode_manager_metadata(self.store.content).metadata
+        records = list(metadata.rules)
+        records[0] = RuleRecord(records[0].rule_id, "ok-name", records[0].key, records[0].extra)
+        self.store.content = encode_manager_metadata(ManagerMetadata(metadata.storage, metadata.extra, rules=tuple(records)))
+        code, output, _ = self.flow("4\n1\nok-name\n1\n0\n0\n0\n0\n")
+        self.assertEqual(code, 0)
+        self.assertIn("Найдено: 1 из 8.", output)
+        self.assertIn("название «ok-name», привязка bound", output)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,8 @@ STATISTICS_TITLE = "Статистика проверок"
 
 BOUND_SCENARIOS: Mapping[str, str] = {
     "status.summary": "inspect_status_summary",
-    "routing.list": "import_routing_scheme",
+    "connections.list": "inspect_connections",
+    "routing.list": "list_routing_rules",
     "routing.explain": "explain_route",
     "devices.list": "inspect_keenetic_state",
     "failsafe.port53_check": "inspect_proxy_config",

@@ -15,11 +15,12 @@ from keenvpn.application.checks import (
 from keenvpn.application.contract import (
     CONTRACT_VERSION, NEXT_STEP_MESSAGES, CheckStatus, ErrorCategory, ErrorDetail, NextStepCode, OperationStatus,
 )
-from keenvpn.application.proxy_config import InspectProxyConfigHandler, Port53View, XKeenFlagView
+from keenvpn.application.proxy_config import InspectProxyConfigHandler, Port53View, ProxyConfigSource, XKeenFlagView
 from keenvpn.application.status_summary import (
     AREA_LABELS, AREA_STATES, AUTOSTART_CHECK, DRAFT_CHECK, FALLBACK_CHECK, INTERCEPTION_CHECK, PORT_53_HINT,
     PORT_53_PATH_CHECK, STATE_LABELS, AreaState, FallbackView, InspectStatusSummary, InspectStatusSummaryHandler,
-    StatusSummaryView, SummaryArea, SummaryAreaView, SummaryReason,
+    StatusSummaryView, SummaryArea, SummaryAreaView, SummaryReadings, SummaryReason, build_status_summary,
+    port_53_path_not_checked, read_summary_sources,
 )
 from keenvpn.domain.config_document import ConfigDocument
 from keenvpn.domain.xkeen_config import XKeenList, XKeenListName, XKeenSettings, parse_xkeen_init
@@ -320,6 +321,31 @@ class StatusSummaryScenarioTests(unittest.TestCase):
             failed_area = failing_handler.execute(InspectStatusSummary())
         self.assertTrue(result.succeeded)
         self.assertEqual(outcome(failed_area, "fallback"), (None, "not_checked", "xray_config_unavailable"))
+
+    def test_reading_and_building_are_shared_functions_with_the_same_result(self):
+        ports = self.sources.proxy
+        proxy = InspectProxyConfigHandler(ports.xray, ports.settings, ports.init, ports.lists)
+        readings = read_summary_sources(proxy, self.sources.process)
+        self.assertEqual(readings.models(ProxyConfigSource.XRAY, ProxyConfigSource.INIT), (readings.proxy[ProxyConfigSource.XRAY], readings.proxy[ProxyConfigSource.INIT]))
+        self.assertEqual(sorted(source.value for source in readings.proxy), sorted(("xray", "settings", "init", "port_exclude", "port_proxying")))
+        self.assertEqual(build_status_summary(readings).to_dict(), self.execute().data.to_dict())
+        self.assertEqual(self.sources.proxy.calls, (2, 2, 2, (
+            XKeenListName.PORT_EXCLUDE, XKeenListName.PORT_PROXYING, XKeenListName.PORT_EXCLUDE, XKeenListName.PORT_PROXYING,
+        )))
+        # Модели содержат секреты: repr показывает только подключённость, а словарь ответов только для чтения.
+        self.assertEqual(repr(readings), "SummaryReadings(proxy=True, process=True)")
+        self.assertNotIn(str(SYNTHETIC_XRAY_PID), repr(readings))
+        with self.assertRaises(TypeError):
+            readings.proxy[ProxyConfigSource.XRAY] = None
+        unconnected = read_summary_sources(None, None)
+        self.assertEqual((unconnected.proxy, unconnected.process, unconnected.models(ProxyConfigSource.XRAY)), (None, None, None))
+        self.assertEqual(repr(unconnected), "SummaryReadings(proxy=False, process=False)")
+        self.assertEqual(outcome(self.handler.execute(InspectStatusSummary()), "core"), ("running", "passed", None))
+        for value in (readings.proxy, {"proxy": None, "process": None}, None):
+            with self.subTest(value=type(value).__name__), self.assertRaises(TypeError):
+                build_status_summary(value)
+        path = port_53_path_not_checked()
+        self.assertEqual((path.code, path.status, path.network, path.reason), (PORT_53_PATH_CHECK, CheckStatus.NOT_CHECKED, True, "network_check_not_performed"))
 
     def test_rendering_is_frozen_and_does_not_reread_sources(self):
         result = self.execute()

@@ -10,14 +10,21 @@
 не представлены; статусов ровно четыре.
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 import re
 from types import MappingProxyType
 
-from keenvpn.application.contract import CheckStatus
+from keenvpn.application.contract import CheckStatus, ErrorDetail
 from keenvpn.domain.geodata import GeoDataState, GeoFileStatus, UnsupportedGeoReference
+from keenvpn.domain.xkeen_config import (
+    XKeenFlagStatus, XKeenInitParameters, XKeenList, XKeenListItemKind, port_53_facts,
+)
+from keenvpn.domain.xray_config import (
+    XRAY_TAIL_MARKER, RuleTargetKind, TagRepeat, TagRepeats, XrayConfigSet, config_case_variants,
+    summarize_xray_config, tag_repeats,
+)
 from keenvpn.domain.xray_process import XrayProcessObservation
 
 
@@ -35,8 +42,15 @@ GEODATA_REFERENCES_CHECK = "geodata_references_resolved"
 """Все ссылки правил и DNS на наборы геобаз ведут к найденным файлам инвентаря."""
 VPN_REACHABLE_CHECK = "vpn_reachable"
 """Доступность VPN; требует сетевой пробы, которую пассивный просмотр не выполняет."""
+XRAY_CONFIG_CHECK = "xray_config_consistent"
+"""Ссылки и теги конфигурации Xray согласованы по структурной сводке; загрузку конфигурации Xray это не подтверждает."""
+PORT_53_MODE_CHECK = "dns_port_53_mode_consistent"
+"""Выбранный режим порта 53 не противоречит спискам портов и флагам init; фактический путь DNS не проверяется."""
 
 _CODE = re.compile(r"\A[a-z][a-z0-9_]{2,63}\Z")
+_PORT_ITEMS = (XKeenListItemKind.PORT, XKeenListItemKind.RANGE)
+_REPLACED_SECTIONS = ("routing", "dns")
+"""Разделы, которые `Config.Override` Xray заменяет целиком разделом последней части, а не объединяет."""
 
 
 class CheckReason(StrEnum):
@@ -55,6 +69,33 @@ class CheckReason(StrEnum):
     PROCESS_WITHOUT_MARKER = "process_without_marker"
     MARKER_WITHOUT_PROCESS = "marker_without_process"
     MULTIPLE_PROCESSES = "multiple_processes"
+    DUPLICATE_TAGS = "duplicate_tags"
+    """Тег повторяется там, где объединение частей его не схлопывает.
+
+    Повтор inbound или outbound Xray не загрузит; повтор балансировщика
+    действующего `routing` Xray при запуске принимает и молча берёт последний,
+    поэтому ссылка `balancerTag` на него неоднозначна.
+    """
+    TAGS_REPEATED_ACROSS_PARTS = "tags_repeated_across_parts"
+    """Повтор тега затрагивает объединение частей: Xray переопределяет теги и заменяет `routing`, а сводка это не моделирует."""
+    CASE_VARIANT_KEYS = "case_variant_keys"
+    """Ключ отличается от поля Xray только регистром: Xray его применит, а сводка не читает, поэтому выводы недостоверны."""
+    SECTIONS_REPEATED_ACROSS_PARTS = "sections_repeated_across_parts"
+    """Раздел `routing` или `dns` есть в нескольких частях: Xray берёт раздел последней, сводка действующий не выбирает."""
+    UNRESOLVED_REFERENCES = "unresolved_references"
+    """`inboundTag`, `outboundTag`, `balancerTag` правила или `fallbackTag` балансировщика не находит цель."""
+    RULE_TARGET_AMBIGUOUS = "rule_target_ambiguous"
+    """Правило указывает оба назначения или ни одного."""
+    UNSUPPORTED_STRUCTURES = "unsupported_structures"
+    """Сводка не прочитала часть мест конфигурации, поэтому согласованность не подтверждается."""
+    PORT_53_IN_BOTH_LISTS = "port_53_in_both_lists"
+    """Порт 53 есть и в списке исключённых, и в списке перехватываемых портов."""
+    EXCLUDE_LIST_IGNORED = "exclude_list_ignored"
+    """Исключение выбрано, но список перехватываемых портов непуст: XKeen игнорирует список исключений целиком."""
+    PROXY_DNS_CONTRADICTS_EXCLUSION = "proxy_dns_contradicts_exclusion"
+    """Исключение выбрано, а флаг `proxy_dns` включён."""
+    FLAGS_UNKNOWN = "flags_unknown"
+    """`proxy_dns` или `proxy_router` прочитан неоднозначно: согласованность с флагами не оценить."""
 
 
 def _valid_code(value: object) -> bool:
@@ -161,3 +202,148 @@ def geodata_references_check(state: GeoDataState) -> CheckView:
 def vpn_reachability_not_checked() -> CheckView:
     """Доступность VPN в пассивном просмотре: сетевая проверка не выполнялась."""
     return CheckView(VPN_REACHABLE_CHECK, CheckStatus.NOT_CHECKED, True, CheckReason.NETWORK_CHECK_NOT_PERFORMED.value)
+
+
+def not_checked(code: str, network: bool, reason: str) -> CheckView:
+    """Проверка, которая не выполнялась: источник не подключён, отказал или проверять нечего."""
+    return CheckView(code, CheckStatus.NOT_CHECKED, network, reason)
+
+
+def first_source_error(values: Iterable[object]) -> ErrorDetail | None:
+    """Первый отказ среди ответов источников в порядке их чтения либо `None`.
+
+    Проверка с несколькими источниками объясняется первым отказом по порядку
+    чтения: сценарии сводки и быстрой проверки используют одно правило.
+    """
+    for value in values:
+        if isinstance(value, ErrorDetail):
+            return value
+    return None
+
+
+def xray_config_check(config: XrayConfigSet) -> CheckView:
+    """Согласованность ссылок и тегов конфигурации Xray по структурной сводке.
+
+    По порядку: ключ, отличающийся от поля Xray только регистром, в объектах,
+    которые читает сводка, — `unsupported` / `case_variant_keys`: Xray его
+    применит, а сводка не читает, поэтому ни один вывод по ней недостоверен;
+    повтор непустого тега, который объединение частей не схлопывает,
+    — `failed` / `duplicate_tags`: inbound или outbound, повторённый там, где
+    тег ещё новый (Xray такой набор не загрузит), либо балансировщик,
+    повторённый в единственном разделе `routing` (Xray возьмёт последний,
+    ссылка на тег неоднозначна);
+    раздел `routing` или `dns` в нескольких частях — `unsupported` /
+    `sections_repeated_across_parts`: Xray берёт раздел последней части целиком,
+    сводка действующий раздел не выбирает, поэтому ссылки и назначения правил
+    оцениваются только при единственном разделе; ссылка правила или
+    `fallbackTag` без цели — `failed` / `unresolved_references`; правило
+    с обоими назначениями или без назначения — `failed` / `rule_target_ambiguous`;
+    любой другой повтор тега — inbound или outbound внутри последующей части,
+    где объединение его схлопывает, или между частями — `unsupported` /
+    `tags_repeated_across_parts`: его итог зависит от объединения частей,
+    которое сводка не моделирует; места, которые сводка не прочитала, —
+    `unsupported` / `unsupported_structures`; иначе `passed`. «Успешно»
+    не подтверждает, что Xray загрузит конфигурацию.
+    """
+    if type(config) is not XrayConfigSet:
+        raise TypeError("Ожидается XrayConfigSet.")
+    if config_case_variants(config.parts):
+        return CheckView(XRAY_CONFIG_CHECK, CheckStatus.UNSUPPORTED, False, CheckReason.CASE_VARIANT_KEYS.value)
+    summary = summarize_xray_config(config.parts)
+    repeats = tag_repeats(config.parts)
+    rules = summary["rules"]
+    balancers = summary["balancers"]
+    if _unmerged_repeats(repeats, config, summary["sections"]):
+        return CheckView(XRAY_CONFIG_CHECK, CheckStatus.FAILED, False, CheckReason.DUPLICATE_TAGS.value)
+    if _replaced_repeated(summary["duplicate_sections"]):
+        return CheckView(XRAY_CONFIG_CHECK, CheckStatus.UNSUPPORTED, False, CheckReason.SECTIONS_REPEATED_ACROSS_PARTS.value)
+    resolvable = (RuleTargetKind.OUTBOUND.value, RuleTargetKind.BALANCER.value)
+    if (
+        any(not rule["inbound_tags_resolved"] for rule in rules)
+        or any(rule["target_kind"] in resolvable and not rule["target_resolved"] for rule in rules)
+        or any(balancer["fallback_known"] and not balancer["fallback_resolved"] for balancer in balancers)
+    ):
+        return CheckView(XRAY_CONFIG_CHECK, CheckStatus.FAILED, False, CheckReason.UNRESOLVED_REFERENCES.value)
+    if any(rule["target_kind"] not in resolvable for rule in rules):
+        return CheckView(XRAY_CONFIG_CHECK, CheckStatus.FAILED, False, CheckReason.RULE_TARGET_AMBIGUOUS.value)
+    if repeats.within_parts or repeats.between_parts:
+        return CheckView(XRAY_CONFIG_CHECK, CheckStatus.UNSUPPORTED, False, CheckReason.TAGS_REPEATED_ACROSS_PARTS.value)
+    if summary["unsupported_paths"]:
+        return CheckView(XRAY_CONFIG_CHECK, CheckStatus.UNSUPPORTED, False, CheckReason.UNSUPPORTED_STRUCTURES.value)
+    return CheckView(XRAY_CONFIG_CHECK, CheckStatus.PASSED, False, None)
+
+
+def _unmerged_repeats(
+    repeats: TagRepeats, config: XrayConfigSet, sections: Mapping[str, list[str]],
+) -> tuple[TagRepeat, ...]:
+    """Повторы, которые объединение частей не схлопывает, по правилам `Config.Override` Xray v26.3.27.
+
+    Повтор inbound и outbound сохраняется, если тег повторён в самой ранней
+    своей части, где он ещё новый: inbound — только в первой части
+    (последующие добавляют новый inbound сразу, и повтор его заменяет);
+    outbound — в первой части или в части без `XRAY_TAIL_MARKER` в имени,
+    которая откладывает новые outbound и ставит в начало все сразу.
+    Сохранённый повтор последующие части уже не схлопывают: они заменяют
+    только первую запись с тегом. Это то же правило, по которому импорт правил
+    собирает действующие outbound. Раздел `routing` последующая часть заменяет
+    целиком, поэтому повтор балансировщика сохраняется, когда раздел есть
+    ровно в одной части, независимо от числа остальных частей; при повторе
+    раздела его итог зависит от объединения и сюда не входит.
+    """
+    first = config.parts[0].name if config.parts else None
+    sole_routing = len(sections.get("routing", ())) == 1
+
+    def preserved(item: TagRepeat) -> bool:
+        earliest = item.parts[0]
+        if item.parts.count(earliest) < 2:
+            return False
+        if item.section == "inbounds":
+            return earliest == first
+        if item.section == "outbounds":
+            return earliest == first or XRAY_TAIL_MARKER not in earliest.lower()
+        return sole_routing
+
+    return tuple(item for item in repeats.within_parts if preserved(item))
+
+
+def replaced_sections_repeated(config: XrayConfigSet) -> bool:
+    """Есть ли раздел `routing` или `dns` в нескольких частях: Xray берёт его из последней части целиком.
+
+    Тогда ссылки, собранные по всем частям, включают ссылки заменённых
+    разделов, и отрицательный вывод по ним недостоверен.
+    """
+    if type(config) is not XrayConfigSet:
+        raise TypeError("Ожидается XrayConfigSet.")
+    return _replaced_repeated(summarize_xray_config(config.parts)["duplicate_sections"])
+
+
+def _replaced_repeated(duplicate_sections: Iterable[str]) -> bool:
+    return any(section in _REPLACED_SECTIONS for section in duplicate_sections)
+
+
+def port_53_mode_check(init: XKeenInitParameters, port_exclude: XKeenList, port_proxying: XKeenList) -> CheckView:
+    """Согласованность выбранного режима порта 53 со списками портов и флагами init.
+
+    Исключение выбрано, если порт 53 записан в списке исключённых портов
+    отдельной записью или диапазоном. По порядку: порт 53 в обоих списках —
+    `failed` / `port_53_in_both_lists`; исключение выбрано при непустом списке
+    перехватываемых портов — `failed` / `exclude_list_ignored` (установленный
+    XKeen тогда игнорирует список исключений целиком); исключение выбрано при
+    `proxy_dns="on"` — `failed` / `proxy_dns_contradicts_exclusion`; `proxy_dns`
+    или `proxy_router` прочитан неоднозначно — `unsupported` / `flags_unknown`;
+    иначе `passed`, в том числе когда исключение не выбрано: его отсутствие —
+    не ошибка и не доказательство перехвата. Для `proxy_router` правила
+    противоречия нет: проверяется только его читаемость. Фактический путь DNS
+    остаётся сетевой проверкой «не проверено».
+    """
+    facts = port_53_facts(init, port_exclude, port_proxying)
+    excluded = facts.port_exclude_entry or facts.port_exclude_range
+    if excluded and (facts.port_proxying_entry or facts.port_proxying_range):
+        return CheckView(PORT_53_MODE_CHECK, CheckStatus.FAILED, False, CheckReason.PORT_53_IN_BOTH_LISTS.value)
+    if excluded and any(item.kind in _PORT_ITEMS for item in port_proxying.items):
+        return CheckView(PORT_53_MODE_CHECK, CheckStatus.FAILED, False, CheckReason.EXCLUDE_LIST_IGNORED.value)
+    if excluded and facts.proxy_dns.status is XKeenFlagStatus.PRESENT and facts.proxy_dns.value == "on":
+        return CheckView(PORT_53_MODE_CHECK, CheckStatus.FAILED, False, CheckReason.PROXY_DNS_CONTRADICTS_EXCLUSION.value)
+    if facts.proxy_dns.status is not XKeenFlagStatus.PRESENT or facts.proxy_router.status is not XKeenFlagStatus.PRESENT:
+        return CheckView(PORT_53_MODE_CHECK, CheckStatus.UNSUPPORTED, False, CheckReason.FLAGS_UNKNOWN.value)
+    return CheckView(PORT_53_MODE_CHECK, CheckStatus.PASSED, False, None)

@@ -13,8 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.domain.config_document import ConfigDocument, ConfigDocumentError, ConfigDocumentErrorCode
 from keenvpn.domain.routing import ConditionFamily
 from keenvpn.domain.xray_config import (
-    RuleListValue, XrayConfigError, XrayConfigErrorCode, XrayConfigSet, _duplicates, decode_string_list, rule_list_values,
-    summarize_xray_config, validate_xray_config_set,
+    RuleListValue, TagRepeat, TagRepeats, XrayConfigError, XrayConfigErrorCode, XrayConfigSet, _duplicates,
+    config_case_variants, decode_string_list, has_case_variant, rule_list_values, summarize_xray_config, tag_repeats,
+    validate_xray_config_set,
 )
 from tests.support.isolation import forbid_external_effects
 from tests.support.privacy import UNSAFE_MARKERS, UNSAFE_PART_NAME, unsafe_xray_config
@@ -468,6 +469,157 @@ class SyntheticXrayConfigTests(unittest.TestCase):
         self.assertIsNone(error.__context__)
         self.assertIsNone(error.__cause__)
         self.assertNotIn("fixture-private", str(error) + repr(error))
+
+
+class CaseVariantKeyTests(unittest.TestCase):
+    """Регрессия GitHub review 76-R10: ключи, отличающиеся от полей Xray только регистром, отмечаются для доверенного кода."""
+
+    def test_has_case_variant_matches_only_other_spellings_of_known_fields(self):
+        names = frozenset({"tag", "outboundTag"})
+        self.assertTrue(has_case_variant({"Tag": "a"}, names))
+        self.assertTrue(has_case_variant({"outboundTag": "a", "OUTBOUNDTAG": "b"}, names))
+        self.assertFalse(has_case_variant({"tag": "a", "outboundTag": "b"}, names))
+        self.assertFalse(has_case_variant({"Protocol": "x"}, names))
+
+    def test_config_case_variants_covers_every_object_the_summary_reads(self):
+        outbounds = [{"tag": "direct", "protocol": "freedom"}]
+        cases = {
+            "Outbounds": {"Outbounds": outbounds},
+            "Routing": {"outbounds": outbounds, "Routing": {}},
+            "Dns": {"Dns": {}},
+            "Observatory": {"Observatory": {}},
+            "outbound Tag": {"outbounds": [{"Tag": "direct", "protocol": "freedom"}]},
+            "inbound Protocol": {"inbounds": [{"tag": "lan", "Protocol": "tunnel"}]},
+            "routing Rules": {"routing": {"Rules": []}},
+            "rule OutboundTag": {"routing": {"rules": [{"type": "field", "OutboundTag": "direct"}]}},
+            "rule Domain": {"routing": {"rules": [{"type": "field", "Domain": ["geosite:test"], "outboundTag": "direct"}]}},
+            "balancer FallbackTag": {"routing": {"balancers": [{"tag": "g", "selector": ["d"], "FallbackTag": "direct"}]}},
+            "strategy Type": {"routing": {"balancers": [{"tag": "g", "selector": ["d"], "strategy": {"Type": "random"}}]}},
+            "dns Servers": {"dns": {"Servers": []}},
+            "server Tag": {"dns": {"servers": [{"address": "198.51.100.1", "Tag": "dns-upstream"}]}},
+            "observatory SubjectSelector": {"observatory": {"SubjectSelector": ["d"]}},
+        }
+        for name, document in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(config_case_variants((part("05_test.json", document),)))
+        self.assertFalse(config_case_variants(snapshot_xray_config().parts))
+        exact = {"outbounds": outbounds, "routing": {"rules": [{"type": "field", "network": "tcp", "outboundTag": "direct"}]}}
+        self.assertFalse(config_case_variants((part("05_test.json", exact),)))
+        # Неизвестные разделы и поля, которые сводка не читает, вариантами не считаются.
+        self.assertFalse(config_case_variants((part("05_test.json", {"Log": {}, "outbounds": [{"tag": "d", "Settings": {}}]}),)))
+
+
+class EmptyTargetTagTests(unittest.TestCase):
+    """Регрессия GitHub review 76-R09: пустые `outboundTag`, `balancerTag` и `fallbackTag` — отсутствующие значения, как в Xray."""
+
+    def diagnostic(self, rule, fallback=None):
+        balancer = {"tag": "g", "selector": ["proxy-"]}
+        if fallback is not None:
+            balancer["fallbackTag"] = fallback
+        document = {
+            "outbounds": [{"tag": "", "protocol": "freedom"}, {"tag": "proxy-a", "protocol": "trojan"}],
+            "routing": {"rules": [{"type": "field", "network": "tcp", **rule}], "balancers": [balancer, {"tag": "", "selector": ["x"]}]},
+        }
+        return XrayConfigSet((part("05_routing.json", document),)).to_diagnostic()
+
+    def test_empty_rule_targets_are_absent(self):
+        for rule, kind, tag_known, resolved in (
+            ({"outboundTag": ""}, "none", False, False),
+            ({"balancerTag": ""}, "none", False, False),
+            ({"outboundTag": "", "balancerTag": ""}, "none", False, False),
+            ({"outboundTag": "", "balancerTag": "g"}, "balancer", True, True),
+            ({"outboundTag": "proxy-a", "balancerTag": ""}, "outbound", True, True),
+            ({"outboundTag": "proxy-a", "balancerTag": "g"}, "both", False, False),
+        ):
+            with self.subTest(rule=rule):
+                item = self.diagnostic(rule)["rules"][0]
+                self.assertEqual((item["target_kind"], item["target_tag_known"], item["target_resolved"]), (kind, tag_known, resolved))
+
+    def test_empty_fallback_tag_is_not_set(self):
+        balancer = self.diagnostic({"balancerTag": "g"}, fallback="")["balancers"][0]
+        self.assertEqual(
+            (balancer["fallback_known"], balancer["fallback_tag"], balancer["fallback_resolved"], balancer["fallback_position"]),
+            (False, None, None, None),
+        )
+        self.assertEqual(self.diagnostic({"balancerTag": "g"}, fallback="")["unsupported_paths"], [])
+        self.assertTrue(self.diagnostic({"balancerTag": "g"}, fallback="proxy-a")["balancers"][0]["fallback_resolved"])
+
+
+class DnsServerTagTests(unittest.TestCase):
+    """Регрессия review 76-R03: тег отдельного DNS-сервера разрешает ссылку `inboundTag`, в сводку не входит."""
+
+    def summary(self, servers, inbound_tag):
+        document = {
+            "outbounds": [{"tag": "direct-out", "protocol": "freedom"}],
+            "dns": {"tag": "dns-local", "servers": servers},
+            "routing": {"rules": [{"type": "field", "inboundTag": [inbound_tag], "outboundTag": "direct-out"}]},
+        }
+        return XrayConfigSet((part("04_test.json", document),)).to_diagnostic()
+
+    def test_server_tag_resolves_an_inbound_reference_without_being_shown(self):
+        servers = [{"address": "198.51.100.1", "tag": "fixture-private"}, "198.51.100.2", {"address": "198.51.100.3"}]
+        diagnostic = self.summary(servers, "fixture-private")
+        self.assertTrue(diagnostic["rules"][0]["inbound_tags_resolved"])
+        self.assertEqual(diagnostic["dns_tags"], ["dns-local"])
+        self.assertEqual(diagnostic["unsupported_paths"], [])
+        self.assertNotIn("fixture-private", json.dumps({**diagnostic, "rules": [{**diagnostic["rules"][0], "inbound_tags": []}]}))
+        self.assertTrue(self.summary(servers, "dns-local")["rules"][0]["inbound_tags_resolved"])
+
+    def test_missing_empty_or_non_string_server_tag_does_not_resolve(self):
+        self.assertFalse(self.summary([{"address": "198.51.100.1"}], "dns-upstream")["rules"][0]["inbound_tags_resolved"])
+        # Регрессия повторного review 76-R05: пустой тег сервера равен отсутствующему — запросы несут общий `dns.tag`.
+        for servers in ([{"address": "198.51.100.1", "tag": ""}], [{"address": "198.51.100.1"}]):
+            with self.subTest(servers=servers):
+                diagnostic = self.summary(servers, "")
+                self.assertFalse(diagnostic["rules"][0]["inbound_tags_resolved"])
+                self.assertEqual(diagnostic["unsupported_paths"], [])
+                self.assertTrue(self.summary(servers, "dns-local")["rules"][0]["inbound_tags_resolved"])
+        diagnostic = self.summary([{"address": "198.51.100.1", "tag": 7}], "7")
+        self.assertFalse(diagnostic["rules"][0]["inbound_tags_resolved"])
+        self.assertEqual(diagnostic["unsupported_paths"], [{"part": "04_test.json", "path": "dns.servers[0].tag"}])
+
+
+class TagRepeatsTests(unittest.TestCase):
+    """Повторы тегов раздельно внутри частей и между частями по исходным значениям; для доверенного кода."""
+
+    def test_repeats_within_and_between_parts_are_separated_in_order(self):
+        parts = (
+            part("01_in.json", {"inbounds": [{"tag": "lan"}, {"tag": "lan"}, {"tag": "wan"}]}),
+            part("04_out.json", {"outbounds": [{"tag": "proxy"}, {"tag": "direct"}, {"tag": 7}, {}],
+                                 "routing": {"balancers": [{"tag": "group"}]}}),
+            part("05_tail.json", {"outbounds": [{"tag": "direct"}, {"tag": "fixture-private"}, {"tag": "fixture-private"}],
+                                  "routing": {"balancers": [{"tag": "group"}]}}),
+        )
+        repeats = tag_repeats(parts)
+        self.assertIsInstance(repeats, TagRepeats)
+        self.assertEqual(
+            [(item.section, item.tag, item.parts) for item in repeats.within_parts],
+            [("inbounds", "lan", ("01_in.json", "01_in.json")),
+             ("outbounds", "fixture-private", ("05_tail.json", "05_tail.json"))],
+        )
+        self.assertEqual(
+            [(item.section, item.tag, item.parts) for item in repeats.between_parts],
+            [("outbounds", "direct", ("04_out.json", "05_tail.json")),
+             ("balancers", "group", ("04_out.json", "05_tail.json"))],
+        )
+        # Значение тега приватно: repr показывает только секцию и число частей.
+        self.assertEqual(repr(repeats.within_parts[1]), "TagRepeat(section='outbounds', parts=2)")
+        self.assertNotIn("fixture-private", repr(repeats))
+        self.assertEqual(tag_repeats(()), TagRepeats((), ()))
+        self.assertEqual(tag_repeats(snapshot_xray_config().parts), TagRepeats((), ()))
+
+    def test_tag_in_both_lists_and_non_string_or_empty_tags_are_ignored(self):
+        # Регрессия review 76-R04: пустой тег — отсутствие имени, повтором не считается ни внутри части, ни между частями.
+        parts = (
+            part("01_a.json", {"outbounds": [{"tag": "x"}, {"tag": "x"}, {"tag": None}, {"tag": ["x"]}, {"tag": ""}, {"tag": ""}],
+                               "inbounds": [{"tag": ""}, {"tag": ""}, {}]}),
+            part("02_b.json", {"outbounds": [{"tag": "x"}, {"tag": None}, {"tag": ""}], "inbounds": [{"tag": ""}]}),
+        )
+        repeats = tag_repeats(parts)
+        self.assertEqual([(item.tag, item.parts) for item in repeats.within_parts], [("x", ("01_a.json", "01_a.json", "02_b.json"))])
+        self.assertEqual([(item.tag, item.parts) for item in repeats.between_parts], [("x", ("01_a.json", "01_a.json", "02_b.json"))])
+        with self.assertRaises(FrozenInstanceError):
+            repeats.within_parts[0].tag = "y"
 
 
 class UnsafeIdentifierSummaryTests(unittest.TestCase):

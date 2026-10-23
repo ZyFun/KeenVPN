@@ -11,6 +11,7 @@ from keenvpn.application.keenetic_devices import ListKeeneticDevices
 from keenvpn.application.manager_metadata import InspectManagerMetadata
 from keenvpn.application.proxy_config import InspectProxyConfig
 from keenvpn.application.proxy_connections import InspectConnections
+from keenvpn.application.quick_check import QuickCheck
 from keenvpn.application.routing import ExplainRoute
 from keenvpn.application.routing_rules import ListRoutingRules
 from keenvpn.interfaces.cli.menu import (
@@ -291,6 +292,7 @@ class TreeTests(unittest.TestCase):
     def test_bound_scenarios_match_existing_commands_and_tree(self):
         self.assertEqual(BOUND_SCENARIOS, {
             "status.summary": InspectStatusSummary.name,
+            "status.quick_check": QuickCheck.name,
             "connections.list": InspectConnections.name,
             "routing.list": ListRoutingRules.name,
             "routing.explain": ExplainRoute.name,
@@ -302,6 +304,7 @@ class TreeTests(unittest.TestCase):
         self.assertEqual(BUILTIN_ACTIONS, {"settings.about"})
         menu = build_main_menu({})
         self.assertEqual(menu.item(1).submenu.item(1).action.action_id, "status.summary")
+        self.assertEqual(menu.item(1).submenu.item(7).action.action_id, "status.quick_check")
         self.assertEqual(menu.item(3).submenu.item(1).action.action_id, "connections.list")
         self.assertEqual(menu.item(4).submenu.item(1).action.action_id, "routing.list")
         self.assertEqual(menu.item(4).submenu.item(9).action.action_id, "routing.explain")

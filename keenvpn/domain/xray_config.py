@@ -30,6 +30,14 @@ from keenvpn.domain.xray_identifiers import (
 )
 
 
+XRAY_TAIL_MARKER = "tail"
+"""Слово в имени части, при котором `Config.Override` Xray добавляет её новые outbound сразу в конец, а не в начало.
+
+Новые outbound обычной части откладываются и ставятся в начало только после
+всей части, поэтому повтор нового тега в ней сохраняется; в части с этим
+словом повтор заменяет только что добавленный. Регистр не учитывается.
+"""
+
 _RULE_SERVICE_KEYS = frozenset({"type", "ruleTag", "inboundTag", "outboundTag", "balancerTag"})
 _OBSERVATORY_SECTIONS = ("observatory", "burstObservatory")
 _RULE_DOMAIN_LIST_KEYS = ("domain", "domains")
@@ -38,6 +46,16 @@ _RULE_IP_LIST_KEYS = ("ip", "source", "sourceIP", "localIP")
 """Поля правила со списками адресов: `StringList` Xray, разбираются `ToCidrList`."""
 _DNS_IP_LIST_KEYS = ("expectIPs", "expectedIPs", "unexpectedIPs")
 """Поля сервера DNS со списками адресов: `StringList` Xray, разбираются `ToCidrList`."""
+_READ_SECTIONS = frozenset({"inbounds", "outbounds", "dns", "routing", *_OBSERVATORY_SECTIONS})
+_ENDPOINT_FIELDS = frozenset({"tag", "protocol"})
+_DNS_FIELDS = frozenset({"tag", "servers", "hosts"})
+_DNS_SERVER_FIELDS = frozenset({"tag", "domains", *_DNS_IP_LIST_KEYS})
+_ROUTING_FIELDS = frozenset({"domainStrategy", "rules", "balancers"})
+_RULE_READ_FIELDS = _RULE_SERVICE_KEYS | frozenset(_RULE_DOMAIN_LIST_KEYS) | frozenset(_RULE_IP_LIST_KEYS)
+_BALANCER_READ_FIELDS = frozenset({"tag", "selector", "fallbackTag", "strategy"})
+_STRATEGY_READ_FIELDS = frozenset({"type"})
+_OBSERVATORY_FIELDS = frozenset({"subjectSelector"})
+"""Поля, которые читает структурная сводка, по объектам; варианты их регистра сводка не читает."""
 
 
 def _absent(item: dict[str, object], key: str) -> bool:
@@ -107,6 +125,18 @@ def _text(value: object) -> str | None:
     return value if type(value) is str else None
 
 
+def has_case_variant(item: dict[str, object], names: frozenset[str]) -> bool:
+    """Есть ли ключ, совпадающий с полем Xray только без учёта регистра.
+
+    JSON-декодер Go, которым Xray читает конфигурацию, принимает такой ключ
+    вместо точного имени, а при нескольких вариантах применяет последний.
+    `casefold` шире складывания Go: лишнее совпадение только переводит
+    объект в режим просмотра.
+    """
+    folded = {name.casefold() for name in names}
+    return any(key not in names and key.casefold() in folded for key in item)
+
+
 def decode_string_list(value: object) -> tuple[str, ...] | None:
     """Разобрать `StringList` Xray: массив строк либо строка с разделением по запятым.
 
@@ -168,15 +198,21 @@ class _Summary:
         self.inbounds: list[dict[str, object]] = []
         self.outbounds: list[dict[str, object]] = []
         self.dns_tags: list[str] = []
+        self.dns_server_tags: list[str] = []
         self.domain_strategies: list[str] = []
         self.rules: list[dict[str, object]] = []
         self.balancers: list[dict[str, object]] = []
         self.observatory: list[dict[str, object]] = []
         self.unsupported: list[dict[str, str]] = []
         self.rule_values: list[RuleListValue] = []
+        self.case_variant = False
 
     def unsupported_path(self, part: str, path: str) -> None:
         self.unsupported.append({"part": part, "path": path})
+
+    def note_case_variants(self, item: dict[str, object], names: frozenset[str]) -> None:
+        """Отметить ключ, который Xray прочтёт как поле `names`, а сводка пропустит из-за регистра."""
+        self.case_variant = self.case_variant or has_case_variant(item, names)
 
     def string_field(self, part: str, path: str, item: dict[str, object], key: str) -> str | None:
         """Строковое поле либо None; поле другого типа отмечается как неподдержанное."""
@@ -237,6 +273,7 @@ class _Summary:
         """Пройти разделы части в порядке документа; неизвестные разделы только учитываются."""
         document = part.export()
         name = part.name
+        self.note_case_variants(document, _READ_SECTIONS)
         known = [section for section in document if known_section(section)]
         self.parts.append({"name": name, "sections": known, "unknown_section_count": len(document) - len(known)})
         for section, value in document.items():
@@ -245,6 +282,7 @@ class _Summary:
             if section in ("inbounds", "outbounds"):
                 target = self.inbounds if section == "inbounds" else self.outbounds
                 for index, path, item in self.objects(name, section, value):
+                    self.note_case_variants(item, _ENDPOINT_FIELDS)
                     target.append({
                         "part": name,
                         "index": index,
@@ -259,14 +297,21 @@ class _Summary:
                 if type(value) is not dict:
                     self.unsupported_path(name, section)
                     continue
+                self.note_case_variants(value, _OBSERVATORY_FIELDS)
                 for selector in self.string_list(name, section, value, "subjectSelector"):
                     self.observatory.append({"part": name, "section": section, "selector": selector})
 
     def add_dns(self, name: str, dns: object) -> None:
-        """Учесть тег DNS и значения списков серверов и `hosts`; адреса серверов не читаются."""
+        """Учесть тег DNS, теги отдельных серверов и значения списков серверов и `hosts`; адреса серверов не читаются.
+
+        Непустой тег сервера Xray v26.3.27 использует вместо общего `dns.tag` как
+        inbound-тег своих запросов, поэтому ссылка `inboundTag` на него разрешима;
+        пустой тег равен отсутствующему. В сводку теги серверов не входят.
+        """
         if type(dns) is not dict:
             self.unsupported_path(name, "dns")
             return
+        self.note_case_variants(dns, _DNS_FIELDS)
         tag = self.string_field(name, "dns", dns, "tag")
         if tag is not None:
             self.dns_tags.append(tag)
@@ -278,6 +323,11 @@ class _Summary:
                 for index, server in enumerate(servers):
                     path = f"dns.servers[{index}]"
                     if type(server) is dict:
+                        self.note_case_variants(server, _DNS_SERVER_FIELDS)
+                        # Пустой тег сервера Xray не использует: запросы получают общий тег `dns.tag`.
+                        server_tag = self.string_field(name, path, server, "tag")
+                        if server_tag:
+                            self.dns_server_tags.append(server_tag)
                         for key in server:
                             if _alias_ignored(server, key) or _selector_null(server, key):
                                 continue
@@ -303,6 +353,7 @@ class _Summary:
         if type(routing) is not dict:
             self.unsupported_path(name, "routing")
             return
+        self.note_case_variants(routing, _ROUTING_FIELDS)
         strategy = self.string_field(name, "routing", routing, "domainStrategy")
         if strategy is not None:
             self.domain_strategies.append(strategy)
@@ -311,24 +362,29 @@ class _Summary:
                 self.add_rule(name, index, path, rule)
         if "balancers" in routing:
             for index, path, balancer in self.objects(name, "routing.balancers", routing["balancers"]):
+                self.note_case_variants(balancer, _BALANCER_READ_FIELDS)
                 entry = {
                     "part": name,
                     "index": index,
                     "tag": self.string_field(name, path, balancer, "tag"),
                     "selector": self.string_list(name, path, balancer, "selector", allow_string=True),
-                    "fallback_tag": self.string_field(name, path, balancer, "fallbackTag"),
+                    # Пустой `fallbackTag` балансировщик Xray не применяет: резерва нет.
+                    "fallback_tag": self.string_field(name, path, balancer, "fallbackTag") or None,
                     "strategy": None,
                 }
                 if "strategy" in balancer:
                     if type(balancer["strategy"]) is dict:
+                        self.note_case_variants(balancer["strategy"], _STRATEGY_READ_FIELDS)
                         entry["strategy"] = self.string_field(name, f"{path}.strategy", balancer["strategy"], "type")
                     else:
                         self.unsupported_path(name, f"{path}.strategy")
                 self.balancers.append(entry)
 
     def add_rule(self, name: str, index: int, path: str, rule: dict[str, object]) -> None:
-        outbound_tag = self.string_field(name, path, rule, "outboundTag")
-        balancer_tag = self.string_field(name, path, rule, "balancerTag")
+        self.note_case_variants(rule, _RULE_READ_FIELDS)
+        # Пустой тег назначения `parseFieldRule` Xray v26.3.27 считает отсутствующим, как и импорт правил.
+        outbound_tag = self.string_field(name, path, rule, "outboundTag") or None
+        balancer_tag = self.string_field(name, path, rule, "balancerTag") or None
         if outbound_tag is not None and balancer_tag is not None:
             kind, target = RuleTargetKind.BOTH, None
         elif outbound_tag is not None:
@@ -371,7 +427,8 @@ class _Summary:
         inbound_tags = [item["tag"] for item in self.inbounds if item["tag"] is not None]
         outbound_tags = [item["tag"] for item in self.outbounds if item["tag"] is not None]
         balancer_tags = [item["tag"] for item in self.balancers if item["tag"] is not None]
-        known_inbound = set(inbound_tags) | set(self.dns_tags)
+        # Запросы DNS несут общий тег или тег своего сервера как inbound-тег: оба разрешают ссылку правила.
+        known_inbound = set(inbound_tags) | set(self.dns_tags) | set(self.dns_server_tags)
         outbound_positions = _unique_positions(self.outbounds)
         balancer_positions = _unique_positions(self.balancers)
         rules = []
@@ -502,6 +559,77 @@ def rule_list_values(parts: tuple[ConfigDocument, ...]) -> tuple[RuleListValue, 
     for part in parts:
         summary.add_part(part)
     return tuple(summary.rule_values)
+
+
+def config_case_variants(parts: tuple[ConfigDocument, ...]) -> bool:
+    """Есть ли в объектах, которые читает сводка, ключ, отличающийся от поля Xray только регистром.
+
+    Xray применит такой ключ, а сводка его не читает: её выводы о тегах,
+    ссылках и значениях списков для такой конфигурации недостоверны.
+    Безопасная сводка этот признак не содержит; это данные для доверенного кода.
+    """
+    summary = _Summary()
+    for part in parts:
+        summary.add_part(part)
+    return summary.case_variant
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class TagRepeat:
+    """Тег, повторённый в секции `inbounds`, `outbounds` или `balancers`; части — в порядке появления, с повторами.
+
+    Значение тега приватно и в сводку не входит: это данные для доверенного кода.
+    """
+
+    section: str
+    tag: str
+    parts: tuple[str, ...]
+
+    def __repr__(self) -> str:
+        return f"TagRepeat(section={self.section!r}, parts={len(self.parts)})"
+
+
+@dataclass(frozen=True, slots=True)
+class TagRepeats:
+    """Повторы тегов внутри одной части и между частями, раздельно.
+
+    Повтор внутри части — конфликт: Xray v26.3.27 отклоняет повтор тега
+    в одном наборе inbound, outbound или балансировщиков. Повтор между частями
+    — переопределение `Config.Override`: inbound и outbound с тем же тегом из
+    следующей части заменяет предыдущий, а раздел `routing` переписывается
+    целиком; какое определение действует, структурная сводка не моделирует.
+    """
+
+    within_parts: tuple[TagRepeat, ...]
+    between_parts: tuple[TagRepeat, ...]
+
+
+def tag_repeats(parts: tuple[ConfigDocument, ...]) -> TagRepeats:
+    """Найти повторы строковых тегов inbound, outbound и балансировщиков по исходным значениям; для доверенного кода.
+
+    Тег, повторённый в одной части, попадает в `within_parts`; встреченный
+    в двух и более частях — в `between_parts`; один тег может попасть в оба
+    списка. Теги не строкой не учитываются; пустая строка — не тег: Xray
+    проверяет уникальность только непустых тегов, а обработчики без имени
+    собирает отдельным списком. Это не безопасный вывод.
+    """
+    summary = _Summary()
+    for part in parts:
+        summary.add_part(part)
+    within: list[TagRepeat] = []
+    between: list[TagRepeat] = []
+    for section, entries in (("inbounds", summary.inbounds), ("outbounds", summary.outbounds),
+                             ("balancers", summary.balancers)):
+        owners: dict[str, list[str]] = {}
+        for entry in entries:
+            if type(entry["tag"]) is str and entry["tag"]:
+                owners.setdefault(entry["tag"], []).append(entry["part"])
+        for tag, names in owners.items():
+            if len(names) != len(set(names)):
+                within.append(TagRepeat(section, tag, tuple(names)))
+            if len(set(names)) > 1:
+                between.append(TagRepeat(section, tag, tuple(names)))
+    return TagRepeats(tuple(within), tuple(between))
 
 
 @dataclass(frozen=True, slots=True, repr=False)

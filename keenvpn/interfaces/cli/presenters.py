@@ -28,6 +28,10 @@ from keenvpn.application.proxy_config import (
     Port53View, ProxyConfigView, XKeenFlagView, XKeenListView, XrayPositionView,
 )
 from keenvpn.application.proxy_connections import BalancerConnectionView, ConnectionsView, OutboundConnectionView
+from keenvpn.application.quick_check import (
+    OUTCOME_LABELS as QUICK_CHECK_OUTCOME_LABELS, SOURCE_LABELS, SOURCE_STATE_LABELS, QuickCheckOutcome, QuickCheckSource,
+    QuickCheckView, SourceReadView, SourceState,
+)
 from keenvpn.application.routing import (
     OUTCOME_LABELS, STEP_RESULT_LABELS, STEP_SKIPPED_LABEL, RouteExplanationView, RouteOutcome, RouteSelectionView,
     RouteStepView,
@@ -56,6 +60,9 @@ SNAPSHOT_NOTE = (
 PORT_53_NOTE = (
     "Фактический перехват DNS не проверялся: это факты файлов, а не состояние трафика. "
     "Отсутствие исключения само по себе не ошибка и не доказательство перехвата."
+)
+DNS_PRITUNL_NOTE = (
+    "DNS и рабочие сайты через Pritunl проверяются раздельно: эта проверка не подтверждает ни того, ни другого."
 )
 MAX_TEXT_LENGTH = 500
 _INDENT = "  "
@@ -207,15 +214,20 @@ def safe_text(value: object) -> str:
     return HIDDEN
 
 
+def _exact_label(labels: Mapping[object, str], kind: type, value: object) -> str:
+    """Подпись каталога application только для точного перечисления `kind`; строка вместо него — пометка."""
+    if type(value) is kind:
+        return safe_text(labels[value])
+    return HIDDEN
+
+
 def check_status(value: object) -> str:
     """Показать подпись статуса проверки только для точного `CheckStatus`; иначе пометку.
 
     Подпись берётся из каталога application: меню не выводит статус из состояния
     или кодов ошибок и не принимает строку вместо перечисления.
     """
-    if type(value) is CheckStatus:
-        return safe_text(CHECK_STATUS_LABELS[value])
-    return HIDDEN
+    return _exact_label(CHECK_STATUS_LABELS, CheckStatus, value)
 
 
 def _indent(lines: Iterable[str], level: int = 1) -> Lines:
@@ -488,6 +500,43 @@ def present_status_summary(view: StatusSummaryView) -> Lines:
             details.append(_fallback_facts(view.fallback))
         lines += [_area_line(item), *_indent(details)]
     lines.append(SNAPSHOT_NOTE)
+    return lines
+
+
+def _source_lines(item: SourceReadView) -> Lines:
+    """Строка источника с подписью итога чтения и, при отказе, строки отказа со следующим шагом."""
+    source = _exact_label(SOURCE_LABELS, QuickCheckSource, item.source)
+    lines = [f"{source}: {_exact_label(SOURCE_STATE_LABELS, SourceState, item.state)}"]
+    if item.error is not None:
+        lines += _indent(present_error(item.error))
+    return lines
+
+
+def present_quick_check(view: QuickCheckView) -> Lines:
+    """Показать быструю проверку: итог со счётчиками, источники, проверки и оговорки.
+
+    Итог, подписи источников и статусы приходят из сценария и каталогов
+    application: меню их не вычисляет, строка вместо перечисления скрывается.
+    Отказ источника показывается один раз, в блоке источников, со следующим
+    шагом из каталога; зависящие проверки несут только его код.
+    """
+    if type(view) is not QuickCheckView:
+        raise TypeError("Ожидается QuickCheckView.")
+    counts = view.counts
+    totals = ", ".join(
+        f"{safe_text(CHECK_STATUS_LABELS[status])} {count(counts.get(status.value))}" for status in CheckStatus
+    )
+    lines = [
+        "Быстрая проверка без изменений",
+        f"Активная сетевая проверка: {_network_check(view.active_network_check)}",
+        f"Итог: {_exact_label(QUICK_CHECK_OUTCOME_LABELS, QuickCheckOutcome, view.outcome)}; {totals}",
+        "Источники:",
+    ]
+    for item in view.sources:
+        lines += _indent(_source_lines(item))
+    lines.append("Проверки:")
+    lines.extend(_INDENT + _check_line(item) for item in view.checks.items)
+    lines += [PORT_53_NOTE, DNS_PRITUNL_NOTE, SNAPSHOT_NOTE]
     return lines
 
 

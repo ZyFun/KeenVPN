@@ -29,7 +29,9 @@ from keenvpn.domain.routing import (
     RoutingValidationError, UnknownCondition, UnsupportedRuleCondition, _PrivateRepresentation,
 )
 from keenvpn.domain.routing_policy import FinalRoutingRule, RoutingPolicy
-from keenvpn.domain.xray_config import RuleListValue, RuleTargetKind, XrayConfigSet, decode_string_list
+from keenvpn.domain.xray_config import (
+    XRAY_TAIL_MARKER, RuleListValue, RuleTargetKind, XrayConfigSet, decode_string_list, has_case_variant,
+)
 from keenvpn.domain.xray_identifiers import (
     BALANCER_STRATEGIES, XRAY_RULE_CONDITION_FIELDS, safe_identifier, safe_strategy,
 )
@@ -46,8 +48,6 @@ _SERVICE_FIELDS = frozenset({"type", "ruleTag", "outboundTag", "balancerTag"})
 """`type` декодер v26.3.27 не читает; остальные поля задают назначение и тег правила."""
 _MODEL_FIELDS = frozenset({"domain", "domains", "ip"})
 _FINAL_NETWORKS = frozenset({"tcp", "udp"})
-_TAIL_MARKER = "tail"
-"""Часть с этим словом в имени добавляет новые outbound в конец, остальные — в начало."""
 _DOCUMENT_FIELDS = frozenset({"routing", "outbounds"})
 _ROUTING_FIELDS = frozenset({"rules", "balancers"})
 _OUTBOUND_FIELDS = frozenset({"tag", "protocol", "proxySettings", "streamSettings"})
@@ -57,23 +57,11 @@ _SOCKOPT_FIELDS = frozenset({"dialerProxy"})
 _BALANCER_FIELDS = frozenset({"tag", "selector", "fallbackTag", "strategy"})
 _STRATEGY_FIELDS = frozenset({"type", "settings"})
 _RULE_FIELDS = XRAY_RULE_CONDITION_FIELDS | _SERVICE_FIELDS
-def _case_variants(item: dict[str, object], names: frozenset[str]) -> bool:
-    """Есть ли ключ, совпадающий с полем Xray только без учёта регистра.
-
-    JSON-декодер Go, которым Xray читает конфигурацию, принимает такой ключ
-    вместо точного имени, а при нескольких вариантах применяет последний.
-    `casefold` шире складывания Go: лишнее совпадение только переводит
-    объект в режим просмотра.
-    """
-    folded = {name.casefold() for name in names}
-    return any(key not in names and key.casefold() in folded for key in item)
-
-
 def _balancer_case_variants(item: dict[str, object]) -> bool:
     """Варианты регистра полей балансировщика и вложенной стратегии."""
     strategy = item.get("strategy")
-    return _case_variants(item, _BALANCER_FIELDS) or (
-        type(strategy) is dict and _case_variants(strategy, _STRATEGY_FIELDS)
+    return has_case_variant(item, _BALANCER_FIELDS) or (
+        type(strategy) is dict and has_case_variant(strategy, _STRATEGY_FIELDS)
     )
 
 
@@ -636,7 +624,7 @@ def _chained(item: dict[str, object]) -> bool:
     """
     proxy = item.get("proxySettings")
     if proxy is not None:
-        if type(proxy) is not dict or _case_variants(proxy, _PROXY_SETTINGS_FIELDS):
+        if type(proxy) is not dict or has_case_variant(proxy, _PROXY_SETTINGS_FIELDS):
             return True
         tag = proxy.get("tag")
         if tag is not None and (type(tag) is not str or tag):
@@ -644,12 +632,12 @@ def _chained(item: dict[str, object]) -> bool:
     stream = item.get("streamSettings")
     if stream is None:
         return False
-    if type(stream) is not dict or _case_variants(stream, _STREAM_SETTINGS_FIELDS):
+    if type(stream) is not dict or has_case_variant(stream, _STREAM_SETTINGS_FIELDS):
         return True
     sockopt = stream.get("sockopt")
     if sockopt is None:
         return False
-    if type(sockopt) is not dict or _case_variants(sockopt, _SOCKOPT_FIELDS):
+    if type(sockopt) is not dict or has_case_variant(sockopt, _SOCKOPT_FIELDS):
         return True
     dialer = sockopt.get("dialerProxy")
     return dialer is not None and (type(dialer) is not str or bool(dialer))
@@ -672,7 +660,7 @@ def _outbound_entries(value: object) -> tuple[list[_Outbound], bool, bool]:
             entries.append(_Outbound(None, None))
             supported = False
             continue
-        variant = variant or _case_variants(item, _OUTBOUND_FIELDS)
+        variant = variant or has_case_variant(item, _OUTBOUND_FIELDS)
         tag = item.get("tag", "")
         tag = tag if type(tag) is str else None
         if _chained(item):
@@ -717,7 +705,7 @@ def _effective_outbounds(documents: list[tuple[str, dict[str, object]]]) -> tupl
             continue
         if not entries:
             continue
-        tail = _TAIL_MARKER in name.lower()
+        tail = XRAY_TAIL_MARKER in name.lower()
         prepends: list[list[_Outbound]] = []
         for entry in entries:
             cell = first.get(entry.tag) if entry.tag is not None else None
@@ -786,7 +774,7 @@ class _TargetResolver:
         """Определить назначение по `outboundTag` и `balancerTag`, как их читает `parseFieldRule`."""
         outbound = rule.get("outboundTag")
         balancer = rule.get("balancerTag")
-        if _case_variants(rule, frozenset({"outboundTag", "balancerTag"})):
+        if has_case_variant(rule, frozenset({"outboundTag", "balancerTag"})):
             return _target(RuleTargetKind.NONE, None, ImportReason.FIELD_CASE_VARIANT)
         if any(value is not None and type(value) is not str for value in (outbound, balancer)):
             return _target(RuleTargetKind.NONE, None, ImportReason.TARGET_INVALID)
@@ -828,7 +816,7 @@ class _TargetResolver:
             reasons.append(ImportReason.BALANCER_INVALID)
             selectors = () if selectors is None else selectors
         elif (
-            type(strategy) is dict and not _case_variants(strategy, _STRATEGY_FIELDS)
+            type(strategy) is dict and not has_case_variant(strategy, _STRATEGY_FIELDS)
             and type(strategy.get("type")) is str
         ):
             strategy_type = strategy["type"]
@@ -988,7 +976,7 @@ def _import_rule(part: str, index: int, rule: object, resolver: _TargetResolver,
         reasons.append(ImportReason.UNSUPPORTED_CONDITIONS)
     if unknown:
         reasons.append(ImportReason.UNKNOWN_FIELDS)
-    if _case_variants({key: None for key in unknown}, _RULE_FIELDS):
+    if has_case_variant({key: None for key in unknown}, _RULE_FIELDS):
         reasons.append(ImportReason.FIELD_CASE_VARIANT)
     values: list[tuple[str, ConditionFamily, str]] = []
     families: list[ConditionFamily] = []
@@ -1039,7 +1027,7 @@ def import_routing_scheme(config: XrayConfigSet) -> RoutingScheme:
         _raise_detached(RoutingImportErrorCode.CONFIG)
     documents = [(part.name, part.export()) for part in config.parts]
     outbounds, outbounds_supported, case_variant = _effective_outbounds(documents)
-    case_variant = case_variant or any(_case_variants(document, _DOCUMENT_FIELDS) for _name, document in documents)
+    case_variant = case_variant or any(has_case_variant(document, _DOCUMENT_FIELDS) for _name, document in documents)
     routing_part = None
     routing: object = None
     routing_parts: list[str] = []
@@ -1050,7 +1038,7 @@ def import_routing_scheme(config: XrayConfigSet) -> RoutingScheme:
     reasons: list[ImportReason] = []
     if not outbounds_supported:
         reasons.append(ImportReason.OUTBOUNDS_UNSUPPORTED)
-    if type(routing) is dict and _case_variants(routing, _ROUTING_FIELDS):
+    if type(routing) is dict and has_case_variant(routing, _ROUTING_FIELDS):
         case_variant = True
     groups: tuple[ImportedRuleGroup, ...] = ()
     rules_readable = False
@@ -1112,14 +1100,14 @@ def balancer_fallbacks(config: XrayConfigSet) -> tuple[RuleTarget | None, ...] |
     outbounds, outbounds_supported, case_variant = _effective_outbounds(documents)
     routing: object = None
     for _name, document in documents:
-        case_variant = case_variant or _case_variants(document, _DOCUMENT_FIELDS)
+        case_variant = case_variant or has_case_variant(document, _DOCUMENT_FIELDS)
         if document.get("routing") is not None:
             routing = document["routing"]
     if not outbounds_supported or case_variant:
         return None
     if routing is None:
         return ()
-    if type(routing) is not dict or _case_variants(routing, _ROUTING_FIELDS):
+    if type(routing) is not dict or has_case_variant(routing, _ROUTING_FIELDS):
         return None
     balancers = routing.get("balancers")
     if balancers is None:

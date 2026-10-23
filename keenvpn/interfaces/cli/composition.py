@@ -4,9 +4,9 @@
 Транспорта чтения роутера в этой версии нет, поэтому сборка по умолчанию
 не подключает ни одного источника: пункты, сценарию которых нужен источник,
 показываются недоступными. Объяснение маршрута открывает запрос значения
-и передаёт введённую строку сценарию без разбора. Сводка состояния допускает неподключённые
-источники, поэтому пункт «Сводка» и шапка главного меню доступны всегда
-и показывают такие области «не проверено». Каждое действие выполняет сценарий
+и передаёт введённую строку сценарию без разбора. Сводка состояния и быстрая проверка допускают
+неподключённые источники, поэтому пункты «Сводка» и «Быстрая проверка без изменений» и шапка
+главного меню доступны всегда и показывают такие области и проверки «не проверено». Каждое действие выполняет сценарий
 заново при каждом выборе пункта и не хранит результаты между выборами: список,
 который вернуло действие, существует, пока он открыт, а возврат из карточки
 или поиска источники не читает. Шапка выполняет тот же сценарий сводки при
@@ -28,6 +28,7 @@ from keenvpn.application.ports import (
 )
 from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler
 from keenvpn.application.proxy_connections import InspectConnections, InspectConnectionsHandler
+from keenvpn.application.quick_check import QuickCheck, QuickCheckHandler
 from keenvpn.application.routing import ExplainRoute, ExplainRouteHandler
 from keenvpn.application.routing_import import ImportRoutingSchemeHandler
 from keenvpn.application.routing_rules import ListRoutingRules, ListRoutingRulesHandler
@@ -35,7 +36,8 @@ from keenvpn.application.status_summary import InspectStatusSummary, InspectStat
 from keenvpn.interfaces.cli.menu import Menu, MenuError, UnavailableReason, ValueRequest
 from keenvpn.interfaces.cli.presenters import (
     ROUTE_PROMPT, present_about, present_connections, present_device_list, present_manager_metadata, present_port53,
-    present_result, present_route_explanation, present_rule_list, present_status_header, present_status_summary,
+    present_quick_check, present_result, present_route_explanation, present_rule_list, present_status_header,
+    present_status_summary,
 )
 from keenvpn.interfaces.cli.terminal import Action, Header
 from keenvpn.interfaces.cli.tree import (
@@ -122,6 +124,10 @@ def _bindings(
 
     def header() -> list[str]:
         return present_result(summary.execute(InspectStatusSummary()), present_status_header)
+
+    # Быстрая проверка читает те же источники теми же функциями, что сводка, и дополнительно инвентарь геобаз.
+    quick_check = QuickCheckHandler(proxy, sources.process, sources.geodata, operation_ids=operation_ids)
+    bind("status.quick_check", lambda: present_result(quick_check.execute(QuickCheck()), present_quick_check))
 
     if proxy is not None:
         connections = InspectConnectionsHandler(proxy, operation_ids=operation_ids)

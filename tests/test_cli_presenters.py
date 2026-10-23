@@ -30,7 +30,10 @@ from keenvpn.application.routing_rules import (
 from keenvpn.domain.manager_metadata import ManagerMetadata, RuleRecord, UnknownFields, encode_manager_metadata
 from keenvpn.domain.rule_binding import rule_key, scheme_rules
 from keenvpn.domain.routing_import import import_routing_scheme
+from keenvpn.application.quick_check import QuickCheck, QuickCheckHandler
 from keenvpn.application.status_summary import PORT_53_HINT, InspectStatusSummary, InspectStatusSummaryHandler
+from keenvpn.domain.xray_process import XrayProcessObservation
+from keenvpn.interfaces.cli.presenters import DNS_PRITUNL_NOTE, PORT_53_NOTE, SNAPSHOT_NOTE, present_quick_check
 from keenvpn.domain.config_document import ConfigDocument
 from keenvpn.domain.xray_config import XrayConfigSet
 from keenvpn.interfaces.cli import presenters
@@ -1270,6 +1273,103 @@ class RouteExplanationPresenterTests(PresenterAssertions):
         self.assertEqual(shown.count(HIDDEN), 3)
         with self.assertRaises(TypeError):
             present_route_explanation(self.results["routing"].data)
+
+
+def quick_check_view(sources=None, *, connected=True):
+    sources = snapshot_installation_sources() if sources is None else sources
+    proxy = None
+    if connected:
+        proxy = InspectProxyConfigHandler(sources.proxy.xray, sources.proxy.settings, sources.proxy.init, sources.proxy.lists)
+    handler = QuickCheckHandler(proxy, sources.process if connected else None, sources.geodata if connected else None)
+    result = handler.execute(QuickCheck())
+    assert result.succeeded
+    return result.data
+
+
+QUICK_CHECK_LINES = [
+    "Быстрая проверка без изменений",
+    "Активная сетевая проверка: не выполнялась",
+    "Итог: расхождений не найдено, часть проверок не выполнена или не поддерживается; "
+    "успешно 6, ошибка 0, не проверено 2, не поддерживается 1",
+    "Источники:",
+    "  части конфигурации Xray: прочитан",
+    "  настройки XKeen: прочитан",
+    "  параметры init XKeen: прочитан",
+    "  список исключённых портов: прочитан",
+    "  список перехватываемых портов: прочитан",
+    "  процесс Xray: прочитан",
+    "  инвентарь геобаз: прочитан",
+    "Проверки:",
+    "  xray_config_consistent: успешно",
+    "  geodata_references_resolved: успешно",
+    "  fallback_profile_consistent: успешно",
+    "  autostart_flag_unambiguous: успешно",
+    "  dns_port_53_mode_consistent: успешно",
+    "  xray_process_consistent: успешно",
+    "  interception_active: не поддерживается, причина interception_not_observed",
+    "  dns_port_53_path: не проверено, причина network_check_not_performed (сетевая проверка)",
+    "  vpn_reachable: не проверено, причина network_check_not_performed (сетевая проверка)",
+    PORT_53_NOTE,
+    DNS_PRITUNL_NOTE,
+    SNAPSHOT_NOTE,
+]
+
+
+class QuickCheckPresenterTests(PresenterAssertions):
+    """Пункт 1 → 7: итог, источники и проверки из каталогов application, оговорки, скрытие значений вне каталогов."""
+
+    def test_snapshot_quick_check_lists_outcome_sources_checks_and_notes(self):
+        view = quick_check_view()
+        with forbid_external_effects():
+            lines = present_quick_check(view)
+        self.assert_safe_lines(lines)
+        self.assertEqual(lines, QUICK_CHECK_LINES)
+
+    def test_source_failure_is_shown_once_with_its_step_and_discrepancy_changes_the_outcome(self):
+        sources = snapshot_installation_sources()
+        sources.geodata.outcome = OSError("/opt/etc/TEST_ONLY_SECRET")
+        sources.process.outcome = XrayProcessObservation((4242, 4243), True)
+        lines = present_quick_check(quick_check_view(sources))
+        text = self.assert_safe_lines(lines)
+        self.assertEqual(lines[2], "Итог: найдены расхождения; успешно 4, ошибка 1, не проверено 3, не поддерживается 1")
+        geodata = lines.index("  инвентарь геобаз: отказ")
+        self.assertEqual(lines[geodata + 1:geodata + 4], [
+            "    Отказ: source_failed / geo_databases_unavailable",
+            "    Причина: Не удалось прочитать инвентарь файлов геобаз.",
+            f"    Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.CHECK_SOURCE]}",
+        ])
+        self.assertIn("  geodata_references_resolved: не проверено, причина geo_databases_unavailable", lines)
+        self.assertIn("  xray_process_consistent: ошибка, причина multiple_processes", lines)
+        self.assertEqual(text.count("Следующий шаг"), 1)
+        self.assertNotIn("TEST_ONLY_SECRET", text)
+        self.assertNotIn("4243", text)
+
+    def test_unconnected_sources_are_shown_without_success(self):
+        lines = present_quick_check(quick_check_view(connected=False))
+        text = self.assert_safe_lines(lines)
+        self.assertIn("  части конфигурации Xray: не подключён", lines)
+        self.assertIn("  инвентарь геобаз: не подключён", lines)
+        self.assertIn("  xray_process_consistent: не проверено, причина source_not_connected", lines)
+        self.assertEqual(lines[2], "Итог: расхождений не найдено, часть проверок не выполнена или не поддерживается; "
+                                   "успешно 0, ошибка 0, не проверено 8, не поддерживается 1")
+        self.assertNotIn(": успешно", text)
+        self.assertNotIn("Следующий шаг", text)
+
+    def test_values_outside_catalogs_are_hidden_and_never_shown_as_success(self):
+        view = quick_check_view()
+        payload = view.to_dict()
+        object.__setattr__(view, "outcome", "incomplete")
+        object.__setattr__(view.sources[0], "state", "read")
+        object.__setattr__(view.sources[1], "source", "settings")
+        object.__setattr__(view.checks.items[0], "status", "passed")
+        lines = present_quick_check(view)
+        self.assertTrue(lines[2].startswith(f"Итог: {HIDDEN}; успешно "))
+        self.assertEqual(lines[4:6], [f"  части конфигурации Xray: {HIDDEN}", f"  {HIDDEN}: прочитан"])
+        self.assertEqual(lines[12], f"  xray_config_consistent: {HIDDEN}")
+        with self.assertRaises(TypeError):
+            present_quick_check(payload)
+        with self.assertRaises(TypeError):
+            present_quick_check(view.checks)
 
 
 if __name__ == "__main__":

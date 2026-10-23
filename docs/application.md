@@ -50,13 +50,15 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 `keenvpn.application.source_checks`: точный тип модели, повторная доменная
 проверка и отдельные коды отказа без текста и цепочки исключения. Сводка
 состояния читает те же источники по одному через `read_source` обработчика
-конфигурации и `read_xray_process` с теми же кодами отказа. Проверки
+конфигурации и `read_xray_process` с теми же кодами отказа; быстрая проверка
+читает их теми же функциями сводки `read_summary_sources` и `build_status_summary`
+и дополнительно инвентарь геобаз через `read_geo_databases`. Проверки
 внутри данных результата описывает общий `keenvpn.application.checks`:
 статусы словаря контракта, признак активной сетевой проверки и построители
 проверок по уже прочитанным моделям.
 
 `ConnectionLinkView`, `ConnectionProfileView`, `ProtocolSupportView`, `RouteExplanationView`,
-`KeeneticPolicyResolutionView`, `KeeneticStateView`, `ProxyConfigView`, `InstallationView`, `StatusSummaryView`, `RoutingSchemeView`,
+`KeeneticPolicyResolutionView`, `KeeneticStateView`, `ProxyConfigView`, `InstallationView`, `StatusSummaryView`, `QuickCheckView`, `RoutingSchemeView`,
 `ManagerMetadataStatusView`, `StoragePlacementImportView`, `RoutingRulesView`, `RuleIdentityAssignmentView` и `ErrorDetail` содержат безопасные данные и пояснения. Заранее заданное сообщение
 ошибки и преобразование `to_dict()` относятся к контракту результата: они не добавляют ANSI-оформление,
 заголовки меню или выравнивание для терминала. Отображение и сериализация одного
@@ -72,7 +74,7 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 | --- | --- |
 | `contract_version` | Версия формата команд и результатов, сейчас `1` (`CONTRACT_VERSION`) |
 | `operation_id` | Идентификатор вызова; по умолчанию случайная hex-строка |
-| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_connections`, `inspect_installation`, `inspect_status_summary`, `import_routing_scheme`, `inspect_manager_metadata`, `import_storage_placement`, `inspect_routing_rules`, `assign_rule_identifiers`, `list_routing_rules` или `list_keenetic_devices` |
+| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_connections`, `inspect_installation`, `inspect_status_summary`, `quick_check`, `import_routing_scheme`, `inspect_manager_metadata`, `import_storage_placement`, `inspect_routing_rules`, `assign_rule_identifiers`, `list_routing_rules` или `list_keenetic_devices` |
 | `status` | `OperationStatus.SUCCEEDED` или `OperationStatus.FAILED` |
 | `data` | Безопасное представление при успехе, иначе `None` |
 | `error` | `ErrorDetail` при отказе, иначе `None` |
@@ -192,7 +194,14 @@ Xray и маркера; `geodata_references_check(state)` — разрешимо
 описаны в [чтении существующей установки](installation.md#проверки-сводки).
 Сводка состояния использует первый и третий построители для областей ядра
 и доступности VPN; проверки остальных её областей описаны в [сводке
-состояния](status-summary.md#области).
+состояния](status-summary.md#области). `xray_config_check(config)` —
+согласованность ссылок и тегов конфигурации Xray по структурной сводке
+и `port_53_mode_check(init, port_exclude, port_proxying)` — согласованность
+выбранного режима порта 53 со списками портов и флагами init; их статусы
+и причины описаны в [быстрой проверке](quick-check.md#проверки). Общие
+помощники `not_checked(code, network, reason)` и `first_source_error(values)`
+дают невыполненную проверку и первый отказ источника в порядке чтения; ими
+пользуются сводка и быстрая проверка.
 
 В `to_dict()` набор — словарь `{"active_network_check": bool, "items": [...]}`,
 каждая проверка — `{"code", "status", "network", "reason"}`. Других полей
@@ -732,7 +741,36 @@ Xray и XKeen и порт наблюдения процесса; `None` озна
 | Источник не подключён | успех; зависящие области `not_checked` / `source_not_connected` |
 
 Области, состояния, причины, правило режима резерва и пример описаны в [сводке
-состояния](status-summary.md).
+состояния](status-summary.md). Чтение и сборка сводки — функции
+`read_summary_sources(proxy, processes)` и `build_status_summary(readings)`;
+обработчик вызывает их по очереди, а быстрая проверка строит по тем же
+ответам источников свои проверки.
+
+## Быстрая проверка без изменений
+
+`QuickCheck` проверяет согласованность прочитанных источников между собой
+и явно перечисляет непроверенное; его результат показывает пункт 1 → 7 меню.
+`QuickCheckHandler(proxy, processes, geodata)` получает обработчик конфигурации
+Xray и XKeen, порт наблюдения процесса и порт инвентаря геобаз; `None` означает
+неподключённый источник. Источники читаются один раз функциями сводки и чтения
+установки, проверки областей сводки берутся из `build_status_summary`, сверх них
+добавляются согласованность ссылок и тегов конфигурации Xray, разрешимость
+ссылок на геобазы по инвентарю и согласованность выбранного режима порта 53
+со списками портов и флагами init. `QuickCheckView` содержит
+`active_network_check` (всегда `False`), итог `outcome` (`failed` либо
+`incomplete`, значения «всё успешно» нет), счётчики `counts`, итог чтения
+каждого источника `sources` с описанием отказа один раз и девять проверок
+`checks`; PID, теги, имена файлов, адреса и записи списков в него не входят.
+
+| Ситуация | Результат |
+| --- | --- |
+| Неверный тип команды или версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
+| Источник отказал или вернул некорректные данные | успех; его итог чтения `failed` с `ErrorDetail`, зависящие проверки `not_checked` с кодом отказа |
+| Источник не подключён | успех; его итог чтения `not_connected`, зависящие проверки `not_checked` / `source_not_connected` |
+| Хотя бы одна проверка нашла расхождение | успех; `outcome` = `failed` |
+
+Проверки, правило порта 53, представление и пример описаны в [быстрой
+проверке](quick-check.md).
 
 ## Импорт правил маршрутизации
 
@@ -1040,14 +1078,24 @@ ANSI-последовательности в строках и байтах, а 
 `test_application_checks.py` проверяет словарь статусов проверок: четыре значения
 и их подписи, отличие от `OperationStatus` и отказ строки или другого перечисления
 вместо `CheckStatus`, инварианты проверки и набора, запрет итога сетевой проверки
-в пассивном результате, формат `to_dict()` и построители проверок по процессу
-Xray и геобазам без значений источников.
+в пассивном результате, формат `to_dict()`, построители проверок по процессу
+Xray, геобазам, конфигурации Xray и режиму порта 53 без значений источников
+и общие помощники невыполненной проверки и первого отказа источника.
 
 `test_application_status_summary.py` проверяет сводку состояния: семь областей
 снимка, однократное чтение источников в фиксированном порядке, отказ каждого
 источника только в его областях без прерывания остальных чтений, неподключённые
 источники без вызовов, каждое состояние и статус каждой области, правило режима
-резерва, точные типы и инварианты моделей и отсутствие приватных значений.
+резерва, точные типы и инварианты моделей, совпадение результата разделённых
+чтения и сборки с результатом обработчика и отсутствие приватных значений.
+
+`test_application_quick_check.py` проверяет быструю проверку: девять проверок
+снимка и совпадение проверок областей со сводкой, порядок и однократность чтения
+семи источников, отказ и некорректный ответ каждого источника только в его
+проверках с описанием отказа один раз, неподключённые источники без вызовов,
+каждый статус каждой проверки, включая матрицы согласованности конфигурации Xray
+и режима порта 53, согласованность итога со счётчиками, точные типы и инварианты
+моделей и отсутствие приватных значений.
 
 `test_application_profiles.py` отдельно проверяет просмотр профиля без внешних
 эффектов, ошибки источника, соответствие ID, версии и протокола, приватность

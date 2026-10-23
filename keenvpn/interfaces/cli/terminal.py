@@ -3,9 +3,10 @@
 Потоки ввода и вывода внедряются, поэтому цикл одинаково работает с терминалом
 и тестовыми потоками. В вывод попадают только фиксированные тексты, заголовки
 дерева, строки шапки корня и строки, которые вернуло действие; введённые строки,
-в том числе запросы поиска, не повторяются. Один цикл обслуживает все уровни:
-подменю, список, результаты поиска и карточку элемента. Цвет и запросы значений
-здесь отсутствуют.
+в том числе запросы поиска и введённые значения, не повторяются. Один цикл
+обслуживает все уровни: подменю, список, результаты поиска, карточку элемента
+и запрос значения. Запрос значения передаёт строку действию без разбора:
+проверку выполняет сценарий. Цвет и скрытый ввод здесь отсутствуют.
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -13,13 +14,14 @@ import re
 from typing import Protocol
 
 from keenvpn.interfaces.cli.menu import (
-    REASON_MESSAGES, CardLevel, ListLevel, MenuError, MenuList, MenuNavigator, SelectionKind,
+    REASON_MESSAGES, CardLevel, InputLevel, ListLevel, MenuError, MenuList, MenuNavigator, SelectionKind,
+    ValueRequest,
 )
 from keenvpn.interfaces.cli.search import MAX_QUERY_CHARS, MAX_QUERY_WORDS, is_number_like, parse_query
 
 
-Action = Callable[[], list[str] | MenuList]
-"""Доступное действие пункта: возвращает строки для вывода или список элементов, ничего не печатает само."""
+Action = Callable[[], list[str] | MenuList | ValueRequest]
+"""Доступное действие пункта: возвращает строки для вывода, список элементов или запрос значения, ничего не печатает само."""
 Header = Callable[[], list[str]]
 """Шапка корня: возвращает строки под заголовком корневого меню, ничего не печатает сама."""
 
@@ -33,6 +35,7 @@ QUERY_HINT = (
 )
 NO_MATCHES = "Совпадений нет: показанный список не изменился."
 CARD_HINT = "Введите 0, чтобы вернуться к списку."
+INPUT_HINT = "Введите значение или 0, чтобы вернуться в меню."
 LIST_USAGE = "Номер — карточка элемента, текст — поиск по показанным строкам, 0 — назад."
 EMPTY_LIST = "Список пуст."
 BACK_LABEL = "Назад"
@@ -135,6 +138,14 @@ def render_card(navigator: MenuNavigator) -> list[str]:
     return [" / ".join(navigator.titles), *level.entry.card, f"  0. {BACK_LABEL}"]
 
 
+def render_input(navigator: MenuNavigator) -> list[str]:
+    """Собрать строки запроса значения: путь, подсказку запроса и `0`; введённое значение не выводится."""
+    level = navigator.current
+    if type(level) is not InputLevel:
+        raise MenuError("Открытый уровень — не запрос значения.")
+    return [" / ".join(navigator.titles), *level.request.prompt, f"  0. {BACK_LABEL}"]
+
+
 def render_level(navigator: MenuNavigator, header: Sequence[str] = ()) -> list[str]:
     """Собрать строки открытого уровня любого вида; шапка показывается только в корневом меню."""
     level = navigator.current
@@ -142,6 +153,8 @@ def render_level(navigator: MenuNavigator, header: Sequence[str] = ()) -> list[s
         return render_list(navigator)
     if type(level) is CardLevel:
         return render_card(navigator)
+    if type(level) is InputLevel:
+        return render_input(navigator)
     return render_menu(navigator, header)
 
 
@@ -193,6 +206,9 @@ def _menu_step(
         if type(result) is MenuList:
             navigator.open_list(result)
             return ["", *render_list(navigator)]
+        if type(result) is ValueRequest:
+            navigator.open_input(selection.item.title, result)
+            return ["", *render_input(navigator)]
         return ["", *result, "", *render_menu(navigator, root.lines(navigator))]
     return render_level(navigator, root.lines(navigator))
 
@@ -222,6 +238,27 @@ def _card_step(navigator: MenuNavigator, line: str, root: _RootHeader) -> list[s
     return [CARD_HINT, "", *render_card(navigator)]
 
 
+def _input_step(navigator: MenuNavigator, line: str, root: _RootHeader) -> list[str]:
+    """Принять значение: `0` — возврат без выполнения, пустая строка — подсказка, иначе строка передаётся действию.
+
+    Уровень закрывается до вызова действия, поэтому результат или отказ
+    показывается перед подменю, из которого открыт запрос; введённая строка
+    без перевода строки передаётся как есть и в вывод не попадает.
+    """
+    if parse_choice(line) == 0:
+        navigator.back()
+        return render_level(navigator, root.lines(navigator))
+    value = line.rstrip("\r\n")
+    if not value.strip():
+        return [INPUT_HINT, "", *render_input(navigator)]
+    request = navigator.current.request
+    navigator.back()
+    result = request.submit(value)
+    if type(result) is not list or any(type(item) is not str for item in result):
+        raise MenuError("Приём значения возвращает список строк.")
+    return ["", *result, "", *render_menu(navigator, root.lines(navigator))]
+
+
 def run_menu(
     navigator: MenuNavigator, actions: Mapping[str, Action], stdin: TextInput, stdout: TextOutput,
     header: Header | None = None,
@@ -232,8 +269,10 @@ def run_menu(
     подсказку и повторный показ без смены состояния; недоступный пункт
     показывает заранее заданную причину. В списке номер открывает карточку,
     другой текст — поиск по показанным строкам, `0` возвращает на один уровень;
-    пустая строка и ошибочный ввод ничего не меняют. Строка длиннее предела
-    отбрасывается на любом уровне. Шапка корня выполняется при старте и при
+    пустая строка и ошибочный ввод ничего не меняют. В запросе значения `0`
+    возвращает в подменю без выполнения, пустая строка повторяет подсказку,
+    любая другая строка передаётся действию и закрывает запрос. Строка длиннее
+    предела отбрасывается на любом уровне. Шапка корня выполняется при старте и при
     каждом возврате в корень; повторный показ корня после подсказки или
     действия в нём выводит те же строки без нового вызова. `KeyboardInterrupt`
     не перехватывается: его обрабатывает точка входа.
@@ -260,6 +299,8 @@ def run_menu(
             show(_list_step(navigator, line, root))
         elif type(level) is CardLevel:
             show(_card_step(navigator, line, root))
+        elif type(level) is InputLevel:
+            show(_input_step(navigator, line, root))
         else:
             lines = _menu_step(navigator, actions, line, root)
             if lines is None:

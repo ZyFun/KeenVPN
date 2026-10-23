@@ -10,6 +10,10 @@ import unicodedata
 
 MAX_RULE_NAME_LENGTH = 64
 """Предел длины названия правила в символах Unicode; в UTF-8 это не больше 256 байт."""
+MAX_DESTINATION_LENGTH = 1024
+"""Предел длины строки назначения для объяснения маршрута: совпадает с пределом строки ввода меню."""
+MAX_DESTINATION_ADDRESSES = 16
+"""Сколько адресов принимает строка назначения помимо одного домена."""
 
 _RULE_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
@@ -70,6 +74,7 @@ class RoutingErrorCode(str, Enum):
     PROTECTED_RULE = "protected_rule"
     PROTECTED_ORDER = "invalid_protected_rule_order"
     CONTEXT = "invalid_routing_context"
+    DESTINATION = "invalid_destination"
     GEODATA_RESULT = "invalid_geodata_result"
     GEODATA_MISMATCH = "geodata_database_mismatch"
     EXPLANATION = "invalid_route_explanation"
@@ -95,6 +100,10 @@ class RoutingValidationError(ValueError):
             RoutingErrorCode.PROTECTED_ORDER: (
                 "Служебные правила должны оставаться непрерывным блоком "
                 "в начале списка; пользовательское правило нельзя поставить перед ними."
+            ),
+            RoutingErrorCode.DESTINATION: (
+                "Назначение задаётся доменом, отдельным IP-адресом или доменом с адресами через пробел: "
+                f"не больше одного домена и {MAX_DESTINATION_ADDRESSES} адресов, без CIDR, портов и зон."
             ),
         }
         super().__init__(messages.get(code, f"Некорректные данные маршрутизации: {code.value}."))

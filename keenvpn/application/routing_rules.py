@@ -38,6 +38,7 @@ from keenvpn.domain.manager_metadata import (
 )
 from keenvpn.domain.routing import RoutingValidationError, valid_rule_id, valid_rule_name
 from keenvpn.domain.routing_import import RoutingScheme
+from keenvpn.domain.routing_policy import RoutingPolicy
 from keenvpn.domain.rule_binding import (
     BindingReason, RuleBinding, RuleBindingError, RuleBindingErrorCode, bind_routing_scheme, rule_key,
 )
@@ -535,7 +536,7 @@ class RuleListView:
         positions = {(rule.part, rule.index): rule for rule in summary.rules}
         groups = tuple(
             RuleGroupIdentityView(
-                group.index, len(group.rules), *_target_position(positions.get((group.part, group.index))),
+                group.index, len(group.rules), *resolve_target_position(positions.get((group.part, group.index))),
                 rules_by_group[number],
             )
             for number, group in enumerate(scheme.groups)
@@ -569,8 +570,12 @@ class RuleListView:
         }
 
 
-def _target_position(rule: XrayRuleView | None) -> tuple[TargetPositionState, XrayPositionView | None]:
-    """Состояние и позиция назначения по правилу структурной сводки; ничего не выбирается по первому."""
+def resolve_target_position(rule: XrayRuleView | None) -> tuple[TargetPositionState, XrayPositionView | None]:
+    """Состояние и позиция назначения по правилу структурной сводки; ничего не выбирается по первому.
+
+    Общая для списка правил и объяснения маршрута: оба берут позицию из сводки
+    тех же моделей, что и схема.
+    """
     if rule is None:
         return TargetPositionState.UNAVAILABLE, None
     if rule.target_kind == "both":
@@ -606,6 +611,68 @@ def _rules_by_group(
     return result
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class SchemeReading:
+    """Схема, структурная сводка тех же моделей и идентичность из метаданных, когда она доступна.
+
+    Доверенные модели содержат домены, адреса и коды наборов: наружу
+    передаются только представления. `binding` есть лишь при прочитанных
+    метаданных (`absent` или `present`); `policy` — политика с применёнными
+    идентификаторами и названиями при привязке, иначе политика схемы, и `None`,
+    когда схема политику не собрала.
+    """
+
+    scheme: RoutingScheme
+    summary: XrayConfigView
+    metadata_state: MetadataState
+    metadata_error: ErrorDetail | None
+    stored: StoredManagerMetadata | None
+    binding: RuleBinding | None
+
+    def __repr__(self) -> str:
+        return f"SchemeReading(metadata_state={self.metadata_state.value}, bound={self.binding is not None})"
+
+    @property
+    def policy(self) -> RoutingPolicy | None:
+        """Политика для расчётов: с идентичностью записей при привязке, иначе политика схемы."""
+        return self.scheme.policy if self.binding is None else self.binding.policy
+
+
+def read_scheme_identity(
+    routing: ImportRoutingSchemeHandler, store: ManagerMetadataStore | None,
+) -> SchemeReading | ErrorDetail:
+    """Прочитать модели один раз, собрать схему и сводку и привязать метаданные, если хранилище подключено.
+
+    Порядок чтения и коды отказов — обработчика конфигурации прокси и импорта;
+    отсутствие метаданных и отказ хранилища — состояния, отказ привязки —
+    `rule_binding_failed`. Общая для списка правил и объяснения маршрута.
+    Хранилище не получает запись.
+    """
+    models = routing.proxy.read()
+    if isinstance(models, ErrorDetail):
+        return models
+    scheme = routing.import_models(models)
+    if isinstance(scheme, ErrorDetail):
+        return scheme
+    summary = XrayConfigView.from_config(models.xray)
+
+    state, store_error, stored, binding = MetadataState.NOT_CONNECTED, None, None, None
+    if store is not None:
+        stored = read_stored_metadata(store)
+        if isinstance(stored, ErrorDetail):
+            state, store_error, stored = MetadataState.FAILED, stored, None
+        else:
+            state = MetadataState.ABSENT if stored is None else MetadataState.PRESENT
+            records = () if stored is None or stored.metadata.rules is None else stored.metadata.rules
+            try:
+                binding = bind_routing_scheme(scheme, records)
+            except (RuleBindingError, RoutingValidationError, ManagerMetadataError) as error:
+                return ErrorDetail(
+                    _BINDING_FAILED.category, _BINDING_FAILED.code, _BINDING_FAILED.message, reason=error.code.value,
+                )
+    return SchemeReading(scheme, summary, state, store_error, stored, binding)
+
+
 class ListRoutingRulesHandler:
     """Показать группы правил в фактическом порядке с идентичностью из метаданных; ничего не записывать.
 
@@ -634,31 +701,14 @@ class ListRoutingRulesHandler:
         error = check_contract_version(command.contract_version)
         if error is not None:
             return failed(operation_id, name, error)
-        models = self._routing.proxy.read()
-        if isinstance(models, ErrorDetail):
-            return failed(operation_id, name, models)
-        scheme = self._routing.import_models(models)
-        if isinstance(scheme, ErrorDetail):
-            return failed(operation_id, name, scheme)
-        summary = XrayConfigView.from_config(models.xray)
-
-        state, store_error, stored, binding = MetadataState.NOT_CONNECTED, None, None, None
-        if self._store is not None:
-            stored = read_stored_metadata(self._store)
-            if isinstance(stored, ErrorDetail):
-                state, store_error, stored = MetadataState.FAILED, stored, None
-            else:
-                state = MetadataState.ABSENT if stored is None else MetadataState.PRESENT
-                records = () if stored is None or stored.metadata.rules is None else stored.metadata.rules
-                try:
-                    binding = bind_routing_scheme(scheme, records)
-                except (RuleBindingError, RoutingValidationError, ManagerMetadataError) as error:
-                    return failed(operation_id, name, ErrorDetail(
-                        _BINDING_FAILED.category, _BINDING_FAILED.code, _BINDING_FAILED.message,
-                        reason=error.code.value,
-                    ))
+        reading = read_scheme_identity(self._routing, self._store)
+        if isinstance(reading, ErrorDetail):
+            return failed(operation_id, name, reading)
         try:
-            view = RuleListView.build(scheme, summary, state, store_error, binding, stored)
+            view = RuleListView.build(
+                reading.scheme, reading.summary, reading.metadata_state, reading.metadata_error, reading.binding,
+                reading.stored,
+            )
         except (RuleBindingError, RoutingValidationError, TypeError):
             return failed(operation_id, name, _BINDING_FAILED)
         return succeeded(operation_id, name, view)

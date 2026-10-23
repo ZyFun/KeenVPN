@@ -26,9 +26,10 @@ from keenvpn.domain.routing import (
     RoutingErrorCode, RoutingRule, RoutingValidationError, UnknownCondition, UnsupportedRuleCondition,
 )
 from keenvpn.domain.routing_policy import FinalRoutingRule, MatchResult, RoutingPolicy
+from keenvpn.domain.routing import MAX_DESTINATION_ADDRESSES, MAX_DESTINATION_LENGTH
 from keenvpn.domain.routing_explanation import (
     DomainSource, ExplanationReason, GeoMatch, IPSource,
-    RouteExplanation, RoutingContext, explain_route,
+    RouteExplanation, RoutingContext, context_assumptions, destination_context, explain_route,
 )
 
 
@@ -467,6 +468,102 @@ class RoutingExplanationTests(unittest.TestCase):
             self.assertTrue(report.selection.is_final)
             report.to_diagnostic()
         self.assertEqual(output.getvalue(), "")
+
+
+class DestinationContextTests(unittest.TestCase):
+    """Разбор строки назначения: домен, адрес, их сочетание и отказы без утечки строки."""
+
+    def test_domain_only_is_visible_name_with_unknown_addresses(self):
+        for text in ("example.test", "  Sub.Example.Test.  ", "пример.рф"):
+            with self.subTest(text=text):
+                context = destination_context(text)
+                self.assertIs(context.domain_source, DomainSource.DESTINATION)
+                self.assertIs(context.ip_source, IPSource.UNKNOWN)
+                self.assertIsNone(context.ips)
+        self.assertEqual(destination_context("  Sub.Example.Test.  ").domain, "sub.example.test")
+        self.assertEqual(destination_context("пример.рф").domain, "xn--e1afmkfd.xn--p1ai")
+
+    def test_single_address_is_destination_with_unknown_name(self):
+        for text in ("198.51.100.7", " 2001:DB8::7 ", "::ffff:198.51.100.7"):
+            with self.subTest(text=text):
+                context = destination_context(text)
+                self.assertIs(context.domain_source, DomainSource.UNKNOWN)
+                self.assertIsNone(context.domain)
+                self.assertIs(context.ip_source, IPSource.DESTINATION)
+                # Нормализация адреса — та же, что у IPCondition.
+                self.assertEqual(context.ips, (IPCondition(text.strip()).value,))
+        self.assertEqual(destination_context(" 2001:DB8::7 ").ips, ("2001:db8::7",))
+
+    def test_several_addresses_and_domain_with_addresses_are_dns_sets(self):
+        several = destination_context("198.51.100.7 2001:db8::7")
+        self.assertIs(several.domain_source, DomainSource.UNKNOWN)
+        self.assertIs(several.ip_source, IPSource.DNS)
+        self.assertEqual(several.ips, ("198.51.100.7", "2001:db8::7"))
+        combined = destination_context("198.51.100.7 example.test\t2001:db8::7")
+        self.assertEqual((combined.domain, combined.domain_source), ("example.test", DomainSource.DESTINATION))
+        self.assertEqual((combined.ips, combined.ip_source), (("198.51.100.7", "2001:db8::7"), IPSource.DNS))
+        limit = destination_context("example.test " + " ".join(f"198.51.100.{n}" for n in range(MAX_DESTINATION_ADDRESSES)))
+        self.assertEqual(len(limit.ips), MAX_DESTINATION_ADDRESSES)
+
+    def test_invalid_destinations_give_one_code_without_the_text(self):
+        cases = (
+            "", "   ", "\n", "example.test other.test", "198.51.100.0/24", "2001:db8::/32", "2001:db8::7%eth0",
+            "http://example.test/", "example.test:443", "-bad", "a..b", "TEST_private example.test second.test",
+            "example.test " + " ".join(f"198.51.100.{n}" for n in range(MAX_DESTINATION_ADDRESSES + 1)),
+            " ".join(f"198.51.100.{n}" for n in range(MAX_DESTINATION_ADDRESSES + 1)),
+            "x" * (MAX_DESTINATION_LENGTH + 1), "e" * 300 + ".test", b"example.test", None, 5,
+        )
+        for text in cases:
+            with self.subTest(text=repr(text)[:40]):
+                error = self.assert_invalid_destination(text)
+                self.assertNotIn("TEST_private", str(error))
+                self.assertNotIn("198.51.100", str(error))
+                self.assertIsNone(error.__cause__)
+
+    def assert_invalid_destination(self, text):
+        with self.assertRaises(RoutingValidationError) as raised:
+            destination_context(text)
+        self.assertIs(raised.exception.code, RoutingErrorCode.DESTINATION)
+        return raised.exception
+
+    def test_length_limit_is_the_menu_line_limit_and_is_checked_first(self):
+        text = "example.test" + " " * (MAX_DESTINATION_LENGTH - len("example.test"))
+        self.assertEqual(destination_context(text).domain, "example.test")
+        self.assert_invalid_destination(text + " ")
+
+    def test_assumptions_match_the_explanation_and_do_not_name_values(self):
+        policy = RoutingPolicy((RoutingRule(DomainCondition("example.test"), RoutingAction.VPN),), FinalRoutingRule(RoutingAction.DIRECT))
+        for text in ("sub.example.test", "198.51.100.7", "sub.example.test 198.51.100.7", "198.51.100.7 2001:db8::7"):
+            with self.subTest(text=text):
+                context = destination_context(text)
+                assumptions = context_assumptions(context)
+                self.assertEqual(explain_route(policy, context).assumptions, assumptions)
+                self.assertEqual(len(assumptions), 5)
+                self.assertNotIn("example", " ".join(assumptions))
+                self.assertNotIn("198.51", " ".join(assumptions))
+        with self.assertRaises(RoutingValidationError) as raised:
+            context_assumptions("не контекст")
+        self.assertIs(raised.exception.code, RoutingErrorCode.CONTEXT)
+        for domain_source in DomainSource:
+            for ip_source in IPSource:
+                kwargs = {"domain_source": domain_source, "ip_source": ip_source}
+                if domain_source in (DomainSource.DESTINATION, DomainSource.SNIFFING):
+                    kwargs["domain"] = "example.test"
+                if ip_source is IPSource.DESTINATION:
+                    kwargs["ips"] = ("198.51.100.7",)
+                elif ip_source is IPSource.DNS:
+                    kwargs["ips"] = ("198.51.100.7", "198.51.100.8")
+                elif ip_source is IPSource.UNAVAILABLE:
+                    kwargs["ips"] = ()
+                if domain_source is DomainSource.DESTINATION and ip_source is IPSource.DESTINATION:
+                    continue
+                self.assertEqual(len(context_assumptions(RoutingContext(**kwargs))), 5)
+
+    def test_parsing_has_no_network_or_file_access(self):
+        with patch("socket.getaddrinfo", side_effect=AssertionError("DNS запрещён")), \
+                patch("socket.socket", side_effect=AssertionError("сокет запрещён")):
+            destination_context("example.test 198.51.100.7")
+            self.assert_invalid_destination("example.test/24")
 
 
 if __name__ == "__main__":

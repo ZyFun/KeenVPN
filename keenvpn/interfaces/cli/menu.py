@@ -8,10 +8,12 @@
 Действие пункта может вернуть список элементов. Список, результаты поиска
 по нему и карточка элемента — такие же уровни навигации, как подменю: номер
 открывает карточку, `0` возвращает на один уровень, а поиск заменяет набор
-показанных элементов, не трогая сам список.
+показанных элементов, не трогая сам список. Действие может также вернуть
+запрос значения: его уровень принимает одну строку, которую меню передаёт
+действию без разбора, а `0` возвращает в подменю, ничего не выполняя.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 import re
@@ -219,6 +221,41 @@ class MenuList:
         )
 
 
+ValueSubmit = Callable[[str], list[str]]
+"""Приём введённой строки: выполняет сценарий и возвращает строки для вывода, ничего не печатает сам."""
+
+
+@dataclass(frozen=True, slots=True)
+class ValueRequest:
+    """Запрос одного значения, который вернуло действие: подсказка уровня и приём строки.
+
+    Меню показывает подсказку, читает строку и передаёт её `submit` как есть,
+    без разбора и без повтора в выводе; проверку значения выполняет сценарий.
+    """
+
+    prompt: tuple[str, ...]
+    submit: ValueSubmit
+
+    def __post_init__(self) -> None:
+        _require(
+            _valid_lines(self.prompt) and len(self.prompt) > 0,
+            "Подсказка запроса значения задаётся непустым tuple печатных строк.",
+        )
+        _require(callable(self.submit), "Приём значения задаётся вызываемым объектом.")
+
+
+@dataclass(frozen=True, slots=True)
+class InputLevel:
+    """Открытый запрос значения: заголовок уровня — заголовок пункта, который его открыл."""
+
+    title: str
+    request: ValueRequest
+
+    def __post_init__(self) -> None:
+        _require(valid_title(self.title), "Некорректный заголовок уровня запроса значения.")
+        _require(type(self.request) is ValueRequest, "Запрос значения задаётся объектом ValueRequest.")
+
+
 SEARCH_TITLE = "Результаты поиска"
 """Заголовок уровня с результатами поиска."""
 
@@ -290,8 +327,8 @@ class CardLevel:
         return f"{self.source.item_name} {self.entry.number}"
 
 
-Level = Menu | ListLevel | CardLevel
-"""Уровень навигации: подменю, список или карточка."""
+Level = Menu | ListLevel | CardLevel | InputLevel
+"""Уровень навигации: подменю, список, карточка или запрос значения."""
 
 
 class SelectionKind(StrEnum):
@@ -364,6 +401,11 @@ class MenuNavigator:
         _require(type(self.current) is Menu, "Список открывается только из подменю.")
         self._path.append(ListLevel(source))
 
+    def open_input(self, title: str, request: ValueRequest) -> None:
+        """Открыть запрос значения, который вернуло действие текущего подменю."""
+        _require(type(self.current) is Menu, "Запрос значения открывается только из подменю.")
+        self._path.append(InputLevel(title, request))
+
     def select(self, number: int) -> Selection:
         """Обработать выбранный номер; `0` равнозначен возврату."""
         if type(number) is int and number == BACK_NUMBER:
@@ -375,7 +417,7 @@ class MenuNavigator:
                 return Selection(SelectionKind.UNKNOWN)
             self._path.append(CardLevel(level.source, entry))
             return Selection(SelectionKind.OPENED, entry=entry)
-        if type(level) is CardLevel:
+        if type(level) in (CardLevel, InputLevel):
             return Selection(SelectionKind.UNKNOWN)
         item = level.item(number)
         if item is None:

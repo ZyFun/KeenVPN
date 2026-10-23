@@ -7,10 +7,10 @@ import ipaddress
 from typing import TypeAlias
 
 from keenvpn.domain.routing import (
-    DomainCondition, DomainMatch, GeoDatabase, GeoIPCondition, GeoSiteCondition,
-    IPCondition, RoutingCondition, RoutingErrorCode, RoutingRule,
-    RoutingValidationError, UnknownCondition, UnsupportedRuleCondition,
-    _PrivateRepresentation, _raise_detached,
+    MAX_DESTINATION_ADDRESSES, MAX_DESTINATION_LENGTH, DomainCondition, DomainMatch, GeoDatabase, GeoIPCondition,
+    GeoSiteCondition, IPCondition, RoutingCondition, RoutingErrorCode, RoutingRule, RoutingValidationError,
+    UnknownCondition, UnsupportedRuleCondition, _normalize_domain, _normalize_ip, _PrivateRepresentation,
+    _raise_detached,
 )
 from keenvpn.domain.routing_policy import (
     FinalRoutingRule, MatchResult, RoutingPolicy, RoutingSelection,
@@ -105,6 +105,76 @@ class RoutingContext(_PrivateRepresentation):
         }
 
 
+_DOMAIN_ASSUMPTIONS = {
+    DomainSource.DESTINATION: "Имя назначения считается видимым; подмена через sniffing не моделируется.",
+    DomainSource.SNIFFING: "Предполагается, что sniffing предоставил указанное имя для маршрутизации.",
+    DomainSource.UNAVAILABLE: "Предполагается отсутствие видимого имени, в том числе из sniffing.",
+    DomainSource.UNKNOWN: "Видимость имени назначения и результата sniffing неизвестна.",
+}
+_IP_ASSUMPTIONS = {
+    IPSource.DESTINATION: "Используется переданный IP назначения; DNS не выполняется.",
+    IPSource.DNS: "Переданный набор считается полным результатом DNS, доступным всем IP-правилам этого расчёта.",
+    IPSource.UNAVAILABLE: "Предполагается отсутствие доступных IP; DNS не выполняется.",
+    IPSource.UNKNOWN: "Доступные IP и результат DNS неизвестны; DNS не выполняется.",
+}
+
+
+def context_assumptions(context: RoutingContext) -> tuple[str, ...]:
+    """Явно назвать исходные предположения расчёта для контекста, включая DNS и sniffing.
+
+    Текст зависит только от источников контекста: имя и адреса в него не входят.
+    Те же строки возвращает `RouteExplanation.assumptions`; функция нужна, когда
+    расчёт не выполнялся, например без собранной политики.
+    """
+    if not isinstance(context, RoutingContext):
+        raise RoutingValidationError(RoutingErrorCode.CONTEXT) from None
+    return (
+        "Предварительный статический расчёт не доказывает реальный сетевой путь или доступность VPN.",
+        "Правила проверяются за один проход по фиксированным данным; этапы Xray domainStrategy не моделируются.",
+        _DOMAIN_ASSUMPTIONS[context.domain_source],
+        _IP_ASSUMPTIONS[context.ip_source],
+        "Членство в GeoIP/GeoSite и метаданные использованной базы декларирует переданный источник.",
+    )
+
+
+def destination_context(text: str) -> RoutingContext:
+    """Собрать контекст из строки назначения: домен, отдельный адрес или домен с адресами через пробел.
+
+    Слова делятся пробельными символами. Каждое слово — отдельный IPv4/IPv6-адрес
+    без CIDR, зоны и порта либо домен по правилам `DomainCondition`; домен —
+    не больше одного, адресов — не больше `MAX_DESTINATION_ADDRESSES`, вся строка —
+    не длиннее `MAX_DESTINATION_LENGTH`. Только домен — имя назначения считается
+    видимым, адреса неизвестны; один адрес — адрес назначения, видимость имени
+    неизвестна; несколько адресов — полный набор, который считается результатом
+    DNS; домен с адресами — видимое имя и адреса как результат DNS. Пустая строка,
+    второй домен, CIDR, слово не домен и не адрес и лишние слова дают
+    `RoutingValidationError` с кодом `DESTINATION`; сама строка в ошибку не входит.
+    DNS и другие сетевые запросы здесь не выполняются.
+    """
+    if type(text) is not str or len(text) > MAX_DESTINATION_LENGTH:
+        raise RoutingValidationError(RoutingErrorCode.DESTINATION) from None
+    words = text.split()
+    if not words or len(words) > MAX_DESTINATION_ADDRESSES + 1:
+        raise RoutingValidationError(RoutingErrorCode.DESTINATION) from None
+    domain = None
+    addresses: list[str] = []
+    for word in words:
+        if "/" not in word and _normalize_ip(word) is not None:
+            addresses.append(word)
+            continue
+        if domain is not None or _normalize_domain(word) is None:
+            raise RoutingValidationError(RoutingErrorCode.DESTINATION) from None
+        domain = word
+    if len(addresses) > MAX_DESTINATION_ADDRESSES:
+        raise RoutingValidationError(RoutingErrorCode.DESTINATION) from None
+    domain_source = DomainSource.UNKNOWN if domain is None else DomainSource.DESTINATION
+    if not addresses:
+        return RoutingContext(domain=domain, domain_source=domain_source)
+    if domain is None and len(addresses) == 1:
+        return RoutingContext(ips=tuple(addresses), ip_source=IPSource.DESTINATION)
+    return RoutingContext(domain=domain, domain_source=domain_source, ips=tuple(addresses), ip_source=IPSource.DNS)
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class GeoMatch(_PrivateRepresentation):
     """Ответ доверенного источника с метаданными фактически использованной базы.
@@ -184,25 +254,7 @@ class RouteExplanation(_PrivateRepresentation):
     @property
     def assumptions(self) -> tuple[str, ...]:
         """Явно назвать исходные предположения, включая DNS и sniffing."""
-        domain = {
-            DomainSource.DESTINATION: "Имя назначения считается видимым; подмена через sniffing не моделируется.",
-            DomainSource.SNIFFING: "Предполагается, что sniffing предоставил указанное имя для маршрутизации.",
-            DomainSource.UNAVAILABLE: "Предполагается отсутствие видимого имени, в том числе из sniffing.",
-            DomainSource.UNKNOWN: "Видимость имени назначения и результата sniffing неизвестна.",
-        }[self.context.domain_source]
-        ips = {
-            IPSource.DESTINATION: "Используется переданный IP назначения; DNS не выполняется.",
-            IPSource.DNS: "Переданный набор считается полным результатом DNS, доступным всем IP-правилам этого расчёта.",
-            IPSource.UNAVAILABLE: "Предполагается отсутствие доступных IP; DNS не выполняется.",
-            IPSource.UNKNOWN: "Доступные IP и результат DNS неизвестны; DNS не выполняется.",
-        }[self.context.ip_source]
-        return (
-            "Предварительный статический расчёт не доказывает реальный сетевой путь или доступность VPN.",
-            "Правила проверяются за один проход по фиксированным данным; этапы Xray domainStrategy не моделируются.",
-            domain,
-            ips,
-            "Членство в GeoIP/GeoSite и метаданные использованной базы декларирует переданный источник.",
-        )
+        return context_assumptions(self.context)
 
     def to_diagnostic(self) -> dict[str, object]:
         """Вернуть безопасную трассу и ограничения без произвольных полей."""

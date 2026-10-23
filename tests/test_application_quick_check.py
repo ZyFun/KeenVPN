@@ -497,10 +497,19 @@ class CheckOutcomeTests(unittest.TestCase):
             ("new inbound repeated inside a later part", xray_config(more_parts=(
                 ("05_override.json", {"inbounds": [{"tag": "x-in", "protocol": "tunnel"}, {"tag": "x-in", "protocol": "tunnel"}]}),
             )), ("unsupported", "tags_repeated_across_parts")),
-            ("balancer repeated with several parts", xray_config(
+            # Регрессия GitHub review 76-R08: повтор балансировщика в единственном разделе routing зависит
+            # от повтора раздела, а не от числа частей — Xray возьмёт последний, ссылка на тег неоднозначна.
+            ("balancer repeated in the sole routing beside a log part", xray_config(
                 balancers=[{"tag": "g", "selector": ["proxy-"]}, {"tag": "g", "selector": ["proxy-"]}],
-                more_parts=(("05_more.json", {"log": {}}),),
-            ), ("unsupported", "tags_repeated_across_parts")),
+                more_parts=(("01_log.json", {"log": {}}), ("09_tail.json", {"outbounds": [{"tag": "x-out", "protocol": "freedom"}]})),
+            ), ("failed", "duplicate_tags")),
+            ("balancer repeated inside a routing that is repeated", xray_config(
+                balancers=[{"tag": "g", "selector": ["proxy-"]}, {"tag": "g", "selector": ["proxy-"]}],
+                more_parts=(("05_override.json", {"routing": {"rules": [rule(outboundTag="direct-out")]}}),),
+            ), ("unsupported", "sections_repeated_across_parts")),
+            ("balancer repeated inside the acting routing of several", xray_config(rule(outboundTag="direct-out"), more_parts=(
+                ("05_override.json", {"routing": {"balancers": [{"tag": "g", "selector": ["proxy-"]}, {"tag": "g", "selector": ["proxy-"]}]}}),
+            )), ("unsupported", "sections_repeated_across_parts")),
             # Регрессия повторного review 76-R02 (круг 3): раздел routing заменяется целиком — ссылки заменённого не оцениваются.
             ("broken reference inside a replaced routing", xray_config(rule(outboundTag="TEST_absent"), more_parts=(
                 ("05_override.json", {"routing": {"rules": [rule(outboundTag="direct-out")]}}),

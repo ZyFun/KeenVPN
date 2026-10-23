@@ -69,7 +69,12 @@ class CheckReason(StrEnum):
     MARKER_WITHOUT_PROCESS = "marker_without_process"
     MULTIPLE_PROCESSES = "multiple_processes"
     DUPLICATE_TAGS = "duplicate_tags"
-    """Тег повторяется там, где объединение частей его не схлопывает: в единственной или первой части; Xray такой набор не загрузит."""
+    """Тег повторяется там, где объединение частей его не схлопывает.
+
+    Повтор inbound или outbound Xray не загрузит; повтор балансировщика
+    действующего `routing` Xray при запуске принимает и молча берёт последний,
+    поэтому ссылка `balancerTag` на него неоднозначна.
+    """
     TAGS_REPEATED_ACROSS_PARTS = "tags_repeated_across_parts"
     """Повтор тега затрагивает объединение частей: Xray переопределяет теги и заменяет `routing`, а сводка это не моделирует."""
     SECTIONS_REPEATED_ACROSS_PARTS = "sections_repeated_across_parts"
@@ -217,17 +222,18 @@ def xray_config_check(config: XrayConfigSet) -> CheckView:
     """Согласованность ссылок и тегов конфигурации Xray по структурной сводке.
 
     По порядку: повтор непустого тега, который объединение частей не схлопывает,
-    — `failed` / `duplicate_tags`: повтор внутри единственной части либо повтор
-    inbound или outbound внутри первой части (`Config.Override` заменяет лишь
-    первую найденную запись, вторая остаётся, и Xray набор не загрузит);
+    — `failed` / `duplicate_tags`: inbound или outbound, повторённый там, где
+    тег ещё новый (Xray такой набор не загрузит), либо балансировщик,
+    повторённый в единственном разделе `routing` (Xray возьмёт последний,
+    ссылка на тег неоднозначна);
     раздел `routing` или `dns` в нескольких частях — `unsupported` /
     `sections_repeated_across_parts`: Xray берёт раздел последней части целиком,
     сводка действующий раздел не выбирает, поэтому ссылки и назначения правил
     оцениваются только при единственном разделе; ссылка правила или
     `fallbackTag` без цели — `failed` / `unresolved_references`; правило
     с обоими назначениями или без назначения — `failed` / `rule_target_ambiguous`;
-    любой другой повтор тега — внутри последующей части, между частями,
-    у балансировщиков при нескольких частях — `unsupported` /
+    любой другой повтор тега — inbound или outbound внутри последующей части,
+    где объединение его схлопывает, или между частями — `unsupported` /
     `tags_repeated_across_parts`: его итог зависит от объединения частей,
     которое сводка не моделирует; места, которые сводка не прочитала, —
     `unsupported` / `unsupported_structures`; иначе `passed`. «Успешно»
@@ -239,7 +245,7 @@ def xray_config_check(config: XrayConfigSet) -> CheckView:
     repeats = tag_repeats(config.parts)
     rules = summary["rules"]
     balancers = summary["balancers"]
-    if _unmerged_repeats(repeats, config):
+    if _unmerged_repeats(repeats, config, summary["sections"]):
         return CheckView(XRAY_CONFIG_CHECK, CheckStatus.FAILED, False, CheckReason.DUPLICATE_TAGS.value)
     if _replaced_repeated(summary["duplicate_sections"]):
         return CheckView(XRAY_CONFIG_CHECK, CheckStatus.UNSUPPORTED, False, CheckReason.SECTIONS_REPEATED_ACROSS_PARTS.value)
@@ -259,23 +265,25 @@ def xray_config_check(config: XrayConfigSet) -> CheckView:
     return CheckView(XRAY_CONFIG_CHECK, CheckStatus.PASSED, False, None)
 
 
-def _unmerged_repeats(repeats: TagRepeats, config: XrayConfigSet) -> tuple[TagRepeat, ...]:
+def _unmerged_repeats(
+    repeats: TagRepeats, config: XrayConfigSet, sections: Mapping[str, list[str]],
+) -> tuple[TagRepeat, ...]:
     """Повторы, которые объединение частей не схлопывает, по правилам `Config.Override` Xray v26.3.27.
 
-    В единственной части сохраняется любой повтор. При нескольких частях
-    повтор сохраняется, если тег повторён в самой ранней своей части, где он
-    ещё новый: inbound — только в первой части (последующие добавляют новый
-    inbound сразу, и повтор его заменяет); outbound — в первой части или
-    в части без `XRAY_TAIL_MARKER` в имени, которая откладывает новые outbound
-    и ставит в начало все сразу. Сохранённый повтор последующие части уже не
-    схлопывают: они заменяют только первую запись с тегом. Раздел `routing`
-    последующая часть заменяет целиком, поэтому повтор балансировщика при
-    нескольких частях зависит от объединения и сюда не входит. Это то же
-    правило, по которому импорт правил собирает действующие outbound.
+    Повтор inbound и outbound сохраняется, если тег повторён в самой ранней
+    своей части, где он ещё новый: inbound — только в первой части
+    (последующие добавляют новый inbound сразу, и повтор его заменяет);
+    outbound — в первой части или в части без `XRAY_TAIL_MARKER` в имени,
+    которая откладывает новые outbound и ставит в начало все сразу.
+    Сохранённый повтор последующие части уже не схлопывают: они заменяют
+    только первую запись с тегом. Это то же правило, по которому импорт правил
+    собирает действующие outbound. Раздел `routing` последующая часть заменяет
+    целиком, поэтому повтор балансировщика сохраняется, когда раздел есть
+    ровно в одной части, независимо от числа остальных частей; при повторе
+    раздела его итог зависит от объединения и сюда не входит.
     """
-    if len(config.parts) <= 1:
-        return repeats.within_parts
-    first = config.parts[0].name
+    first = config.parts[0].name if config.parts else None
+    sole_routing = len(sections.get("routing", ())) == 1
 
     def preserved(item: TagRepeat) -> bool:
         earliest = item.parts[0]
@@ -283,7 +291,9 @@ def _unmerged_repeats(repeats: TagRepeats, config: XrayConfigSet) -> tuple[TagRe
             return False
         if item.section == "inbounds":
             return earliest == first
-        return item.section == "outbounds" and (earliest == first or XRAY_TAIL_MARKER not in earliest.lower())
+        if item.section == "outbounds":
+            return earliest == first or XRAY_TAIL_MARKER not in earliest.lower()
+        return sole_routing
 
     return tuple(item for item in repeats.within_parts if preserved(item))
 

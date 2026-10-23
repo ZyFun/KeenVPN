@@ -12,7 +12,10 @@ from keenvpn.application.routing_rules import AssignRuleIdentifiers, AssignRuleI
 from keenvpn.application.proxy_config import InspectProxyConfigHandler
 from keenvpn.application.routing_import import ImportRoutingSchemeHandler
 from keenvpn.domain.manager_metadata import ManagerMetadata, RuleRecord, decode_manager_metadata, encode_manager_metadata
-from keenvpn.interfaces.cli.presenters import CONNECTIONS_NOTE, DEVICES_NOTE, METADATA_NOTES, SEGMENT_MATCH_NOTE
+from keenvpn.interfaces.cli.presenters import (
+    CONNECTIONS_NOTE, DEVICES_NOTE, DNS_PRITUNL_NOTE, METADATA_NOTES, SEGMENT_MATCH_NOTE,
+)
+from keenvpn.domain.xray_process import XrayProcessObservation
 from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
 from keenvpn.domain.keenetic_policy import KeeneticPolicy, KeeneticPolicySet
 from tests.support.in_memory import (
@@ -242,12 +245,13 @@ class CompositionTests(unittest.TestCase):
         assembly = assemble_main_menu(default_sources())
         found = states(assembly)
         self.assertEqual(set(found), set(ALL_ACTION_IDS))
-        # Сводка допускает неподключённые источники: пункт доступен и показывает их области «не проверено».
-        self.assertEqual(set(assembly.actions), {"settings.about", "status.summary"})
+        # Сводка и быстрая проверка допускают неподключённые источники: пункты доступны и показывают «не проверено».
+        self.assertEqual(set(assembly.actions), {"settings.about", "status.summary", "status.quick_check"})
         self.assertIsNone(found["settings.about"])
         self.assertIsNone(found["status.summary"])
+        self.assertIsNone(found["status.quick_check"])
         # Объяснение маршрута читает импортированную схему: без источников Xray и XKeen пункт недоступен.
-        for action_id in set(BOUND_SCENARIOS) - {"status.summary"}:
+        for action_id in set(BOUND_SCENARIOS) - {"status.summary", "status.quick_check"}:
             self.assertIs(found[action_id], UnavailableReason.SOURCE_NOT_CONNECTED, action_id)
         for action_id in set(ALL_ACTION_IDS) - set(BOUND_SCENARIOS) - {"settings.about"}:
             self.assertIs(found[action_id], UnavailableReason.NOT_IMPLEMENTED, action_id)
@@ -260,13 +264,13 @@ class CompositionTests(unittest.TestCase):
         _, sources = snapshot_menu_sources(InMemoryManagerMetadataStore())
         found = states(assemble_main_menu(sources))
         for action_id in (
-            "status.summary", "connections.list", "routing.list", "routing.explain", "devices.list",
+            "status.summary", "status.quick_check", "connections.list", "routing.list", "routing.explain", "devices.list",
             "failsafe.port53_check", "settings.storage",
         ):
             self.assertIsNone(found[action_id], action_id)
         self.assertEqual(
             set(assemble_main_menu(sources).actions),
-            {"status.summary", "connections.list", "routing.list", "routing.explain", "devices.list",
+            {"status.summary", "status.quick_check", "connections.list", "routing.list", "routing.explain", "devices.list",
              "failsafe.port53_check", "settings.storage", "settings.about"},
         )
 
@@ -278,6 +282,7 @@ class CompositionTests(unittest.TestCase):
         found = states(assemble_main_menu(keenetic_only))
         self.assertIsNone(found["devices.list"])
         self.assertIsNone(found["status.summary"])
+        self.assertIsNone(found["status.quick_check"])
         for action_id in ("connections.list", "routing.list", "routing.explain", "failsafe.port53_check", "settings.storage"):
             self.assertIs(found[action_id], UnavailableReason.SOURCE_NOT_CONNECTED, action_id)
         three_of_four = MenuSources(policies=full.policies, hotspot=full.hotspot, registrations=full.registrations)
@@ -289,6 +294,7 @@ class CompositionTests(unittest.TestCase):
         )
         found = states(assemble_main_menu(without_process))
         self.assertIsNone(found["status.summary"])
+        self.assertIsNone(found["status.quick_check"])
         self.assertIsNone(found["connections.list"])
         # Список правил не требует хранилища метаданных: без него он показывается без названий и идентификаторов.
         self.assertIsNone(found["routing.list"])
@@ -587,6 +593,95 @@ class HeaderFlowTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("Ядро Xray", output)
         self.assertEqual(sources.process.calls, 0)
+
+
+QUICK_CHECK_SOURCES = [
+    "  части конфигурации Xray: прочитан", "  настройки XKeen: прочитан", "  параметры init XKeen: прочитан",
+    "  список исключённых портов: прочитан", "  список перехватываемых портов: прочитан", "  процесс Xray: прочитан",
+    "  инвентарь геобаз: прочитан",
+]
+QUICK_CHECK_CHECKS = [
+    "  xray_config_consistent: успешно", "  geodata_references_resolved: успешно", "  fallback_profile_consistent: успешно",
+    "  autostart_flag_unambiguous: успешно", "  dns_port_53_mode_consistent: успешно", "  xray_process_consistent: успешно",
+    "  interception_active: не поддерживается, причина interception_not_observed",
+    "  dns_port_53_path: не проверено, причина network_check_not_performed (сетевая проверка)",
+    "  vpn_reachable: не проверено, причина network_check_not_performed (сетевая проверка)",
+]
+
+
+class QuickCheckFlowTests(unittest.TestCase):
+    """Пункт 1 → 7 «Быстрая проверка без изменений»: источники, проверки и итог из одного сценария без вычислений в меню."""
+
+    def setUp(self):
+        self.sources, menu_sources = snapshot_menu_sources(InMemoryManagerMetadataStore())
+        self.assembly = assemble_main_menu(menu_sources, operation_ids=new_operation_id)
+
+    def flow(self, text: str, assembly: MenuAssembly | None = None):
+        assembly = self.assembly if assembly is None else assembly
+        stdout = io.StringIO()
+        navigator = MenuNavigator(assembly.menu)
+        with forbid_external_effects():
+            code = run_menu(navigator, assembly.actions, io.StringIO(text), stdout)
+        output = stdout.getvalue()
+        for marker in PRIVATE_MARKERS:
+            self.assertNotIn(marker, output)
+        self.assertTrue(all(line.isprintable() for line in output.splitlines()))
+        return code, output, navigator
+
+    def test_quick_check_reads_each_source_once_and_shows_sources_checks_and_outcome(self):
+        code, output, navigator = self.flow("1\n7\n0\n0\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(navigator.depth, 0)
+        self.assertIn("\n".join([
+            "Быстрая проверка без изменений",
+            "Активная сетевая проверка: не выполнялась",
+            "Итог: расхождений не найдено, часть проверок не выполнена или не поддерживается; "
+            "успешно 6, ошибка 0, не проверено 2, не поддерживается 1",
+            "Источники:", *QUICK_CHECK_SOURCES, "Проверки:", *QUICK_CHECK_CHECKS,
+        ]) + "\n", output)
+        self.assertIn(DNS_PRITUNL_NOTE + "\n", output)
+        self.assertEqual(self.sources.proxy.calls, (1, 1, 1, (XKeenListName.PORT_EXCLUDE, XKeenListName.PORT_PROXYING)))
+        self.assertEqual((self.sources.process.calls, self.sources.geodata.calls), (1, 1))
+        self.assertEqual(self.sources.keenetic.calls, (0, 0, 0, 0))
+
+    def test_quick_check_shows_a_source_failure_once_with_its_next_step(self):
+        self.sources.proxy.xray.outcome = OSError("/opt/etc/xray/configs/05_routing.json: fixture-password")
+        code, output, _ = self.flow("1\n7\n0\n0\n")
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "  части конфигурации Xray: отказ\n    Отказ: source_failed / xray_config_unavailable\n"
+            "    Причина: Не удалось прочитать части конфигурации Xray.\n"
+            f"    Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.CHECK_SOURCE]}\n  настройки XKeen: прочитан\n", output,
+        )
+        for line in (
+            "  xray_config_consistent: не проверено, причина xray_config_unavailable",
+            "  geodata_references_resolved: не проверено, причина xray_config_unavailable",
+            "  fallback_profile_consistent: не проверено, причина xray_config_unavailable",
+            "  autostart_flag_unambiguous: успешно",
+        ):
+            self.assertIn(line + "\n", output)
+        self.assertEqual(output.count("Следующий шаг:"), 1)
+        self.assertIn("успешно 3, ошибка 0, не проверено 5, не поддерживается 1", output)
+        self.assertNotIn("05_routing", output)
+
+    def test_quick_check_marks_a_discrepancy_in_the_outcome(self):
+        self.sources.process.outcome = XrayProcessObservation((), True)
+        code, output, _ = self.flow("1\n7\n0\n0\n")
+        self.assertEqual(code, 0)
+        self.assertIn("Итог: найдены расхождения; успешно 5, ошибка 1, не проверено 2, не поддерживается 1\n", output)
+        self.assertIn("  xray_process_consistent: ошибка, причина marker_without_process\n", output)
+
+    def test_default_assembly_quick_check_reads_nothing_and_never_shows_success(self):
+        code, output, _ = self.flow("1\n7\n0\n0\n", assemble_main_menu(default_sources()))
+        self.assertEqual(code, 0)
+        self.assertIn("Итог: расхождений не найдено, часть проверок не выполнена или не поддерживается; "
+                      "успешно 0, ошибка 0, не проверено 8, не поддерживается 1\n", output)
+        for line in QUICK_CHECK_SOURCES:
+            self.assertIn(line.replace("прочитан", "не подключён") + "\n", output)
+        self.assertIn("  xray_config_consistent: не проверено, причина source_not_connected\n", output)
+        self.assertIn("  dns_port_53_path: не проверено, причина network_check_not_performed (сетевая проверка)\n", output)
+        self.assertNotIn(": успешно", output)
+        self.assertNotIn("Следующий шаг", output)
 
 
 NAME_MARKER = "TEST_ONLY_PRIVATE_NAME"

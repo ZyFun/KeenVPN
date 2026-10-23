@@ -212,9 +212,17 @@ def _read_checked(source: str, read: Callable[[], object]) -> object | ErrorDeta
 def read_xray_process(processes: XrayProcessSource) -> XrayProcessObservation | ErrorDetail:
     """Наблюдать процесс Xray один раз и проверить ответ; отказ — ErrorDetail с кодом источника процесса.
 
-    Чтение установки и сводка состояния используют одни и те же коды отказа.
+    Чтение установки, сводка состояния и быстрая проверка используют одни и те же коды отказа.
     """
     return _read_checked("process", processes.current_xray_process)
+
+
+def read_geo_databases(geodata: GeoDatabaseSource) -> GeoDatabaseInventory | ErrorDetail:
+    """Прочитать инвентарь геобаз один раз и проверить ответ; отказ — ErrorDetail с кодом источника геобаз.
+
+    Чтение установки и быстрая проверка используют одни и те же коды отказа.
+    """
+    return _read_checked("geodata", geodata.current_geo_databases)
 
 
 class InspectInstallationHandler:

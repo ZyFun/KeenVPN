@@ -18,8 +18,8 @@ from types import MappingProxyType
 from typing import ClassVar
 
 from keenvpn.application.checks import (
-    VPN_REACHABLE_CHECK, XRAY_PROCESS_CHECK, CheckReason, ChecksView, CheckView, vpn_reachability_not_checked,
-    xray_process_check,
+    VPN_REACHABLE_CHECK, XRAY_PROCESS_CHECK, CheckReason, ChecksView, CheckView, first_source_error, not_checked,
+    vpn_reachability_not_checked, xray_process_check,
 )
 from keenvpn.application.contract import (
     CONTRACT_VERSION, CheckStatus, ErrorDetail, OperationIdFactory, Result, check_contract_version, failed,
@@ -318,6 +318,65 @@ class StatusSummaryView:
         }
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class SummaryReadings:
+    """Ответы источников сводки за один проход: модель либо `ErrorDetail` на источник; `None` — не подключён.
+
+    Это данные для доверенного кода: модели содержат секреты конфигурации,
+    поэтому `repr` их не показывает. Сводка и быстрая проверка читают источники
+    этой функцией один раз и строят свои представления по одним и тем же ответам.
+    """
+
+    proxy: Mapping[ProxyConfigSource, object] | None
+    process: XrayProcessObservation | ErrorDetail | None
+
+    def __repr__(self) -> str:
+        return f"SummaryReadings(proxy={self.proxy is not None}, process={self.process is not None})"
+
+    def models(self, *sources: ProxyConfigSource) -> tuple[object, ...] | None:
+        """Ответы источников конфигурации прокси в заданном порядке либо `None`, если обработчик не подключён."""
+        return None if self.proxy is None else tuple(self.proxy[source] for source in sources)
+
+
+def read_summary_sources(
+    proxy: InspectProxyConfigHandler | None, processes: XrayProcessSource | None,
+) -> SummaryReadings:
+    """Прочитать источники сводки по одному разу в фиксированном порядке, не прерываясь на отказе.
+
+    Порядок: части Xray, `xkeen.json`, параметры init, списки исключённых
+    и перехватываемых портов через `read_source` обработчика конфигурации
+    прокси, затем наблюдение процесса через `read_xray_process`. Список
+    исключённых адресов, Keenetic и геобазы не читаются.
+    """
+    readings = None
+    if proxy is not None:
+        readings = MappingProxyType({source: proxy.read_source(source) for source in _PROXY_SOURCES})
+    return SummaryReadings(readings, None if processes is None else read_xray_process(processes))
+
+
+def build_status_summary(readings: SummaryReadings) -> StatusSummaryView:
+    """Собрать семь областей по прочитанным ответам; отказ источника даёт «не проверено» только его областям."""
+    if type(readings) is not SummaryReadings:
+        raise TypeError("Ожидается SummaryReadings.")
+    process = readings.process
+    core, _ = _assemble(SummaryArea.CORE, None if process is None else (process,), _core)
+    dns, port_53 = _assemble(SummaryArea.DNS, readings.models(*_DNS_SOURCES), _dns)
+    autostart, _ = _assemble(SummaryArea.AUTOSTART, readings.models(ProxyConfigSource.INIT), _autostart)
+    fallback, fallback_facts = _assemble(
+        SummaryArea.FALLBACK, readings.models(ProxyConfigSource.XRAY, ProxyConfigSource.SETTINGS), _fallback,
+    )
+    # Сводка пассивна: признак активной сетевой проверки всегда выключен, проб нет.
+    return StatusSummaryView(False, (
+        core,
+        _constant(SummaryArea.INTERCEPTION, CheckStatus.UNSUPPORTED, SummaryReason.INTERCEPTION_NOT_OBSERVED),
+        SummaryAreaView(SummaryArea.VPN, None, vpn_reachability_not_checked()),
+        dns,
+        autostart,
+        fallback,
+        _constant(SummaryArea.DRAFT, CheckStatus.UNSUPPORTED, SummaryReason.DRAFTS_NOT_IMPLEMENTED),
+    ), port_53, fallback_facts)
+
+
 class InspectStatusSummaryHandler:
     """Прочитать источники областей по одному разу и собрать сводку с допуском отказов.
 
@@ -327,7 +386,9 @@ class InspectStatusSummaryHandler:
     читаются: ни одна область от них не зависит. `None` вместо обработчика или
     источника — источник не подключён: его области «не проверено» с причиной
     `source_not_connected`, сценарий его не вызывает. Отказ источника не
-    прерывает чтение остальных и не делает сценарий неуспешным.
+    прерывает чтение остальных и не делает сценарий неуспешным. Чтение
+    и сборка — функции `read_summary_sources` и `build_status_summary`, общие
+    с быстрой проверкой.
     """
 
     def __init__(
@@ -350,30 +411,7 @@ class InspectStatusSummaryHandler:
         error = check_contract_version(command.contract_version)
         if error is not None:
             return failed(operation_id, name, error)
-
-        proxy = None if self._proxy is None else {source: self._proxy.read_source(source) for source in _PROXY_SOURCES}
-        process = None if self._processes is None else read_xray_process(self._processes)
-
-        def models(*sources: ProxyConfigSource) -> tuple[object, ...] | None:
-            return None if proxy is None else tuple(proxy[source] for source in sources)
-
-        core, _ = _assemble(SummaryArea.CORE, None if process is None else (process,), _core)
-        dns, port_53 = _assemble(SummaryArea.DNS, models(*_DNS_SOURCES), _dns)
-        autostart, _ = _assemble(SummaryArea.AUTOSTART, models(ProxyConfigSource.INIT), _autostart)
-        fallback, fallback_facts = _assemble(
-            SummaryArea.FALLBACK, models(ProxyConfigSource.XRAY, ProxyConfigSource.SETTINGS), _fallback,
-        )
-        # Сводка пассивна: признак активной сетевой проверки всегда выключен, проб нет.
-        view = StatusSummaryView(False, (
-            core,
-            _constant(SummaryArea.INTERCEPTION, CheckStatus.UNSUPPORTED, SummaryReason.INTERCEPTION_NOT_OBSERVED),
-            SummaryAreaView(SummaryArea.VPN, None, vpn_reachability_not_checked()),
-            dns,
-            autostart,
-            fallback,
-            _constant(SummaryArea.DRAFT, CheckStatus.UNSUPPORTED, SummaryReason.DRAFTS_NOT_IMPLEMENTED),
-        ), port_53, fallback_facts)
-        return succeeded(operation_id, name, view)
+        return succeeded(operation_id, name, build_status_summary(read_summary_sources(self._proxy, self._processes)))
 
 
 _Built = tuple[SummaryAreaView, object]
@@ -383,12 +421,10 @@ def _assemble(area: SummaryArea, values: tuple[object, ...] | None, build: Calla
     """Собрать область из моделей её источников; первый отказ по порядку чтения даёт «не проверено»."""
     check_code, network = _AREA_CHECKS[area]
     if values is None:
-        check = CheckView(check_code, CheckStatus.NOT_CHECKED, network, SummaryReason.SOURCE_NOT_CONNECTED.value)
-        return SummaryAreaView(area, None, check), None
-    for value in values:
-        if isinstance(value, ErrorDetail):
-            check = CheckView(check_code, CheckStatus.NOT_CHECKED, network, str.__str__(value.code))
-            return SummaryAreaView(area, None, check, value), None
+        return SummaryAreaView(area, None, not_checked(check_code, network, SummaryReason.SOURCE_NOT_CONNECTED.value)), None
+    error = first_source_error(values)
+    if error is not None:
+        return SummaryAreaView(area, None, not_checked(check_code, network, str.__str__(error.code)), error), None
     return build(*values)
 
 
@@ -401,6 +437,11 @@ def _core(observation: XrayProcessObservation) -> _Built:
     return SummaryAreaView(SummaryArea.CORE, AreaState(observation.state.value), xray_process_check(observation)), None
 
 
+def port_53_path_not_checked() -> CheckView:
+    """Фактический путь DNS через порт 53 в пассивном просмотре: сетевая проверка не выполнялась."""
+    return CheckView(PORT_53_PATH_CHECK, CheckStatus.NOT_CHECKED, True, CheckReason.NETWORK_CHECK_NOT_PERFORMED.value)
+
+
 def _dns(init: XKeenInitParameters, port_exclude: XKeenList, port_proxying: XKeenList) -> _Built:
     """Выбранное исключение — факт файла; путь DNS требует сетевой пробы и остаётся «не проверено»."""
     facts = port_53_facts(init, port_exclude, port_proxying)
@@ -410,8 +451,7 @@ def _dns(init: XKeenInitParameters, port_exclude: XKeenList, port_proxying: XKee
         state = AreaState.EXCLUDED_BY_RANGE
     else:
         state = AreaState.NOT_EXCLUDED
-    check = CheckView(PORT_53_PATH_CHECK, CheckStatus.NOT_CHECKED, True, CheckReason.NETWORK_CHECK_NOT_PERFORMED.value)
-    return SummaryAreaView(SummaryArea.DNS, state, check), Port53View.from_facts(facts)
+    return SummaryAreaView(SummaryArea.DNS, state, port_53_path_not_checked()), Port53View.from_facts(facts)
 
 
 def _autostart(init: XKeenInitParameters) -> _Built:

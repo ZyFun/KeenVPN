@@ -10,14 +10,16 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application.checks import (
-    CHECK_STATUS_LABELS, GEODATA_REFERENCES_CHECK, VPN_REACHABLE_CHECK, XRAY_PROCESS_CHECK, CheckReason,
-    CheckView, ChecksView, geodata_references_check, vpn_reachability_not_checked, xray_process_check,
+    CHECK_STATUS_LABELS, GEODATA_REFERENCES_CHECK, PORT_53_MODE_CHECK, VPN_REACHABLE_CHECK, XRAY_CONFIG_CHECK,
+    XRAY_PROCESS_CHECK, CheckReason, CheckView, ChecksView, first_source_error, geodata_references_check, not_checked,
+    port_53_mode_check, vpn_reachability_not_checked, xray_config_check, xray_process_check,
 )
-from keenvpn.application.contract import CheckStatus, OperationStatus
+from keenvpn.application.contract import CheckStatus, ErrorCategory, ErrorDetail, OperationStatus
 from keenvpn.domain.config_document import ConfigDocument
 from keenvpn.domain.geodata import (
     GEOIP_FILE_NAME, GEOSITE_FILE_NAME, GeoDatabaseFile, GeoDatabaseInventory, GeoDataState, assemble_geodata_state,
 )
+from keenvpn.domain.xkeen_config import XKeenConfigError, XKeenList, XKeenListName, parse_xkeen_init
 from keenvpn.domain.xray_config import XrayConfigSet
 from keenvpn.domain.xray_process import XrayProcessObservation
 
@@ -204,6 +206,52 @@ class BuilderTests(unittest.TestCase):
             (VPN_REACHABLE_CHECK, CheckStatus.NOT_CHECKED, True, "network_check_not_performed"),
         )
         self.assertIs(passive(check).items[0], check)
+
+    def test_xray_config_check_requires_the_model_and_judges_only_the_summary(self):
+        document = {"outbounds": [{"tag": "direct", "protocol": "freedom"}],
+                    "routing": {"rules": [{"type": "field", "outboundTag": "direct", "ip": [PRIVATE]}]}}
+        config = XrayConfigSet((ConfigDocument("04_test.json", json.dumps(document).encode()),))
+        check = xray_config_check(config)
+        self.assertEqual((check.code, check.status, check.network, check.reason), (XRAY_CONFIG_CHECK, CheckStatus.PASSED, False, None))
+        self.assertNotIn(PRIVATE, json.dumps(check.to_dict()) + repr(check))
+        for value in (config.to_diagnostic(), config.parts, None):
+            with self.subTest(value=type(value).__name__), self.assertRaises(TypeError):
+                xray_config_check(value)
+
+    def test_port_53_mode_check_requires_domain_models_with_their_list_names(self):
+        init = parse_xkeen_init(b'proxy_dns="off"\nproxy_router="off"\n')
+        exclude = XKeenList(XKeenListName.PORT_EXCLUDE, b"53\n")
+        proxying = XKeenList(XKeenListName.PORT_PROXYING, b"")
+        check = port_53_mode_check(init, exclude, proxying)
+        self.assertEqual((check.code, check.status, check.network, check.reason), (PORT_53_MODE_CHECK, CheckStatus.PASSED, False, None))
+        for arguments in (
+            (init.to_diagnostic(), exclude, proxying),
+            (init, proxying, exclude),
+            (init, exclude, XKeenList(XKeenListName.IP_EXCLUDE, b"")),
+            (init, exclude, b""),
+        ):
+            with self.subTest(arguments=[type(item).__name__ for item in arguments]), self.assertRaises(XKeenConfigError):
+                port_53_mode_check(*arguments)
+
+    def test_shared_helpers_describe_not_checked_and_the_first_source_error(self):
+        check = not_checked(XRAY_CONFIG_CHECK, False, "source_not_connected")
+        self.assertEqual((check.status, check.network, check.reason), (CheckStatus.NOT_CHECKED, False, "source_not_connected"))
+        first = ErrorDetail(ErrorCategory.SOURCE_FAILED, "xray_config_unavailable", "Текст.")
+        second = ErrorDetail(ErrorCategory.SOURCE_FAILED, "xkeen_init_unavailable", "Текст.")
+        self.assertIs(first_source_error((object(), first, second)), first)
+        self.assertIsNone(first_source_error((object(), None)))
+        self.assertIsNone(first_source_error(()))
+
+    def test_new_reason_codes_are_stable_identifiers(self):
+        expected = {
+            "duplicate_tags", "tags_repeated_across_parts", "sections_repeated_across_parts", "unresolved_references",
+            "rule_target_ambiguous",
+            "unsupported_structures", "port_53_in_both_lists", "exclude_list_ignored", "proxy_dns_contradicts_exclusion",
+            "flags_unknown",
+        }
+        self.assertLessEqual(expected, {reason.value for reason in CheckReason})
+        for reason in expected:
+            CheckView(XRAY_CONFIG_CHECK, CheckStatus.FAILED, False, reason)
 
 
 if __name__ == "__main__":

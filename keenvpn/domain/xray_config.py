@@ -168,6 +168,7 @@ class _Summary:
         self.inbounds: list[dict[str, object]] = []
         self.outbounds: list[dict[str, object]] = []
         self.dns_tags: list[str] = []
+        self.dns_server_tags: list[str] = []
         self.domain_strategies: list[str] = []
         self.rules: list[dict[str, object]] = []
         self.balancers: list[dict[str, object]] = []
@@ -263,7 +264,12 @@ class _Summary:
                     self.observatory.append({"part": name, "section": section, "selector": selector})
 
     def add_dns(self, name: str, dns: object) -> None:
-        """Учесть тег DNS и значения списков серверов и `hosts`; адреса серверов не читаются."""
+        """Учесть тег DNS, теги отдельных серверов и значения списков серверов и `hosts`; адреса серверов не читаются.
+
+        Непустой тег сервера Xray v26.3.27 использует вместо общего `dns.tag` как
+        inbound-тег своих запросов, поэтому ссылка `inboundTag` на него разрешима;
+        пустой тег равен отсутствующему. В сводку теги серверов не входят.
+        """
         if type(dns) is not dict:
             self.unsupported_path(name, "dns")
             return
@@ -278,6 +284,10 @@ class _Summary:
                 for index, server in enumerate(servers):
                     path = f"dns.servers[{index}]"
                     if type(server) is dict:
+                        # Пустой тег сервера Xray не использует: запросы получают общий тег `dns.tag`.
+                        server_tag = self.string_field(name, path, server, "tag")
+                        if server_tag:
+                            self.dns_server_tags.append(server_tag)
                         for key in server:
                             if _alias_ignored(server, key) or _selector_null(server, key):
                                 continue
@@ -371,7 +381,8 @@ class _Summary:
         inbound_tags = [item["tag"] for item in self.inbounds if item["tag"] is not None]
         outbound_tags = [item["tag"] for item in self.outbounds if item["tag"] is not None]
         balancer_tags = [item["tag"] for item in self.balancers if item["tag"] is not None]
-        known_inbound = set(inbound_tags) | set(self.dns_tags)
+        # Запросы DNS несут общий тег или тег своего сервера как inbound-тег: оба разрешают ссылку правила.
+        known_inbound = set(inbound_tags) | set(self.dns_tags) | set(self.dns_server_tags)
         outbound_positions = _unique_positions(self.outbounds)
         balancer_positions = _unique_positions(self.balancers)
         rules = []
@@ -502,6 +513,64 @@ def rule_list_values(parts: tuple[ConfigDocument, ...]) -> tuple[RuleListValue, 
     for part in parts:
         summary.add_part(part)
     return tuple(summary.rule_values)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class TagRepeat:
+    """Тег, повторённый в секции `inbounds`, `outbounds` или `balancers`; части — в порядке появления, с повторами.
+
+    Значение тега приватно и в сводку не входит: это данные для доверенного кода.
+    """
+
+    section: str
+    tag: str
+    parts: tuple[str, ...]
+
+    def __repr__(self) -> str:
+        return f"TagRepeat(section={self.section!r}, parts={len(self.parts)})"
+
+
+@dataclass(frozen=True, slots=True)
+class TagRepeats:
+    """Повторы тегов внутри одной части и между частями, раздельно.
+
+    Повтор внутри части — конфликт: Xray v26.3.27 отклоняет повтор тега
+    в одном наборе inbound, outbound или балансировщиков. Повтор между частями
+    — переопределение `Config.Override`: inbound и outbound с тем же тегом из
+    следующей части заменяет предыдущий, а раздел `routing` переписывается
+    целиком; какое определение действует, структурная сводка не моделирует.
+    """
+
+    within_parts: tuple[TagRepeat, ...]
+    between_parts: tuple[TagRepeat, ...]
+
+
+def tag_repeats(parts: tuple[ConfigDocument, ...]) -> TagRepeats:
+    """Найти повторы строковых тегов inbound, outbound и балансировщиков по исходным значениям; для доверенного кода.
+
+    Тег, повторённый в одной части, попадает в `within_parts`; встреченный
+    в двух и более частях — в `between_parts`; один тег может попасть в оба
+    списка. Теги не строкой не учитываются; пустая строка — не тег: Xray
+    проверяет уникальность только непустых тегов, а обработчики без имени
+    собирает отдельным списком. Это не безопасный вывод.
+    """
+    summary = _Summary()
+    for part in parts:
+        summary.add_part(part)
+    within: list[TagRepeat] = []
+    between: list[TagRepeat] = []
+    for section, entries in (("inbounds", summary.inbounds), ("outbounds", summary.outbounds),
+                             ("balancers", summary.balancers)):
+        owners: dict[str, list[str]] = {}
+        for entry in entries:
+            if type(entry["tag"]) is str and entry["tag"]:
+                owners.setdefault(entry["tag"], []).append(entry["part"])
+        for tag, names in owners.items():
+            if len(names) != len(set(names)):
+                within.append(TagRepeat(section, tag, tuple(names)))
+            if len(set(names)) > 1:
+                between.append(TagRepeat(section, tag, tuple(names)))
+    return TagRepeats(tuple(within), tuple(between))
 
 
 @dataclass(frozen=True, slots=True, repr=False)

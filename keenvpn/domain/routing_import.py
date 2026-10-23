@@ -29,7 +29,7 @@ from keenvpn.domain.routing import (
     RoutingValidationError, UnknownCondition, UnsupportedRuleCondition, _PrivateRepresentation,
 )
 from keenvpn.domain.routing_policy import FinalRoutingRule, RoutingPolicy
-from keenvpn.domain.xray_config import RuleListValue, RuleTargetKind, XrayConfigSet, decode_string_list
+from keenvpn.domain.xray_config import XRAY_TAIL_MARKER, RuleListValue, RuleTargetKind, XrayConfigSet, decode_string_list
 from keenvpn.domain.xray_identifiers import (
     BALANCER_STRATEGIES, XRAY_RULE_CONDITION_FIELDS, safe_identifier, safe_strategy,
 )
@@ -46,8 +46,6 @@ _SERVICE_FIELDS = frozenset({"type", "ruleTag", "outboundTag", "balancerTag"})
 """`type` декодер v26.3.27 не читает; остальные поля задают назначение и тег правила."""
 _MODEL_FIELDS = frozenset({"domain", "domains", "ip"})
 _FINAL_NETWORKS = frozenset({"tcp", "udp"})
-_TAIL_MARKER = "tail"
-"""Часть с этим словом в имени добавляет новые outbound в конец, остальные — в начало."""
 _DOCUMENT_FIELDS = frozenset({"routing", "outbounds"})
 _ROUTING_FIELDS = frozenset({"rules", "balancers"})
 _OUTBOUND_FIELDS = frozenset({"tag", "protocol", "proxySettings", "streamSettings"})
@@ -717,7 +715,7 @@ def _effective_outbounds(documents: list[tuple[str, dict[str, object]]]) -> tupl
             continue
         if not entries:
             continue
-        tail = _TAIL_MARKER in name.lower()
+        tail = XRAY_TAIL_MARKER in name.lower()
         prepends: list[list[_Outbound]] = []
         for entry in entries:
             cell = first.get(entry.tag) if entry.tag is not None else None

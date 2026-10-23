@@ -21,7 +21,8 @@ from typing import ClassVar
 
 from keenvpn.application.checks import (
     GEODATA_REFERENCES_CHECK, PORT_53_MODE_CHECK, VPN_REACHABLE_CHECK, XRAY_CONFIG_CHECK, XRAY_PROCESS_CHECK,
-    ChecksView, CheckView, geodata_references_check, not_checked, port_53_mode_check, xray_config_check,
+    CheckReason, ChecksView, CheckView, geodata_references_check, not_checked, port_53_mode_check,
+    replaced_sections_repeated, xray_config_check,
 )
 from keenvpn.application.contract import (
     CONTRACT_VERSION, CheckStatus, ErrorDetail, OperationIdFactory, Result, check_contract_version, failed,
@@ -291,7 +292,16 @@ def _dependent(code: str, values: tuple[object | None, ...], build) -> CheckView
 
 
 def _geodata_check(config: XrayConfigSet, inventory: GeoDatabaseInventory) -> CheckView:
-    """Разрешимость ссылок на геобазы; несогласованность инвентаря и конфигурации — «не проверено» с кодом домена."""
+    """Разрешимость ссылок на геобазы; несогласованность инвентаря и конфигурации — «не проверено» с кодом домена.
+
+    Ссылки собираются по всем частям, поэтому при повторе раздела `routing`
+    или `dns` в них входят ссылки заменённых разделов: проверка тогда «не
+    поддерживается», как проверка конфигурации Xray.
+    """
+    if replaced_sections_repeated(config):
+        return CheckView(
+            GEODATA_REFERENCES_CHECK, CheckStatus.UNSUPPORTED, False, CheckReason.SECTIONS_REPEATED_ACROSS_PARTS.value,
+        )
     try:
         state = assemble_geodata_state(inventory, config)
     except GeoDataError as error:

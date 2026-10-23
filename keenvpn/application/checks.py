@@ -22,7 +22,7 @@ from keenvpn.domain.xkeen_config import (
     XKeenFlagStatus, XKeenInitParameters, XKeenList, XKeenListItemKind, port_53_facts,
 )
 from keenvpn.domain.xray_config import (
-    RuleTargetKind, TagRepeat, TagRepeats, XrayConfigSet, summarize_xray_config, tag_repeats,
+    XRAY_TAIL_MARKER, RuleTargetKind, TagRepeat, TagRepeats, XrayConfigSet, summarize_xray_config, tag_repeats,
 )
 from keenvpn.domain.xray_process import XrayProcessObservation
 
@@ -241,7 +241,7 @@ def xray_config_check(config: XrayConfigSet) -> CheckView:
     balancers = summary["balancers"]
     if _unmerged_repeats(repeats, config):
         return CheckView(XRAY_CONFIG_CHECK, CheckStatus.FAILED, False, CheckReason.DUPLICATE_TAGS.value)
-    if any(section in _REPLACED_SECTIONS for section in summary["duplicate_sections"]):
+    if _replaced_repeated(summary["duplicate_sections"]):
         return CheckView(XRAY_CONFIG_CHECK, CheckStatus.UNSUPPORTED, False, CheckReason.SECTIONS_REPEATED_ACROSS_PARTS.value)
     resolvable = (RuleTargetKind.OUTBOUND.value, RuleTargetKind.BALANCER.value)
     if (
@@ -260,19 +260,47 @@ def xray_config_check(config: XrayConfigSet) -> CheckView:
 
 
 def _unmerged_repeats(repeats: TagRepeats, config: XrayConfigSet) -> tuple[TagRepeat, ...]:
-    """Повторы, которые объединение частей не схлопывает: все в единственной части, inbound и outbound в первой.
+    """Повторы, которые объединение частей не схлопывает, по правилам `Config.Override` Xray v26.3.27.
 
-    В первой части `Config.Override` заменяет только первую запись с тегом,
-    поэтому её повтор сохраняется; раздел `routing` последующая часть заменяет
-    целиком, поэтому повтор балансировщика при нескольких частях зависит от
-    объединения и сюда не входит.
+    В единственной части сохраняется любой повтор. При нескольких частях
+    повтор сохраняется, если тег повторён в самой ранней своей части, где он
+    ещё новый: inbound — только в первой части (последующие добавляют новый
+    inbound сразу, и повтор его заменяет); outbound — в первой части или
+    в части без `XRAY_TAIL_MARKER` в имени, которая откладывает новые outbound
+    и ставит в начало все сразу. Сохранённый повтор последующие части уже не
+    схлопывают: они заменяют только первую запись с тегом. Раздел `routing`
+    последующая часть заменяет целиком, поэтому повтор балансировщика при
+    нескольких частях зависит от объединения и сюда не входит. Это то же
+    правило, по которому импорт правил собирает действующие outbound.
     """
     if len(config.parts) <= 1:
         return repeats.within_parts
     first = config.parts[0].name
-    return tuple(
-        item for item in repeats.within_parts if item.section != "balancers" and item.parts.count(first) >= 2
-    )
+
+    def preserved(item: TagRepeat) -> bool:
+        earliest = item.parts[0]
+        if item.parts.count(earliest) < 2:
+            return False
+        if item.section == "inbounds":
+            return earliest == first
+        return item.section == "outbounds" and (earliest == first or XRAY_TAIL_MARKER not in earliest.lower())
+
+    return tuple(item for item in repeats.within_parts if preserved(item))
+
+
+def replaced_sections_repeated(config: XrayConfigSet) -> bool:
+    """Есть ли раздел `routing` или `dns` в нескольких частях: Xray берёт его из последней части целиком.
+
+    Тогда ссылки, собранные по всем частям, включают ссылки заменённых
+    разделов, и отрицательный вывод по ним недостоверен.
+    """
+    if type(config) is not XrayConfigSet:
+        raise TypeError("Ожидается XrayConfigSet.")
+    return _replaced_repeated(summarize_xray_config(config.parts)["duplicate_sections"])
+
+
+def _replaced_repeated(duplicate_sections: Iterable[str]) -> bool:
+    return any(section in _REPLACED_SECTIONS for section in duplicate_sections)
 
 
 def port_53_mode_check(init: XKeenInitParameters, port_exclude: XKeenList, port_proxying: XKeenList) -> CheckView:

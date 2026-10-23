@@ -30,6 +30,7 @@ from keenvpn.domain.geodata import (
     GEOIP_FILE_NAME, GEOSITE_FILE_NAME, GeoDatabaseFile, GeoDatabaseInventory, GeoDataError, GeoDataErrorCode,
 )
 from keenvpn.domain.xkeen_config import XKeenList, XKeenListName, parse_xkeen_init
+from keenvpn.domain.routing_import import _effective_outbounds
 from keenvpn.domain.xray_config import XrayConfigSet
 from keenvpn.domain.xray_process import XrayProcessObservation
 from tests.support.in_memory import AdapterSetupError, UnconfiguredResponseError
@@ -474,15 +475,27 @@ class CheckOutcomeTests(unittest.TestCase):
                 outbounds=[*OUTBOUNDS, {"tag": "block-out", "protocol": "blackhole"}],
                 more_parts=(("05_override.json", {"outbounds": [{"tag": "block-out", "protocol": "blackhole"}]}),),
             ), ("failed", "duplicate_tags")),
-            # Регрессия повторного review 76-R02: повтор внутри последующей части зависит от объединения частей.
+            # Регрессия GitHub review 76-R06: новые outbound части без `tail` откладываются и ставятся в начало
+            # все сразу, поэтому повтор нового тега в ней сохраняется — Xray такой набор не загрузит.
             ("new tag repeated inside a later part", xray_config(more_parts=(
                 ("05_override.json", {"outbounds": [{"tag": "x-out", "protocol": "freedom"}, {"tag": "x-out", "protocol": "freedom"}]}),
-            )), ("unsupported", "tags_repeated_across_parts")),
+            )), ("failed", "duplicate_tags")),
+            ("preserved later-part repeat is not collapsed by a still later part", xray_config(more_parts=(
+                ("05_override.json", {"outbounds": [{"tag": "x-out", "protocol": "freedom"}, {"tag": "x-out", "protocol": "freedom"}]}),
+                ("06_more.json", {"outbounds": [{"tag": "x-out", "protocol": "freedom"}]}),
+            )), ("failed", "duplicate_tags")),
+            # Регрессия повторного review 76-R02: повтор, который объединение схлопывает, зависит от объединения частей.
             ("known tag repeated inside a later part", xray_config(more_parts=(
                 ("05_override.json", {"outbounds": [{"tag": "direct-out", "protocol": "freedom"}, {"tag": "direct-out", "protocol": "freedom"}]}),
             )), ("unsupported", "tags_repeated_across_parts")),
             ("new tag repeated inside a tail part", xray_config(more_parts=(
                 ("09_tail.json", {"outbounds": [{"tag": "x-out", "protocol": "freedom"}, {"tag": "x-out", "protocol": "freedom"}]}),
+            )), ("unsupported", "tags_repeated_across_parts")),
+            ("tail marker is case-insensitive", xray_config(more_parts=(
+                ("09_TAIL.json", {"outbounds": [{"tag": "x-out", "protocol": "freedom"}, {"tag": "x-out", "protocol": "freedom"}]}),
+            )), ("unsupported", "tags_repeated_across_parts")),
+            ("new inbound repeated inside a later part", xray_config(more_parts=(
+                ("05_override.json", {"inbounds": [{"tag": "x-in", "protocol": "tunnel"}, {"tag": "x-in", "protocol": "tunnel"}]}),
             )), ("unsupported", "tags_repeated_across_parts")),
             ("balancer repeated with several parts", xray_config(
                 balancers=[{"tag": "g", "selector": ["proxy-"]}, {"tag": "g", "selector": ["proxy-"]}],
@@ -542,6 +555,31 @@ class CheckOutcomeTests(unittest.TestCase):
                 self.assertNotIn("TEST_absent", repr(result) + json.dumps(result.to_dict()))
                 self.assertNotIn("x-out", repr(result) + json.dumps(result.to_dict()))
 
+    def test_duplicate_tags_match_the_effective_outbounds_of_the_routing_import(self):
+        # Регрессия GitHub review 76-R06: конфликт тегов outbound — ровно тогда, когда он остаётся в списке,
+        # который импорт правил собирает по `Config.Override`.
+        x_twice = {"outbounds": [{"tag": "x-out", "protocol": "freedom"}, {"tag": "x-out", "protocol": "freedom"}]}
+        x_once = {"outbounds": [{"tag": "x-out", "protocol": "freedom"}]}
+        layouts = (
+            (("04_a.json", x_twice),),
+            (("04_a.json", x_once), ("05_b.json", x_twice)),
+            (("04_a.json", {"outbounds": OUTBOUNDS}), ("05_b.json", x_twice)),
+            (("04_a.json", {"outbounds": OUTBOUNDS}), ("05_tail.json", x_twice)),
+            (("04_a.json", {"outbounds": OUTBOUNDS}), ("05_tail.json", x_once), ("06_b.json", x_twice)),
+            (("04_a.json", {"outbounds": OUTBOUNDS}), ("05_b.json", x_twice), ("06_tail.json", x_once)),
+            (("04_a.json", x_twice), ("05_b.json", x_once)),
+            (("04_a.json", {"outbounds": OUTBOUNDS}), ("05_b.json", x_once), ("06_c.json", x_once)),
+        )
+        for layout in layouts:
+            with self.subTest(parts=[name for name, _ in layout]):
+                config = XrayConfigSet(tuple(ConfigDocument(name, json.dumps(doc).encode()) for name, doc in layout))
+                effective, supported, _variant = _effective_outbounds([(part.name, part.export()) for part in config.parts])
+                tags = [item.tag for item in effective if item.tag]
+                self.assertTrue(supported)
+                expected = len(tags) != len(set(tags))
+                reason = checks(self.run_case("xray", config))[XRAY_CONFIG_CHECK].reason
+                self.assertEqual(reason == "duplicate_tags", expected, reason)
+
     def test_dns_tags_resolve_inbound_references(self):
         def config(inbound_tag, servers=()):
             document = {"outbounds": OUTBOUNDS, "dns": {"tag": "dns-local", "servers": list(servers)},
@@ -581,6 +619,20 @@ class CheckOutcomeTests(unittest.TestCase):
             ("file not inventoried", xray_config({**geo_rule, "ip": ["ext:fixture-private.dat:x", "geoip:ru"]}), inventory(),
              ("unsupported", "files_not_inventoried")),
             ("geosite present", xray_config({**geo_rule, "domain": ["geosite:test-set"]}), inventory(geosite_present=True), ("passed", None)),
+            # Регрессия GitHub review 76-R07: ссылки заменённого раздела routing или dns не оцениваются.
+            ("missing file only in a replaced routing", xray_config({**geo_rule, "domain": ["geosite:test-set"]}, more_parts=(
+                ("05_override.json", {"routing": {"rules": [geo_rule]}}),
+            )), inventory(), ("unsupported", "sections_repeated_across_parts")),
+            ("missing file in the acting routing of several", xray_config(geo_rule, more_parts=(
+                ("05_override.json", {"routing": {"rules": [{**geo_rule, "domain": ["geosite:test-set"]}]}}),
+            )), inventory(), ("unsupported", "sections_repeated_across_parts")),
+            ("missing file only in a replaced dns", xray_config(geo_rule, more_parts=(
+                ("02_dns.json", {"dns": {"servers": [{"address": "198.51.100.1", "domains": ["geosite:test-set"]}]}}),
+                ("03_dns.json", {"dns": {"servers": ["198.51.100.2"]}}),
+            )), inventory(), ("unsupported", "sections_repeated_across_parts")),
+            ("missing file in the single routing of several parts", xray_config({**geo_rule, "domain": ["geosite:test-set"]}, more_parts=(
+                ("05_more.json", {"log": {}}),
+            )), inventory(), ("failed", "missing_files")),
         )
         for name, config, files, expected in cases:
             with self.subTest(case=name):

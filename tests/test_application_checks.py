@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application.checks import (
     CHECK_STATUS_LABELS, GEODATA_REFERENCES_CHECK, PORT_53_MODE_CHECK, VPN_REACHABLE_CHECK, XRAY_CONFIG_CHECK,
     XRAY_PROCESS_CHECK, CheckReason, CheckView, ChecksView, first_source_error, geodata_references_check, not_checked,
-    port_53_mode_check, vpn_reachability_not_checked, xray_config_check, xray_process_check,
+    port_53_mode_check, replaced_sections_repeated, vpn_reachability_not_checked, xray_config_check, xray_process_check,
 )
 from keenvpn.application.contract import CheckStatus, ErrorCategory, ErrorDetail, OperationStatus
 from keenvpn.domain.config_document import ConfigDocument
@@ -232,6 +232,18 @@ class BuilderTests(unittest.TestCase):
         ):
             with self.subTest(arguments=[type(item).__name__ for item in arguments]), self.assertRaises(XKeenConfigError):
                 port_53_mode_check(*arguments)
+
+    def test_replaced_sections_repeated_detects_routing_or_dns_in_several_parts(self):
+        def config(*documents):
+            return XrayConfigSet(tuple(ConfigDocument(name, json.dumps(doc).encode()) for name, doc in documents))
+
+        self.assertFalse(replaced_sections_repeated(config(("04_a.json", {"routing": {}}), ("05_b.json", {"outbounds": []}))))
+        self.assertTrue(replaced_sections_repeated(config(("04_a.json", {"routing": {}}), ("05_b.json", {"routing": {}}))))
+        self.assertTrue(replaced_sections_repeated(config(("02_a.json", {"dns": {}}), ("03_b.json", {"dns": {}}))))
+        # Inbound и outbound Xray объединяет по тегам, а не заменяет: их повтор раздела сюда не относится.
+        self.assertFalse(replaced_sections_repeated(config(("04_a.json", {"outbounds": []}), ("05_b.json", {"outbounds": []}))))
+        with self.assertRaises(TypeError):
+            replaced_sections_repeated(())
 
     def test_shared_helpers_describe_not_checked_and_the_first_source_error(self):
         check = not_checked(XRAY_CONFIG_CHECK, False, "source_not_connected")

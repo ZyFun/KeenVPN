@@ -30,6 +30,14 @@ from keenvpn.domain.xray_identifiers import (
 )
 
 
+XRAY_TAIL_MARKER = "tail"
+"""Слово в имени части, при котором `Config.Override` Xray добавляет её новые outbound сразу в конец, а не в начало.
+
+Новые outbound обычной части откладываются и ставятся в начало только после
+всей части, поэтому повтор нового тега в ней сохраняется; в части с этим
+словом повтор заменяет только что добавленный. Регистр не учитывается.
+"""
+
 _RULE_SERVICE_KEYS = frozenset({"type", "ruleTag", "inboundTag", "outboundTag", "balancerTag"})
 _OBSERVATORY_SECTIONS = ("observatory", "burstObservatory")
 _RULE_DOMAIN_LIST_KEYS = ("domain", "domains")

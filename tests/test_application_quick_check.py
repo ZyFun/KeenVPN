@@ -546,6 +546,19 @@ class CheckOutcomeTests(unittest.TestCase):
                                                    balancers=[{"tag": "g", "selector": ["proxy-"]}]),
              ("failed", "rule_target_ambiguous")),
             ("rule without target", xray_config(rule(network="udp")), ("failed", "rule_target_ambiguous")),
+            # Регрессия GitHub review 76-R09: пустой тег назначения Xray считает отсутствующим и правило не загрузит.
+            ("empty outbound target beside an empty-tag outbound", xray_config(
+                rule(outboundTag=""), outbounds=[*OUTBOUNDS, {"tag": "", "protocol": "freedom"}],
+            ), ("failed", "rule_target_ambiguous")),
+            ("empty balancer target beside an empty-tag balancer", xray_config(
+                rule(balancerTag=""), balancers=[{"tag": "", "selector": ["proxy-"]}],
+            ), ("failed", "rule_target_ambiguous")),
+            ("empty outbound target beside a balancer target", xray_config(
+                rule(outboundTag="", balancerTag="g"), balancers=[{"tag": "g", "selector": ["proxy-"]}],
+            ), ("passed", None)),
+            ("empty fallback tag is no fallback", xray_config(
+                rule(balancerTag="g"), balancers=[{"tag": "g", "selector": ["proxy-"], "fallbackTag": ""}],
+            ), ("passed", None)),
             ("ambiguous before unsupported", xray_config(rule(network="udp"), 7), ("failed", "rule_target_ambiguous")),
             ("unsupported rule structure", xray_config(7), ("unsupported", "unsupported_structures")),
             # Назначение нестрокового типа сводка читает как отсутствующее: расхождение важнее неподдержанного места.

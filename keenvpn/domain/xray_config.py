@@ -334,7 +334,8 @@ class _Summary:
                     "index": index,
                     "tag": self.string_field(name, path, balancer, "tag"),
                     "selector": self.string_list(name, path, balancer, "selector", allow_string=True),
-                    "fallback_tag": self.string_field(name, path, balancer, "fallbackTag"),
+                    # Пустой `fallbackTag` балансировщик Xray не применяет: резерва нет.
+                    "fallback_tag": self.string_field(name, path, balancer, "fallbackTag") or None,
                     "strategy": None,
                 }
                 if "strategy" in balancer:
@@ -345,8 +346,9 @@ class _Summary:
                 self.balancers.append(entry)
 
     def add_rule(self, name: str, index: int, path: str, rule: dict[str, object]) -> None:
-        outbound_tag = self.string_field(name, path, rule, "outboundTag")
-        balancer_tag = self.string_field(name, path, rule, "balancerTag")
+        # Пустой тег назначения `parseFieldRule` Xray v26.3.27 считает отсутствующим, как и импорт правил.
+        outbound_tag = self.string_field(name, path, rule, "outboundTag") or None
+        balancer_tag = self.string_field(name, path, rule, "balancerTag") or None
         if outbound_tag is not None and balancer_tag is not None:
             kind, target = RuleTargetKind.BOTH, None
         elif outbound_tag is not None:

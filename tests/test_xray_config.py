@@ -470,6 +470,42 @@ class SyntheticXrayConfigTests(unittest.TestCase):
         self.assertNotIn("fixture-private", str(error) + repr(error))
 
 
+class EmptyTargetTagTests(unittest.TestCase):
+    """Регрессия GitHub review 76-R09: пустые `outboundTag`, `balancerTag` и `fallbackTag` — отсутствующие значения, как в Xray."""
+
+    def diagnostic(self, rule, fallback=None):
+        balancer = {"tag": "g", "selector": ["proxy-"]}
+        if fallback is not None:
+            balancer["fallbackTag"] = fallback
+        document = {
+            "outbounds": [{"tag": "", "protocol": "freedom"}, {"tag": "proxy-a", "protocol": "trojan"}],
+            "routing": {"rules": [{"type": "field", "network": "tcp", **rule}], "balancers": [balancer, {"tag": "", "selector": ["x"]}]},
+        }
+        return XrayConfigSet((part("05_routing.json", document),)).to_diagnostic()
+
+    def test_empty_rule_targets_are_absent(self):
+        for rule, kind, tag_known, resolved in (
+            ({"outboundTag": ""}, "none", False, False),
+            ({"balancerTag": ""}, "none", False, False),
+            ({"outboundTag": "", "balancerTag": ""}, "none", False, False),
+            ({"outboundTag": "", "balancerTag": "g"}, "balancer", True, True),
+            ({"outboundTag": "proxy-a", "balancerTag": ""}, "outbound", True, True),
+            ({"outboundTag": "proxy-a", "balancerTag": "g"}, "both", False, False),
+        ):
+            with self.subTest(rule=rule):
+                item = self.diagnostic(rule)["rules"][0]
+                self.assertEqual((item["target_kind"], item["target_tag_known"], item["target_resolved"]), (kind, tag_known, resolved))
+
+    def test_empty_fallback_tag_is_not_set(self):
+        balancer = self.diagnostic({"balancerTag": "g"}, fallback="")["balancers"][0]
+        self.assertEqual(
+            (balancer["fallback_known"], balancer["fallback_tag"], balancer["fallback_resolved"], balancer["fallback_position"]),
+            (False, None, None, None),
+        )
+        self.assertEqual(self.diagnostic({"balancerTag": "g"}, fallback="")["unsupported_paths"], [])
+        self.assertTrue(self.diagnostic({"balancerTag": "g"}, fallback="proxy-a")["balancers"][0]["fallback_resolved"])
+
+
 class DnsServerTagTests(unittest.TestCase):
     """Регрессия review 76-R03: тег отдельного DNS-сервера разрешает ссылку `inboundTag`, в сводку не входит."""
 

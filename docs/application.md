@@ -13,7 +13,7 @@
 | `InspectConnectionProfile` | `InspectConnectionProfileHandler` | Читает профиль по ID и показывает его общую структуру без имени и параметров подключения |
 | `InspectProfileLink` | `InspectProfileLinkHandler` | Проверяет сборку общего профиля из URI в памяти через реестр, возвращает только общую структуру |
 | `InspectProtocolSupport` | `InspectProtocolSupportHandler` | Проверяет доступность модуля и операции по [явному реестру](protocol-registry.md), не выполняя операцию |
-| `ExplainRoute` | `ExplainRouteHandler` | Строит [статическое объяснение маршрута](routing-explanation.md) по правилам из источника |
+| `ExplainRoute` | `ExplainRouteHandler` | Строит [статическое объяснение маршрута](routing-explanation.md) по правилам из порта или по политике импортированной схемы (`from_import`) |
 | `ResolveKeeneticPolicy` | `ResolveKeeneticPolicyHandler` | Находит ID [политики Keenetic](keenetic-policies.md) по описанию в текущем списке источника; неоднозначность не разрешает сам |
 | `InspectKeeneticState` | `InspectKeeneticStateHandler` | Читает [состояние Keenetic](keenetic-state.md) из четырёх раздельных источников и возвращает счётчики и технические идентификаторы без MAC, имён и адресов |
 | `InspectProxyConfig` | `InspectProxyConfigHandler` | Читает [конфигурацию Xray и XKeen](proxy-config.md): части Xray, `xkeen.json`, параметры init и три списка через раздельные источники и возвращает структурную сводку без доменов, адресов, путей и паролей |
@@ -247,23 +247,49 @@ else:
 
 ## Объяснение маршрута
 
-`ExplainRoute` принимает те же именованные предположения, что и
+`ExplainRoute` принимает либо строку назначения `destination` из общего
+ввода меню — домен, отдельный адрес или домен с адресами через пробел,
+которую разбирает [`destination_context`](routing-explanation.md#строка-назначения), —
+либо те же именованные предположения, что и
 [`RoutingContext`](routing-explanation.md#входные-предположения): `domain`,
-`domain_source`, `ips`, `ip_source`. Значения считаются приватными,
-`repr()` команды их скрывает.
+`domain_source`, `ips`, `ip_source`. Строка назначения не сочетается
+с типизированными полями. Значения считаются приватными, `repr()` команды
+их скрывает.
 
-Тип полей проверяется до разбора значений: `domain` — `str` или `None`,
-источники — только `DomainSource` и `IPSource`, `ips` — tuple строк или `None`.
-В отличие от `RoutingContext`, list не принимается. Нарушение типа —
+Тип полей проверяется до разбора значений: `destination` и `domain` — `str`
+или `None`, источники — только `DomainSource` и `IPSource`, `ips` — tuple
+строк или `None`. В отличие от `RoutingContext`, list не принимается.
+Нарушение типа и сочетание `destination` с типизированными полями —
 `invalid_request` / `invalid_command`; некорректное по смыслу значение
-правильного типа — `invalid_input`.
+правильного типа, включая строку назначения, — `invalid_input` с кодом
+домена (`invalid_destination`, `invalid_domain`, `invalid_ip_or_cidr`,
+`invalid_routing_context`) и шагом «исправьте значение». Источники
+при этом не читаются.
 
-Обработчику передаются источник правил и, при необходимости, источник геоданных:
+Обработчик строится одним из двух способов:
 
-- `policies` — объект с методом `current_routing_policy() -> RoutingPolicy`;
-- `geodata` — объект с методом `match(condition, values) -> GeoMatch`
-  с тем же контрактом, что у `geo_matcher` в `explain_route`. Без него
-  условия GeoIP/GeoSite дают `unknown`.
+- `ExplainRouteHandler(policies, geodata)` — `policies` — объект с методом
+  `current_routing_policy() -> RoutingPolicy`; отказ — `source_failed` /
+  `routing_policy_unavailable`, не модель — `invalid_source_data` /
+  `invalid_routing_policy`;
+- `ExplainRouteHandler.from_import(routing, store, geodata)` — политика
+  импортированной схемы действующей конфигурации Xray: `routing` —
+  `ImportRoutingSchemeHandler`, `store` — порт `ManagerMetadataStore` либо
+  `None`. Источники Xray и XKeen читаются один раз обработчиком конфигурации
+  прокси в его порядке и с его кодами, схема строится `import_models()`,
+  позиции назначений берутся из структурной сводки тех же моделей,
+  метаданные читаются одним чтением хранилища, если оно передано, —
+  тем же общим чтением `read_scheme_identity`, что у списка правил. Коды
+  отказов — коды сценариев `inspect_proxy_config`, `import_routing_scheme`
+  (`routing_import_failed`) и привязки (`rule_binding_failed`); отсутствие
+  метаданных и отказ хранилища — состояния `metadata_state`, как
+  у [списка правил](#список-правил-для-меню). Ничего не записывается.
+
+`geodata` в обоих случаях необязателен — объект с методом
+`match(condition, values) -> GeoMatch` с тем же контрактом, что
+у `geo_matcher` в `explain_route`. Без него условия GeoIP/GeoSite дают
+`unknown`, а не отсутствие совпадения; реализации источника членства
+в репозитории нет.
 
 ```python
 from keenvpn.application.routing import ExplainRoute, ExplainRouteHandler
@@ -289,14 +315,84 @@ assert result.data.selection.action == "VPN"
 Сначала проверяются предположения; при ошибке источник правил не вызывается.
 При успехе `data` — `RouteExplanationView`: признак `preliminary`, источники
 имени и адресов, число адресов `ip_count`, ограничения `assumptions`, шаги
-`steps` и выбор `selection`. Каждый шаг содержит позицию, тип условия, признаки
-`enabled` и `protected`, действие, результат, машинный `reason_code`
-(например `domain`, `disabled`, `geodata_missing`), текст причины и безопасные
-признаки базы. Значения доменов, IP, категорий, ссылок и версий баз
-в представление не входят.
+`steps`, выбор `selection`, итог `outcome` и, для политики из импортированной
+схемы, `scheme`, `metadata_state` и `metadata_error`. Каждый шаг содержит
+позицию в политике `index`, тип условия, признаки `enabled` и `protected`,
+действие, результат, машинный `reason_code` (например `domain`, `disabled`,
+`geodata_missing`), текст причины, безопасные признаки базы, а также
+`group_index` (индекс правила Xray в действующей части) и `offset` (позиция
+в группе) по схеме и идентичность правила `has_id`, `rule_id`, `has_name`,
+`name` из метаданных. Название — пользовательский текст после проверки
+`valid_rule_name`; интерфейс выводит его только через свой фильтр.
+Значения доменов, IP, категорий, ссылок и версий баз, как и введённая
+строка назначения, в представление не входят.
 
-`selection=None` при успешном статусе означает, что первое неизвестное условие
-не позволило выбрать действие. Это не отказ сценария и не выбор BLOCK.
+`outcome` (`RouteOutcome`) различает четыре состояния, ни одно не выводится
+из другого:
+
+| Итог | Смысл | `steps` и `selection` |
+| --- | --- | --- |
+| `rule` | Совпало обычное правило | шаги до совпадения; выбор с позицией, идентичностью и назначением |
+| `final` | Все включённые условия не совпали, действует финальное правило | все шаги и шаг финального правила; `selection.is_final` |
+| `unknown` | Первое неизвестное условие остановило расчёт | шаги до него; `selection=None` — это не отказ и не выбор BLOCK |
+| `policy_absent` | Политика импортированной схемы не собрана | шагов нет, `selection=None`; причины — в `scheme.reasons` |
+
+`selection` дополнительно содержит `target` (`RuleTargetView` назначения
+группы из представления схемы), `target_position_state`
+(`TargetPositionState`, как у списка правил) и `target_position`
+(`XrayPositionView` при `resolved`); скрытый как небезопасный тег позицию
+не теряет. `scheme` — `RouteSchemeView(routing_part, read_only, reasons,
+group_count, rule_count, policy_present)`. У обработчика поверх порта
+`RoutingPolicySource` поля схемы, метаданных, групп и назначения пустые.
+`CONTRACT_VERSION` не менялась: поля только добавлены.
+
+Пример поверх импортированной схемы с искусственными источниками:
+
+```python
+from keenvpn.application.proxy_config import InspectProxyConfigHandler
+from keenvpn.application.routing import ExplainRoute, ExplainRouteHandler, RouteOutcome
+from keenvpn.application.routing_import import ImportRoutingSchemeHandler
+from keenvpn.domain.config_document import ConfigDocument
+from keenvpn.domain.xkeen_config import XKeenList, XKeenListName, XKeenSettings, parse_xkeen_init
+from keenvpn.domain.xray_config import XrayConfigSet
+
+
+class FixedSources:
+    def current_xray_config(self):
+        return XrayConfigSet((
+            ConfigDocument("04_outbounds.json", b'{"outbounds": [{"tag": "proxy-out", "protocol": "trojan"}, '
+                           b'{"tag": "direct", "protocol": "freedom"}]}'),
+            ConfigDocument("05_routing.json", b'{"routing": {"rules": [{"type": "field", "domain": ["domain:example.test"], '
+                           b'"outboundTag": "direct"}, {"type": "field", "network": "tcp,udp", "outboundTag": "proxy-out"}]}}'),
+        ))
+
+    def current_xkeen_settings(self):
+        return XKeenSettings(ConfigDocument("xkeen.json", b'{"xkeen": {"killswitch": "on"}}'))
+
+    def current_xkeen_init(self):
+        return parse_xkeen_init(b'start_auto="on"\nproxy_dns="off"\nproxy_router="off"\nipv6_support="on"\n')
+
+    def current_xkeen_list(self, name):
+        return XKeenList(name, b"")
+
+
+sources = FixedSources()
+routing = ImportRoutingSchemeHandler(InspectProxyConfigHandler(sources, sources, sources, sources))
+handler = ExplainRouteHandler.from_import(routing, None)
+
+data = handler.execute(ExplainRoute(destination="sub.example.test")).data
+assert data.outcome is RouteOutcome.RULE
+assert (data.selection.index, data.selection.group_index, data.selection.action) == (0, 0, "DIRECT")
+assert (data.selection.target.tag, data.selection.target_position.index) == ("direct", 1)
+
+data = handler.execute(ExplainRoute(destination="other.test")).data
+assert data.outcome is RouteOutcome.FINAL and data.selection.action == "VPN"
+
+data = handler.execute(ExplainRoute(destination="198.51.100.7")).data
+assert data.outcome is RouteOutcome.UNKNOWN and data.selection is None  # Видимость имени неизвестна.
+assert "example.test" not in str(data.to_dict()) and "198.51.100.7" not in str(data.to_dict())
+print(handler.execute(ExplainRoute(destination="a b")).error.code)  # invalid_destination
+```
 
 | Ситуация | Категория и код |
 | --- | --- |

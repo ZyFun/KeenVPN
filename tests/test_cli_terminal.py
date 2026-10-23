@@ -246,8 +246,8 @@ class CompositionTests(unittest.TestCase):
         self.assertEqual(set(assembly.actions), {"settings.about", "status.summary"})
         self.assertIsNone(found["settings.about"])
         self.assertIsNone(found["status.summary"])
-        self.assertIs(found["routing.explain"], UnavailableReason.INPUT_REQUIRED)
-        for action_id in set(BOUND_SCENARIOS) - {"routing.explain", "status.summary"}:
+        # Объяснение маршрута читает импортированную схему: без источников Xray и XKeen пункт недоступен.
+        for action_id in set(BOUND_SCENARIOS) - {"status.summary"}:
             self.assertIs(found[action_id], UnavailableReason.SOURCE_NOT_CONNECTED, action_id)
         for action_id in set(ALL_ACTION_IDS) - set(BOUND_SCENARIOS) - {"settings.about"}:
             self.assertIs(found[action_id], UnavailableReason.NOT_IMPLEMENTED, action_id)
@@ -260,15 +260,14 @@ class CompositionTests(unittest.TestCase):
         _, sources = snapshot_menu_sources(InMemoryManagerMetadataStore())
         found = states(assemble_main_menu(sources))
         for action_id in (
-            "status.summary", "connections.list", "routing.list", "devices.list", "failsafe.port53_check",
-            "settings.storage",
+            "status.summary", "connections.list", "routing.list", "routing.explain", "devices.list",
+            "failsafe.port53_check", "settings.storage",
         ):
             self.assertIsNone(found[action_id], action_id)
-        self.assertIs(found["routing.explain"], UnavailableReason.INPUT_REQUIRED)
         self.assertEqual(
             set(assemble_main_menu(sources).actions),
-            {"status.summary", "connections.list", "routing.list", "devices.list", "failsafe.port53_check",
-             "settings.storage", "settings.about"},
+            {"status.summary", "connections.list", "routing.list", "routing.explain", "devices.list",
+             "failsafe.port53_check", "settings.storage", "settings.about"},
         )
 
     def test_partial_sources_enable_only_what_they_cover(self):
@@ -279,7 +278,7 @@ class CompositionTests(unittest.TestCase):
         found = states(assemble_main_menu(keenetic_only))
         self.assertIsNone(found["devices.list"])
         self.assertIsNone(found["status.summary"])
-        for action_id in ("connections.list", "routing.list", "failsafe.port53_check", "settings.storage"):
+        for action_id in ("connections.list", "routing.list", "routing.explain", "failsafe.port53_check", "settings.storage"):
             self.assertIs(found[action_id], UnavailableReason.SOURCE_NOT_CONNECTED, action_id)
         three_of_four = MenuSources(policies=full.policies, hotspot=full.hotspot, registrations=full.registrations)
         self.assertIs(states(assemble_main_menu(three_of_four))["devices.list"], UnavailableReason.SOURCE_NOT_CONNECTED)
@@ -293,6 +292,7 @@ class CompositionTests(unittest.TestCase):
         self.assertIsNone(found["connections.list"])
         # Список правил не требует хранилища метаданных: без него он показывается без названий и идентификаторов.
         self.assertIsNone(found["routing.list"])
+        self.assertIsNone(found["routing.explain"])
         self.assertIsNone(found["failsafe.port53_check"])
         with self.assertRaises(MenuError):
             assemble_main_menu({"policies": full.policies})
@@ -410,10 +410,13 @@ class SnapshotFlowTests(unittest.TestCase):
                 self.assertNotIn("Найдено:", output)
                 self.assertNotIn(value, output)
 
-    def test_explain_route_requires_input_and_runs_nothing(self):
-        code, output, _ = self.flow("4\n9\n0\n0\n")
+    def test_explain_route_opens_a_prompt_and_cancel_reads_nothing(self):
+        # Пункт 4 → 9 доступен при подключённых источниках прокси и открывает запрос значения; подробности — test_cli_input.
+        code, output, navigator = self.flow("4\n9\n0\n0\n0\n")
         self.assertEqual(code, 0)
-        self.assertIn(REASON_MESSAGES[UnavailableReason.INPUT_REQUIRED], output)
+        self.assertEqual(navigator.depth, 0)
+        self.assertIn("Главное меню KeenVPN / Правила маршрутизации / Объяснить выбор правила для домена/IP\n", output)
+        self.assertNotIn(REASON_MESSAGES[UnavailableReason.INPUT_REQUIRED], output)
         self.assertEqual(self.sources.proxy.calls[:3], (0, 0, 0))
 
     def test_source_failure_is_shown_as_safe_error(self):

@@ -245,7 +245,13 @@ class ExplainRouteTests(unittest.TestCase):
         data = result.to_dict()["data"]
         self.assertTrue(data["preliminary"])
         self.assertEqual((data["domain_source"], data["ip_source"], data["ip_count"]), ("destination", "dns", 1))
-        self.assertEqual(data["selection"], {"index": 1, "action": "VPN", "is_final": False})
+        self.assertEqual(data["selection"], {
+            "index": 1, "action": "VPN", "is_final": False, "group_index": None, "offset": None, "has_id": False,
+            "rule_id": None, "has_name": False, "name": None, "target": None, "target_position_state": None,
+            "target_position": None,
+        })
+        # Политика из порта: итог есть, а схемы импорта и состояния метаданных нет.
+        self.assertEqual((data["outcome"], data["scheme"], data["metadata_state"], data["metadata_error"]), ("rule", None, None, None))
         self.assertEqual([step["reason_code"] for step in data["steps"]], ["geodata", "domain"])
         self.assertEqual(data["steps"][0]["database_kind"], "geoip")
         self.assertTrue(data["steps"][0]["database_version_known"])

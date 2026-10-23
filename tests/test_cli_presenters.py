@@ -56,6 +56,13 @@ from keenvpn.interfaces.cli.presenters import (
     DEVICES_ITEM_NAME, DEVICES_LIST_TITLE, DEVICES_NOTE, SEGMENT_MATCH_NOTE, device_name, present_device_list,
 )
 from keenvpn.interfaces.cli.terminal import UNAVAILABLE_MARK
+from keenvpn.application.routing import OUTCOME_LABELS, ExplainRoute, ExplainRouteHandler, RouteOutcome
+from keenvpn.domain.routing import IPCondition, RoutingAction, RoutingRule
+from keenvpn.domain.routing_policy import FinalRoutingRule, RoutingPolicy
+from keenvpn.interfaces.cli.presenters import (
+    POLICY_ABSENT_NOTE, ROUTE_NOTE, UNKNOWN_ROUTE_NOTE, present_route_explanation,
+)
+from tests.support.in_memory import InMemoryRoutingPolicySource
 from enum import StrEnum
 import json
 
@@ -1133,6 +1140,136 @@ class DeviceListPresenterTests(PresenterAssertions):
         self.assertEqual(listing.entries[-1].number, MAX_ITEM_NUMBER)
         self.assertEqual(listing.header[-1], f"Записей больше {MAX_ITEM_NUMBER}: в списке первые {MAX_ITEM_NUMBER}, остальные не показываются.")
         self.assertTrue(all(len(line) <= MAX_LIST_LINE_LENGTH for line in list_lines(listing)))
+
+
+class RouteExplanationPresenterTests(PresenterAssertions):
+    """Объяснение маршрута: предположения, схема, шаги и четыре итога без введённых значений и значений условий."""
+
+    ENTERED = ("sub.example.test", "service.another.test", "198.51.100.7", "2001:db8::7")
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        "пример.рф".encode("idna")
+        sources = snapshot_installation_sources()
+        proxy = InspectProxyConfigHandler(sources.proxy.xray, sources.proxy.settings, sources.proxy.init, sources.proxy.lists)
+        routing = ImportRoutingSchemeHandler(proxy)
+        cls.absent = ExplainRouteHandler.from_import(routing, InMemoryManagerMetadataStore()).execute(
+            ExplainRoute(destination="sub.example.test"),
+        ).data
+        sources.proxy.xray.outcome = XrayConfigSet((
+            ConfigDocument("04_outbounds.json", json.dumps({"outbounds": [
+                {"tag": "proxy-out", "protocol": "trojan"}, {"tag": "direct", "protocol": "freedom"},
+            ]}).encode("utf-8")),
+            ConfigDocument("05_routing.json", json.dumps({"routing": {"rules": [
+                {"type": "field", "domain": ["domain:example.test"], "outboundTag": "direct"},
+                {"type": "field", "ip": ["geoip:ru"], "outboundTag": "proxy-out"},
+                {"type": "field", "network": "tcp,udp", "outboundTag": "proxy-out"},
+            ]}}).encode("utf-8")),
+        ))
+        rules = scheme_rules(import_routing_scheme(sources.proxy.xray.outcome))
+        records = (RuleRecord(fixed_id(1), NAME_MARKER, rule_key(rules[0])), RuleRecord(fixed_id(2), None, rule_key(rules[1])))
+        store = InMemoryManagerMetadataStore(encode_manager_metadata(ManagerMetadata(None, UnknownFields(), rules=records)))
+        handler = ExplainRouteHandler.from_import(routing, store)
+        cls.selected = handler.execute(ExplainRoute(destination="sub.example.test")).data
+        cls.unknown = handler.execute(ExplainRoute(destination="service.another.test 198.51.100.7")).data
+        failing = InMemoryManagerMetadataStore()
+        failing.read_failure = ManagerMetadataStoreError(MetadataStoreFailure.BUSY)
+        cls.failed_store = ExplainRouteHandler.from_import(routing, failing).execute(
+            ExplainRoute(destination="sub.example.test"),
+        ).data
+        policy = RoutingPolicy((RoutingRule(IPCondition("198.51.100.0/24"), RoutingAction.DIRECT),), FinalRoutingRule(RoutingAction.BLOCK))
+        cls.port_final = ExplainRouteHandler(InMemoryRoutingPolicySource(policy)).execute(
+            ExplainRoute(destination="2001:db8::7"),
+        ).data
+
+    def lines(self, view):
+        with forbid_external_effects():
+            lines = present_route_explanation(view)
+        text = self.assert_safe_lines(lines)
+        for marker in (*self.ENTERED, "example.test", "198.51.100.0", "geoip:", '"ru"'):
+            self.assertNotIn(marker, text)
+        return lines
+
+    def test_policy_absent_on_snapshot_names_the_state_and_reasons(self):
+        lines = self.lines(self.absent)
+        self.assertEqual(lines[:2], ["Предварительный расчёт маршрута", ROUTE_NOTE])
+        self.assertEqual(lines[2], "Предположения расчёта:")
+        self.assertEqual(len([line for line in lines[3:8] if line.startswith("  ")]), 5)
+        self.assertIn("Адресов в расчёте: нет данных", lines)
+        self.assertIn(
+            "Схема: часть 05_routing.json; только просмотр да; групп 8; правил модели 40; политика не собрана; "
+            "причины: final_rule_unresolved",
+            lines,
+        )
+        self.assertIn(METADATA_NOTES[MetadataState.ABSENT], lines)
+        self.assertIn("Шагов проверки: 0", lines)
+        self.assertEqual(lines[-2:], [f"Итог: {OUTCOME_LABELS[RouteOutcome.POLICY_ABSENT.value]}", "  " + POLICY_ABSENT_NOTE])
+
+    def test_selected_rule_shows_steps_identity_and_ambiguous_target_position(self):
+        lines = self.lines(self.selected)
+        self.assertIn(METADATA_NOTES[MetadataState.PRESENT], lines)
+        self.assertIn("Шагов проверки: 1", lines)
+        self.assertIn(
+            f"  Шаг 1: правило 0 (группа 0, правило 0 в группе) — DomainCondition, действие DIRECT, совпало; "
+            f"Проверено имя с учётом режима точного совпадения или поддоменов.; ID {fixed_id(1)}; название «{NAME_MARKER}»",
+            lines,
+        )
+        self.assertIn(f"Итог: {OUTCOME_LABELS[RouteOutcome.RULE.value]}", lines)
+        self.assertIn(f"  Выбрано правило 0 (группа 0, правило 0 в группе): действие DIRECT; ID {fixed_id(1)}; название «{NAME_MARKER}»", lines)
+        self.assertIn("  Назначение: outbound direct; позиция: 04_outbounds.json, индекс 1", lines)
+        # Повтор тега делает политику несобираемой, поэтому состояние позиции проверяется на представлении.
+        ambiguous = replace(self.selected, selection=replace(
+            self.selected.selection, target_position_state=TargetPositionState.AMBIGUOUS, target_position=None,
+        ))
+        self.assertIn(
+            f"  Назначение: outbound direct; позиция: {TARGET_POSITION_LABELS[TargetPositionState.AMBIGUOUS]}",
+            self.lines(ambiguous),
+        )
+
+    def test_unknown_geodata_names_the_step_and_never_a_route(self):
+        lines = self.lines(self.unknown)
+        self.assertIn("Адресов в расчёте: 1", lines)
+        self.assertIn(
+            f"  Шаг 2: правило 1 (группа 1, правило 0 в группе) — GeoIPCondition, действие VPN, неизвестно; "
+            f"Источник содержимого геобазы не передан.; ID {fixed_id(2)}; название не задано",
+            lines,
+        )
+        self.assertEqual(lines[-3:], [
+            f"Итог: {OUTCOME_LABELS[RouteOutcome.UNKNOWN.value]}", "  Правило не выбрано: условие на шаге 2 неизвестно.",
+            "  " + UNKNOWN_ROUTE_NOTE,
+        ])
+        self.assertFalse(any("Выбрано" in line or "Назначение" in line for line in lines))
+
+    def test_failed_store_shows_its_error_with_step_and_keeps_the_explanation(self):
+        lines = self.lines(self.failed_store)
+        self.assertIn(METADATA_NOTES[MetadataState.FAILED], lines)
+        self.assertIn("  Отказ: source_failed / metadata_store_busy", lines)
+        self.assertIn(f"  Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.RETRY_LATER]}", lines)
+        self.assertIn("  Выбрано правило 0 (группа 0, правило 0 в группе): действие DIRECT; ID не присвоен; название не задано", lines)
+
+    def test_final_over_the_port_has_no_scheme_lines_and_no_target(self):
+        lines = self.lines(self.port_final)
+        self.assertFalse(any(line.startswith("Схема:") for line in lines))
+        self.assertFalse(any(line in METADATA_NOTES.values() for line in lines))
+        self.assertIn("  Шаг 2: правило 1 — финальное правило, действие BLOCK, совпало; "
+                      "Все включённые условия проверены и не совпали; выбрано финальное правило.", lines)
+        self.assertEqual(lines[-3:], [
+            f"Итог: {OUTCOME_LABELS[RouteOutcome.FINAL.value]}",
+            "  Ни одно включённое правило не совпало: действует финальное правило 1 — действие BLOCK",
+            f"  Назначение: {MISSING}",
+        ])
+
+    def test_values_outside_formats_and_catalogs_are_hidden(self):
+        step = replace(self.selected.steps[0], reason="tag\x1b", condition_type="private.example.test", action="x y")
+        hidden = replace(self.selected, steps=(step,), outcome=self.selected.outcome)
+        lines = self.lines(hidden)
+        shown = [line for line in lines if line.startswith("  Шаг 1")][0]
+        self.assertNotIn("private.example", shown)
+        self.assertNotIn("x y", shown)
+        self.assertEqual(shown.count(HIDDEN), 3)
+        with self.assertRaises(TypeError):
+            present_route_explanation(self.results["routing"].data)
 
 
 if __name__ == "__main__":

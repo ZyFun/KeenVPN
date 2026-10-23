@@ -91,6 +91,7 @@ LITERAL_PAIRS = sorted({
     ("invalid_source_data", "invalid_registry_data"),
     ("source_failed", "routing_policy_unavailable"),
     ("invalid_source_data", "invalid_routing_policy"),
+    ("invalid_source_data", "route_explanation_inconsistent"),
     ("source_failed", "keenetic_policies_unavailable"),
     ("invalid_source_data", "invalid_keenetic_policies"),
     ("source_failed", "keenetic_hotspot_unavailable"),
@@ -219,7 +220,7 @@ def enum_pairs() -> set[tuple[ErrorCategory, str]]:
     ):
         detail = link_rejection_detail(ConnectionLinkRejected(rejection, code.value, "Текст."))
         pairs.add((detail.category, detail.code))
-    for code in (RoutingErrorCode.CONTEXT, RoutingErrorCode.DOMAIN, RoutingErrorCode.IP):
+    for code in (RoutingErrorCode.CONTEXT, RoutingErrorCode.DOMAIN, RoutingErrorCode.IP, RoutingErrorCode.DESTINATION):
         pairs.add((ErrorCategory.INVALID_INPUT, code.value))
     pairs.add((ErrorCategory.SOURCE_FAILED, RoutingErrorCode.MATCHER.value))
     pairs |= {

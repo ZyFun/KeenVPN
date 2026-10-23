@@ -3,7 +3,8 @@
 Единственный модуль интерфейса, которому разрешён импорт конкретных адаптеров.
 Транспорта чтения роутера в этой версии нет, поэтому сборка по умолчанию
 не подключает ни одного источника: пункты, сценарию которых нужен источник,
-показываются недоступными. Сводка состояния допускает неподключённые
+показываются недоступными. Объяснение маршрута открывает запрос значения
+и передаёт введённую строку сценарию без разбора. Сводка состояния допускает неподключённые
 источники, поэтому пункт «Сводка» и шапка главного меню доступны всегда
 и показывают такие области «не проверено». Каждое действие выполняет сценарий
 заново при каждом выборе пункта и не хранит результаты между выборами: список,
@@ -21,19 +22,20 @@ from keenvpn.application.keenetic_devices import ListKeeneticDevices, ListKeenet
 from keenvpn.application.keenetic_state import InspectKeeneticStateHandler
 from keenvpn.application.manager_metadata import InspectManagerMetadata, InspectManagerMetadataHandler
 from keenvpn.application.ports import (
-    GeoDatabaseSource, KeeneticHotspotRuntimeSource, KeeneticHotspotSettingsSource, KeeneticPolicySource,
-    KeeneticRegistrationSource, ManagerMetadataStore, XKeenInitSource, XKeenListSource, XKeenSettingsSource,
-    XrayConfigSource, XrayProcessSource,
+    GeoDatabaseSource, GeoDataSource, KeeneticHotspotRuntimeSource, KeeneticHotspotSettingsSource,
+    KeeneticPolicySource, KeeneticRegistrationSource, ManagerMetadataStore, XKeenInitSource, XKeenListSource,
+    XKeenSettingsSource, XrayConfigSource, XrayProcessSource,
 )
 from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler
 from keenvpn.application.proxy_connections import InspectConnections, InspectConnectionsHandler
+from keenvpn.application.routing import ExplainRoute, ExplainRouteHandler
 from keenvpn.application.routing_import import ImportRoutingSchemeHandler
 from keenvpn.application.routing_rules import ListRoutingRules, ListRoutingRulesHandler
 from keenvpn.application.status_summary import InspectStatusSummary, InspectStatusSummaryHandler
-from keenvpn.interfaces.cli.menu import Menu, MenuError, UnavailableReason
+from keenvpn.interfaces.cli.menu import Menu, MenuError, UnavailableReason, ValueRequest
 from keenvpn.interfaces.cli.presenters import (
-    present_about, present_connections, present_device_list, present_manager_metadata, present_port53,
-    present_result, present_rule_list, present_status_header, present_status_summary,
+    ROUTE_PROMPT, present_about, present_connections, present_device_list, present_manager_metadata, present_port53,
+    present_result, present_route_explanation, present_rule_list, present_status_header, present_status_summary,
 )
 from keenvpn.interfaces.cli.terminal import Action, Header
 from keenvpn.interfaces.cli.tree import (
@@ -60,6 +62,8 @@ class MenuSources:
     geodata: GeoDatabaseSource | None = None
     process: XrayProcessSource | None = None
     metadata: ManagerMetadataStore | None = None
+    geo_match: GeoDataSource | None = None
+    """Источник членства в наборах GeoIP и GeoSite для объяснения маршрута; без него условия геобаз «неизвестны»."""
 
     @property
     def keenetic_connected(self) -> bool:
@@ -122,11 +126,18 @@ def _bindings(
     if proxy is not None:
         connections = InspectConnectionsHandler(proxy, operation_ids=operation_ids)
         bind("connections.list", lambda: present_result(connections.execute(InspectConnections()), present_connections))
-        # Список правил допускает неподключённое хранилище метаданных: тогда он показывается без идентичности.
-        rules = ListRoutingRulesHandler(
-            ImportRoutingSchemeHandler(proxy, operation_ids=operation_ids), sources.metadata, operation_ids=operation_ids,
-        )
+        # Список правил и объяснение маршрута допускают неподключённое хранилище метаданных: тогда они показываются
+        # без названий и идентификаторов. Объяснение читает ту же схему тем же обработчиком импорта.
+        routing = ImportRoutingSchemeHandler(proxy, operation_ids=operation_ids)
+        rules = ListRoutingRulesHandler(routing, sources.metadata, operation_ids=operation_ids)
         bind("routing.list", lambda: present_result(rules.execute(ListRoutingRules()), present_rule_list))
+        explain = ExplainRouteHandler.from_import(routing, sources.metadata, sources.geo_match, operation_ids=operation_ids)
+
+        def explain_route(value: str) -> list[str]:
+            # Строка передаётся сценарию как есть: домен, адрес и их сочетание разбирает домен, меню не разбирает.
+            return present_result(explain.execute(ExplainRoute(destination=value)), present_route_explanation)
+
+        bind("routing.explain", lambda: ValueRequest(ROUTE_PROMPT, explain_route))
         bind("failsafe.port53_check", lambda: present_result(proxy.execute(InspectProxyConfig()), present_port53))
     if keenetic is not None:
         # Список устройств читает те же четыре источника тем же обработчиком состояния Keenetic.
@@ -138,8 +149,6 @@ def _bindings(
             "settings.storage",
             lambda: present_result(metadata.execute(InspectManagerMetadata()), present_manager_metadata),
         )
-    # Объяснение маршрута требует ввода домена или адреса, которого это меню не принимает.
-    states["routing.explain"] = UnavailableReason.INPUT_REQUIRED
     for action_id in BUILTIN_ACTIONS:
         bind(action_id, present_about)
     return states, actions, header

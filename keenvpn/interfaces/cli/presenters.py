@@ -28,6 +28,10 @@ from keenvpn.application.proxy_config import (
     Port53View, ProxyConfigView, XKeenFlagView, XKeenListView, XrayPositionView,
 )
 from keenvpn.application.proxy_connections import BalancerConnectionView, ConnectionsView, OutboundConnectionView
+from keenvpn.application.routing import (
+    OUTCOME_LABELS, STEP_RESULT_LABELS, STEP_SKIPPED_LABEL, RouteExplanationView, RouteOutcome, RouteSelectionView,
+    RouteStepView,
+)
 from keenvpn.application.routing_import import RuleGroupView, RoutingSchemeView
 from keenvpn.application.routing_rules import (
     MetadataState, RuleGroupIdentityView, RuleListEntryView, RuleListView, TargetPositionState,
@@ -759,13 +763,18 @@ def _identity_card(group: RuleGroupIdentityView) -> list[str]:
     return lines
 
 
-def _metadata_lines(view: RuleListView) -> Lines:
-    state = view.metadata_state
+def _metadata_state_lines(state: object, error: object) -> Lines:
+    """Строка состояния метаданных и, при отказе хранилища, строки отказа с его шагом."""
     if type(state) is not MetadataState:
         return [HIDDEN]
     lines = [safe_text(METADATA_NOTES[state])]
-    if view.metadata_error is not None:
-        lines += _indent(present_error(view.metadata_error))
+    if error is not None:
+        lines += _indent(present_error(error))
+    return lines
+
+
+def _metadata_lines(view: RuleListView) -> Lines:
+    lines = _metadata_state_lines(view.metadata_state, view.metadata_error)
     identity = view.identity
     if identity is not None:
         records = "раздел записей не записан" if identity.record_count is None else f"записей правил {count(identity.record_count)}"
@@ -794,6 +803,122 @@ def present_rule_list(view: RuleListView) -> MenuList:
         for entry, group in zip(base.entries, view.groups[:MAX_ITEM_NUMBER], strict=True)
     )
     return MenuList(base.title, base.item_name, header, entries)
+
+
+ROUTE_PROMPT = (
+    "Домен, отдельный IP-адрес или домен с IP-адресами через пробел: не больше одного домена и 16 адресов, "
+    "без CIDR, портов и зон.",
+    "Введённое значение в вывод не повторяется; DNS и другие сетевые запросы не выполняются.",
+)
+"""Подсказка запроса значения для объяснения маршрута."""
+ROUTE_NOTE = (
+    "Это предварительный статический расчёт по снимку импортированных правил: реальный путь трафика, DNS, "
+    "sniffing и работа VPN не проверялись, введённые значения не выводятся."
+)
+UNKNOWN_ROUTE_NOTE = "Маршрут не определён: это не DIRECT, не VPN и не BLOCK."
+POLICY_ABSENT_NOTE = (
+    "Правила не проверялись: политика действующей схемы не собрана, схема доступна только для просмотра; "
+    "причины — в строке схемы."
+)
+
+
+def _route_position(index: object, group_index: object, offset: object) -> str:
+    text = f"правило {count(index)}"
+    if group_index is None:
+        return text
+    inside = "" if offset is None else f", правило {count(offset)} в группе"
+    return f"{text} (группа {count(group_index)}{inside})"
+
+
+def _route_identity(has_id: object, rule_id_value: object, has_name: object, name: object) -> str:
+    shown_id = rule_id(rule_id_value) if has_id is True else "не присвоен"
+    shown_name = f"«{rule_name(name)}»" if has_name is True else "не задано"
+    return f"ID {shown_id}; название {shown_name}"
+
+
+def _route_step_line(number: int, step: RouteStepView) -> str:
+    result = STEP_SKIPPED_LABEL if step.result is None else _catalog(STEP_RESULT_LABELS, step.result)
+    condition = "финальное правило" if step.condition_type is None else identifier(step.condition_type)
+    line = (
+        f"Шаг {count(number)}: {_route_position(step.index, step.group_index, step.offset)} — {condition}, "
+        f"действие {identifier(step.action)}, {safe_text(result)}; {safe_text(step.reason)}"
+    )
+    if step.condition_type is not None:
+        line += f"; {_route_identity(step.has_id, step.rule_id, step.has_name, step.name)}"
+    if step.database_kind is not None:
+        version = "известна" if step.database_version_known is True else "неизвестна"
+        line += f"; база {identifier(step.database_kind)}, версия {version}"
+    return line
+
+
+def _route_target_line(selection: RouteSelectionView) -> str:
+    target = selection.target
+    if target is None:
+        return f"Назначение: {MISSING}"
+    state = selection.target_position_state
+    if type(state) is not TargetPositionState:
+        position = HIDDEN
+    elif state is TargetPositionState.RESOLVED:
+        position = f"{file_name(selection.target_position.part)}, индекс {count(selection.target_position.index)}"
+    else:
+        position = safe_text(TARGET_POSITION_LABELS[state])
+    return (
+        f"Назначение: {identifier(target.kind)} {known_value(target.tag_known, target.tag, identifier, 'без тега')}; "
+        f"позиция: {position}"
+    )
+
+
+def _route_outcome_lines(view: RouteExplanationView) -> Lines:
+    outcome = view.outcome
+    label = _catalog(OUTCOME_LABELS, outcome.value) if type(outcome) is RouteOutcome else HIDDEN
+    lines = [f"Итог: {label}"]
+    selection = view.selection
+    if outcome is RouteOutcome.POLICY_ABSENT:
+        lines.append(_INDENT + POLICY_ABSENT_NOTE)
+    elif outcome is RouteOutcome.UNKNOWN or selection is None:
+        lines.append(_INDENT + f"Правило не выбрано: условие на шаге {count(len(view.steps))} неизвестно.")
+        lines.append(_INDENT + UNKNOWN_ROUTE_NOTE)
+    else:
+        position = _route_position(selection.index, selection.group_index, selection.offset)
+        if outcome is RouteOutcome.FINAL:
+            lines.append(
+                _INDENT + f"Ни одно включённое правило не совпало: действует финальное {position} — "
+                f"действие {identifier(selection.action)}"
+            )
+        else:
+            lines.append(
+                _INDENT + f"Выбрано {position}: действие {identifier(selection.action)}; "
+                + _route_identity(selection.has_id, selection.rule_id, selection.has_name, selection.name)
+            )
+        lines.append(_INDENT + _route_target_line(selection))
+    return lines
+
+
+def present_route_explanation(view: RouteExplanationView) -> Lines:
+    """Показать предварительный расчёт маршрута: предположения, схему, шаги и один из четырёх итогов.
+
+    Введённые домен и адреса, значения условий и коды наборов в представление
+    не входят, поэтому вывести их нельзя; названия правил проходят фильтр
+    `rule_name`, идентификаторы — `rule_id`, теги и части — свои фильтры.
+    """
+    if type(view) is not RouteExplanationView:
+        raise TypeError("Ожидается RouteExplanationView.")
+    lines = ["Предварительный расчёт маршрута", ROUTE_NOTE, "Предположения расчёта:"]
+    lines += _indent(safe_text(item) for item in view.assumptions)
+    lines.append(f"Адресов в расчёте: {optional_count(view.ip_count)}")
+    scheme = view.scheme
+    if scheme is not None:
+        policy = "собрана" if scheme.policy_present is True else "не собрана"
+        lines.append(
+            f"Схема: часть {optional_file_name(scheme.routing_part)}; только просмотр {flag(scheme.read_only)}; "
+            f"групп {count(scheme.group_count)}; правил модели {count(scheme.rule_count)}; политика {policy}; "
+            f"причины: {identifiers(scheme.reasons)}"
+        )
+        lines += _metadata_state_lines(view.metadata_state, view.metadata_error)
+    lines.append(f"Шагов проверки: {count(len(view.steps))}")
+    lines += _indent(_route_step_line(number, step) for number, step in enumerate(view.steps, start=1))
+    lines += _route_outcome_lines(view)
+    return lines
 
 
 DEVICES_LIST_TITLE = "Устройства"

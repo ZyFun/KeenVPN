@@ -46,6 +46,16 @@ _RULE_IP_LIST_KEYS = ("ip", "source", "sourceIP", "localIP")
 """Поля правила со списками адресов: `StringList` Xray, разбираются `ToCidrList`."""
 _DNS_IP_LIST_KEYS = ("expectIPs", "expectedIPs", "unexpectedIPs")
 """Поля сервера DNS со списками адресов: `StringList` Xray, разбираются `ToCidrList`."""
+_READ_SECTIONS = frozenset({"inbounds", "outbounds", "dns", "routing", *_OBSERVATORY_SECTIONS})
+_ENDPOINT_FIELDS = frozenset({"tag", "protocol"})
+_DNS_FIELDS = frozenset({"tag", "servers", "hosts"})
+_DNS_SERVER_FIELDS = frozenset({"tag", "domains", *_DNS_IP_LIST_KEYS})
+_ROUTING_FIELDS = frozenset({"domainStrategy", "rules", "balancers"})
+_RULE_READ_FIELDS = _RULE_SERVICE_KEYS | frozenset(_RULE_DOMAIN_LIST_KEYS) | frozenset(_RULE_IP_LIST_KEYS)
+_BALANCER_READ_FIELDS = frozenset({"tag", "selector", "fallbackTag", "strategy"})
+_STRATEGY_READ_FIELDS = frozenset({"type"})
+_OBSERVATORY_FIELDS = frozenset({"subjectSelector"})
+"""Поля, которые читает структурная сводка, по объектам; варианты их регистра сводка не читает."""
 
 
 def _absent(item: dict[str, object], key: str) -> bool:
@@ -113,6 +123,18 @@ class RuleTargetKind(StrEnum):
 
 def _text(value: object) -> str | None:
     return value if type(value) is str else None
+
+
+def has_case_variant(item: dict[str, object], names: frozenset[str]) -> bool:
+    """Есть ли ключ, совпадающий с полем Xray только без учёта регистра.
+
+    JSON-декодер Go, которым Xray читает конфигурацию, принимает такой ключ
+    вместо точного имени, а при нескольких вариантах применяет последний.
+    `casefold` шире складывания Go: лишнее совпадение только переводит
+    объект в режим просмотра.
+    """
+    folded = {name.casefold() for name in names}
+    return any(key not in names and key.casefold() in folded for key in item)
 
 
 def decode_string_list(value: object) -> tuple[str, ...] | None:
@@ -183,9 +205,14 @@ class _Summary:
         self.observatory: list[dict[str, object]] = []
         self.unsupported: list[dict[str, str]] = []
         self.rule_values: list[RuleListValue] = []
+        self.case_variant = False
 
     def unsupported_path(self, part: str, path: str) -> None:
         self.unsupported.append({"part": part, "path": path})
+
+    def note_case_variants(self, item: dict[str, object], names: frozenset[str]) -> None:
+        """Отметить ключ, который Xray прочтёт как поле `names`, а сводка пропустит из-за регистра."""
+        self.case_variant = self.case_variant or has_case_variant(item, names)
 
     def string_field(self, part: str, path: str, item: dict[str, object], key: str) -> str | None:
         """Строковое поле либо None; поле другого типа отмечается как неподдержанное."""
@@ -246,6 +273,7 @@ class _Summary:
         """Пройти разделы части в порядке документа; неизвестные разделы только учитываются."""
         document = part.export()
         name = part.name
+        self.note_case_variants(document, _READ_SECTIONS)
         known = [section for section in document if known_section(section)]
         self.parts.append({"name": name, "sections": known, "unknown_section_count": len(document) - len(known)})
         for section, value in document.items():
@@ -254,6 +282,7 @@ class _Summary:
             if section in ("inbounds", "outbounds"):
                 target = self.inbounds if section == "inbounds" else self.outbounds
                 for index, path, item in self.objects(name, section, value):
+                    self.note_case_variants(item, _ENDPOINT_FIELDS)
                     target.append({
                         "part": name,
                         "index": index,
@@ -268,6 +297,7 @@ class _Summary:
                 if type(value) is not dict:
                     self.unsupported_path(name, section)
                     continue
+                self.note_case_variants(value, _OBSERVATORY_FIELDS)
                 for selector in self.string_list(name, section, value, "subjectSelector"):
                     self.observatory.append({"part": name, "section": section, "selector": selector})
 
@@ -281,6 +311,7 @@ class _Summary:
         if type(dns) is not dict:
             self.unsupported_path(name, "dns")
             return
+        self.note_case_variants(dns, _DNS_FIELDS)
         tag = self.string_field(name, "dns", dns, "tag")
         if tag is not None:
             self.dns_tags.append(tag)
@@ -292,6 +323,7 @@ class _Summary:
                 for index, server in enumerate(servers):
                     path = f"dns.servers[{index}]"
                     if type(server) is dict:
+                        self.note_case_variants(server, _DNS_SERVER_FIELDS)
                         # Пустой тег сервера Xray не использует: запросы получают общий тег `dns.tag`.
                         server_tag = self.string_field(name, path, server, "tag")
                         if server_tag:
@@ -321,6 +353,7 @@ class _Summary:
         if type(routing) is not dict:
             self.unsupported_path(name, "routing")
             return
+        self.note_case_variants(routing, _ROUTING_FIELDS)
         strategy = self.string_field(name, "routing", routing, "domainStrategy")
         if strategy is not None:
             self.domain_strategies.append(strategy)
@@ -329,6 +362,7 @@ class _Summary:
                 self.add_rule(name, index, path, rule)
         if "balancers" in routing:
             for index, path, balancer in self.objects(name, "routing.balancers", routing["balancers"]):
+                self.note_case_variants(balancer, _BALANCER_READ_FIELDS)
                 entry = {
                     "part": name,
                     "index": index,
@@ -340,12 +374,14 @@ class _Summary:
                 }
                 if "strategy" in balancer:
                     if type(balancer["strategy"]) is dict:
+                        self.note_case_variants(balancer["strategy"], _STRATEGY_READ_FIELDS)
                         entry["strategy"] = self.string_field(name, f"{path}.strategy", balancer["strategy"], "type")
                     else:
                         self.unsupported_path(name, f"{path}.strategy")
                 self.balancers.append(entry)
 
     def add_rule(self, name: str, index: int, path: str, rule: dict[str, object]) -> None:
+        self.note_case_variants(rule, _RULE_READ_FIELDS)
         # Пустой тег назначения `parseFieldRule` Xray v26.3.27 считает отсутствующим, как и импорт правил.
         outbound_tag = self.string_field(name, path, rule, "outboundTag") or None
         balancer_tag = self.string_field(name, path, rule, "balancerTag") or None
@@ -523,6 +559,19 @@ def rule_list_values(parts: tuple[ConfigDocument, ...]) -> tuple[RuleListValue, 
     for part in parts:
         summary.add_part(part)
     return tuple(summary.rule_values)
+
+
+def config_case_variants(parts: tuple[ConfigDocument, ...]) -> bool:
+    """Есть ли в объектах, которые читает сводка, ключ, отличающийся от поля Xray только регистром.
+
+    Xray применит такой ключ, а сводка его не читает: её выводы о тегах,
+    ссылках и значениях списков для такой конфигурации недостоверны.
+    Безопасная сводка этот признак не содержит; это данные для доверенного кода.
+    """
+    summary = _Summary()
+    for part in parts:
+        summary.add_part(part)
+    return summary.case_variant
 
 
 @dataclass(frozen=True, slots=True, repr=False)

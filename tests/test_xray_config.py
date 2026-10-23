@@ -14,7 +14,8 @@ from keenvpn.domain.config_document import ConfigDocument, ConfigDocumentError, 
 from keenvpn.domain.routing import ConditionFamily
 from keenvpn.domain.xray_config import (
     RuleListValue, TagRepeat, TagRepeats, XrayConfigError, XrayConfigErrorCode, XrayConfigSet, _duplicates,
-    decode_string_list, rule_list_values, summarize_xray_config, tag_repeats, validate_xray_config_set,
+    config_case_variants, decode_string_list, has_case_variant, rule_list_values, summarize_xray_config, tag_repeats,
+    validate_xray_config_set,
 )
 from tests.support.isolation import forbid_external_effects
 from tests.support.privacy import UNSAFE_MARKERS, UNSAFE_PART_NAME, unsafe_xray_config
@@ -468,6 +469,44 @@ class SyntheticXrayConfigTests(unittest.TestCase):
         self.assertIsNone(error.__context__)
         self.assertIsNone(error.__cause__)
         self.assertNotIn("fixture-private", str(error) + repr(error))
+
+
+class CaseVariantKeyTests(unittest.TestCase):
+    """Регрессия GitHub review 76-R10: ключи, отличающиеся от полей Xray только регистром, отмечаются для доверенного кода."""
+
+    def test_has_case_variant_matches_only_other_spellings_of_known_fields(self):
+        names = frozenset({"tag", "outboundTag"})
+        self.assertTrue(has_case_variant({"Tag": "a"}, names))
+        self.assertTrue(has_case_variant({"outboundTag": "a", "OUTBOUNDTAG": "b"}, names))
+        self.assertFalse(has_case_variant({"tag": "a", "outboundTag": "b"}, names))
+        self.assertFalse(has_case_variant({"Protocol": "x"}, names))
+
+    def test_config_case_variants_covers_every_object_the_summary_reads(self):
+        outbounds = [{"tag": "direct", "protocol": "freedom"}]
+        cases = {
+            "Outbounds": {"Outbounds": outbounds},
+            "Routing": {"outbounds": outbounds, "Routing": {}},
+            "Dns": {"Dns": {}},
+            "Observatory": {"Observatory": {}},
+            "outbound Tag": {"outbounds": [{"Tag": "direct", "protocol": "freedom"}]},
+            "inbound Protocol": {"inbounds": [{"tag": "lan", "Protocol": "tunnel"}]},
+            "routing Rules": {"routing": {"Rules": []}},
+            "rule OutboundTag": {"routing": {"rules": [{"type": "field", "OutboundTag": "direct"}]}},
+            "rule Domain": {"routing": {"rules": [{"type": "field", "Domain": ["geosite:test"], "outboundTag": "direct"}]}},
+            "balancer FallbackTag": {"routing": {"balancers": [{"tag": "g", "selector": ["d"], "FallbackTag": "direct"}]}},
+            "strategy Type": {"routing": {"balancers": [{"tag": "g", "selector": ["d"], "strategy": {"Type": "random"}}]}},
+            "dns Servers": {"dns": {"Servers": []}},
+            "server Tag": {"dns": {"servers": [{"address": "198.51.100.1", "Tag": "dns-upstream"}]}},
+            "observatory SubjectSelector": {"observatory": {"SubjectSelector": ["d"]}},
+        }
+        for name, document in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(config_case_variants((part("05_test.json", document),)))
+        self.assertFalse(config_case_variants(snapshot_xray_config().parts))
+        exact = {"outbounds": outbounds, "routing": {"rules": [{"type": "field", "network": "tcp", "outboundTag": "direct"}]}}
+        self.assertFalse(config_case_variants((part("05_test.json", exact),)))
+        # Неизвестные разделы и поля, которые сводка не читает, вариантами не считаются.
+        self.assertFalse(config_case_variants((part("05_test.json", {"Log": {}, "outbounds": [{"tag": "d", "Settings": {}}]}),)))
 
 
 class EmptyTargetTagTests(unittest.TestCase):

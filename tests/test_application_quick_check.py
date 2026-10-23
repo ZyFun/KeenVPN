@@ -546,6 +546,24 @@ class CheckOutcomeTests(unittest.TestCase):
                                                    balancers=[{"tag": "g", "selector": ["proxy-"]}]),
              ("failed", "rule_target_ambiguous")),
             ("rule without target", xray_config(rule(network="udp")), ("failed", "rule_target_ambiguous")),
+            # Регрессия GitHub review 76-R10: ключ в другом регистре Xray применит, а сводка не читает — вывод недостоверен.
+            ("outbounds spelled with a capital", XrayConfigSet((ConfigDocument("04_test.json", json.dumps(
+                {"Outbounds": [{"tag": "a", "protocol": "freedom"}, {"tag": "a", "protocol": "freedom"}]}).encode()),)),
+             ("unsupported", "case_variant_keys")),
+            ("routing spelled with a capital", XrayConfigSet((ConfigDocument("04_test.json", json.dumps(
+                {"outbounds": OUTBOUNDS, "Routing": {"rules": [rule(outboundTag="TEST_absent")]}}).encode()),)),
+             ("unsupported", "case_variant_keys")),
+            ("rules spelled with a capital", xray_config(extra={"Rules": [rule(outboundTag="TEST_absent")]}),
+             ("unsupported", "case_variant_keys")),
+            ("outbound tag spelled with a capital", xray_config(
+                outbounds=[*OUTBOUNDS, {"Tag": "x-out", "protocol": "freedom"}, {"Tag": "x-out", "protocol": "freedom"}],
+            ), ("unsupported", "case_variant_keys")),
+            ("case variant wins over a definite duplicate", xray_config(
+                rule(OutboundTag="direct-out"), outbounds=[*OUTBOUNDS, {"tag": "block-out", "protocol": "blackhole"}],
+            ), ("unsupported", "case_variant_keys")),
+            ("strategy type spelled with a capital", xray_config(
+                balancers=[{"tag": "g", "selector": ["proxy-"], "strategy": {"Type": "leastPing"}}],
+            ), ("unsupported", "case_variant_keys")),
             # Регрессия GitHub review 76-R09: пустой тег назначения Xray считает отсутствующим и правило не загрузит.
             ("empty outbound target beside an empty-tag outbound", xray_config(
                 rule(outboundTag=""), outbounds=[*OUTBOUNDS, {"tag": "", "protocol": "freedom"}],
@@ -652,6 +670,9 @@ class CheckOutcomeTests(unittest.TestCase):
                 ("02_dns.json", {"dns": {"servers": [{"address": "198.51.100.1", "domains": ["geosite:test-set"]}]}}),
                 ("03_dns.json", {"dns": {"servers": ["198.51.100.2"]}}),
             )), inventory(), ("unsupported", "sections_repeated_across_parts")),
+            # Регрессия GitHub review 76-R10: ссылки в полях другого регистра сводка не собирает.
+            ("reference in a domain field spelled with a capital", xray_config({**geo_rule, "Domain": ["geosite:test-set"]}),
+             inventory(), ("unsupported", "case_variant_keys")),
             ("missing file in the single routing of several parts", xray_config({**geo_rule, "domain": ["geosite:test-set"]}, more_parts=(
                 ("05_more.json", {"log": {}}),
             )), inventory(), ("failed", "missing_files")),

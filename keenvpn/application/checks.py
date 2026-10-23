@@ -22,7 +22,8 @@ from keenvpn.domain.xkeen_config import (
     XKeenFlagStatus, XKeenInitParameters, XKeenList, XKeenListItemKind, port_53_facts,
 )
 from keenvpn.domain.xray_config import (
-    XRAY_TAIL_MARKER, RuleTargetKind, TagRepeat, TagRepeats, XrayConfigSet, summarize_xray_config, tag_repeats,
+    XRAY_TAIL_MARKER, RuleTargetKind, TagRepeat, TagRepeats, XrayConfigSet, config_case_variants,
+    summarize_xray_config, tag_repeats,
 )
 from keenvpn.domain.xray_process import XrayProcessObservation
 
@@ -77,6 +78,8 @@ class CheckReason(StrEnum):
     """
     TAGS_REPEATED_ACROSS_PARTS = "tags_repeated_across_parts"
     """Повтор тега затрагивает объединение частей: Xray переопределяет теги и заменяет `routing`, а сводка это не моделирует."""
+    CASE_VARIANT_KEYS = "case_variant_keys"
+    """Ключ отличается от поля Xray только регистром: Xray его применит, а сводка не читает, поэтому выводы недостоверны."""
     SECTIONS_REPEATED_ACROSS_PARTS = "sections_repeated_across_parts"
     """Раздел `routing` или `dns` есть в нескольких частях: Xray берёт раздел последней, сводка действующий не выбирает."""
     UNRESOLVED_REFERENCES = "unresolved_references"
@@ -221,7 +224,10 @@ def first_source_error(values: Iterable[object]) -> ErrorDetail | None:
 def xray_config_check(config: XrayConfigSet) -> CheckView:
     """Согласованность ссылок и тегов конфигурации Xray по структурной сводке.
 
-    По порядку: повтор непустого тега, который объединение частей не схлопывает,
+    По порядку: ключ, отличающийся от поля Xray только регистром, в объектах,
+    которые читает сводка, — `unsupported` / `case_variant_keys`: Xray его
+    применит, а сводка не читает, поэтому ни один вывод по ней недостоверен;
+    повтор непустого тега, который объединение частей не схлопывает,
     — `failed` / `duplicate_tags`: inbound или outbound, повторённый там, где
     тег ещё новый (Xray такой набор не загрузит), либо балансировщик,
     повторённый в единственном разделе `routing` (Xray возьмёт последний,
@@ -241,6 +247,8 @@ def xray_config_check(config: XrayConfigSet) -> CheckView:
     """
     if type(config) is not XrayConfigSet:
         raise TypeError("Ожидается XrayConfigSet.")
+    if config_case_variants(config.parts):
+        return CheckView(XRAY_CONFIG_CHECK, CheckStatus.UNSUPPORTED, False, CheckReason.CASE_VARIANT_KEYS.value)
     summary = summarize_xray_config(config.parts)
     repeats = tag_repeats(config.parts)
     rules = summary["rules"]

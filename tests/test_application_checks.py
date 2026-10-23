@@ -256,7 +256,8 @@ class BuilderTests(unittest.TestCase):
 
     def test_new_reason_codes_are_stable_identifiers(self):
         expected = {
-            "duplicate_tags", "tags_repeated_across_parts", "sections_repeated_across_parts", "unresolved_references",
+            "duplicate_tags", "tags_repeated_across_parts", "sections_repeated_across_parts", "case_variant_keys",
+            "unresolved_references",
             "rule_target_ambiguous",
             "unsupported_structures", "port_53_in_both_lists", "exclude_list_ignored", "proxy_dns_contradicts_exclusion",
             "flags_unknown",

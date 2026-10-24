@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import unittest
 
@@ -386,6 +387,23 @@ class TerminalIsolationTests(unittest.TestCase):
             (sys.stdin, sys.stdout, sys.stderr, sys.__stdin__, sys.__stdout__, sys.__stderr__), streams,
         )
         self.assertIs(getpass.getpass, read_secret)
+
+    def test_lazy_codecs_are_loaded_before_the_ban(self):
+        # Регрессия приёмки блока сводки: первый `encode("idna")` внутри изоляции импортировал кодек через exec,
+        # и отдельно запущенный тест падал. Нужен свежий интерпретатор: в этом процессе кодек уже мог загрузиться.
+        code = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(ROOT)!r})\n"
+            "assert 'encodings.idna' not in sys.modules\n"
+            "from tests.support.isolation import forbid_external_effects\n"
+            "with forbid_external_effects():\n"
+            "    assert 'пример.рф'.encode('idna') == b'xn--e1afmkfd.xn--p1ai'\n"
+            "    assert b'xn--e1afmkfd.xn--p1ai'.decode('idna') == 'пример.рф'\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-S", "-B", "-c", code], capture_output=True, text=True, timeout=20, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

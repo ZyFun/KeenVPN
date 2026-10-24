@@ -656,6 +656,17 @@ class RuleListPresenterTests(PresenterAssertions):
                 listing = self.listing(replace(view, groups=(group_state, *view.groups[1:])))
                 self.assertIn(f"Назначение по позиции: {label}", listing.entries[0].card)
 
+    def test_label_tables_are_read_only(self):
+        # Регрессия приёмки блока сводки: таблицы подписей списка правил только для чтения, как каталоги application.
+        for table, key in ((METADATA_NOTES, MetadataState.PRESENT), (TARGET_POSITION_LABELS, TargetPositionState.ABSENT)):
+            with self.subTest(key=key.value):
+                with self.assertRaises(TypeError):
+                    table[key] = "другой текст"
+                with self.assertRaises(TypeError):
+                    del table[key]
+        self.assertEqual(set(METADATA_NOTES), set(MetadataState))
+        self.assertEqual(set(TARGET_POSITION_LABELS), set(TargetPositionState) - {TargetPositionState.RESOLVED})
+
 
 class RoutingReasonTests(unittest.TestCase):
     """Регрессия review 71-R04: причины назначения и значений видны рядом с правилом."""

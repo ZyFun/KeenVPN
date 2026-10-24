@@ -14,6 +14,7 @@
 
 from collections.abc import Callable, Iterable, Mapping
 import re
+from types import MappingProxyType
 
 from keenvpn.application.checks import CHECK_STATUS_LABELS, ChecksView, CheckView
 from keenvpn.application.contract import CONTRACT_VERSION, CheckStatus, ErrorDetail, Result
@@ -750,19 +751,21 @@ def present_connections(view: ConnectionsView) -> MenuList:
 
 NAMES_PER_LABEL = 10
 """Сколько названий правил входит в строку группы: название не длиннее 64 символов, строка остаётся в пределе."""
-METADATA_NOTES: dict[MetadataState, str] = {
+METADATA_NOTES: Mapping[MetadataState, str] = MappingProxyType({
     MetadataState.NOT_CONNECTED: "Хранилище метаданных не подключено: названия и идентификаторы правил не показываются.",
     MetadataState.ABSENT: "Метаданные менеджера не записаны: идентификаторы правилам ещё не присвоены.",
     MetadataState.PRESENT: "Метаданные менеджера прочитаны.",
     MetadataState.FAILED: "Названия и идентификаторы недоступны: хранилище метаданных отказало, список показан без них.",
-}
-TARGET_POSITION_LABELS: dict[TargetPositionState, str] = {
+})
+"""Строка состояния метаданных в списке правил. Таблица только для чтения."""
+TARGET_POSITION_LABELS: Mapping[TargetPositionState, str] = MappingProxyType({
     TargetPositionState.AMBIGUOUS: "не определена однозначно: тег повторяется",
     TargetPositionState.UNRESOLVED: "не найдена: тега нет ни в одной части",
     TargetPositionState.ABSENT: "без тега",
     TargetPositionState.UNSUPPORTED: "не определена: заданы оба тега",
     TargetPositionState.UNAVAILABLE: "сводка не описывает это правило",
-}
+})
+"""Подпись позиции назначения группы, когда позиция не разрешена. Таблица только для чтения."""
 
 
 def _target_position(group: RuleGroupIdentityView) -> str:

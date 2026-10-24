@@ -1,5 +1,6 @@
 """Запрет терминала, файлов, сети и процессов на время проверяемого сценария."""
 
+import codecs
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 import io
@@ -25,6 +26,11 @@ _TARGETS = tuple(
     for name in FORBIDDEN_CALLS
     for owner, _, attribute in (name.rpartition("."),)
 )
+# Кодеки IDNA и Punycode стандартная библиотека импортирует при первом использовании,
+# то есть через exec: без прогрева здесь нормализация домена внутри изоляции
+# проходила бы только после другого теста того же процесса.
+for _codec in ("idna", "punycode"):
+    codecs.lookup(_codec)
 
 
 class _TerminalProbe(io.StringIO):

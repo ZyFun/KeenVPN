@@ -10,7 +10,7 @@ from keenvpn.application.contract import (
     check_contract_version, failed, invalid_command, new_operation_id, succeeded,
 )
 from keenvpn.application.ports import XKeenInitSource, XKeenListSource, XKeenSettingsSource, XrayConfigSource
-from keenvpn.application.source_checks import SourceCheck, check_source_model, unavailable
+from keenvpn.application.source_checks import SourceCheck, read_source_checked
 from keenvpn.application.views import view_dict, view_fields
 from keenvpn.domain.config_document import ConfigDocumentError
 from keenvpn.domain.xkeen_config import (
@@ -513,12 +513,9 @@ LIST_NAME_MISMATCH = "xkeen_list_name_mismatch"
 """Причина отказа, когда источник вернул список с другим именем."""
 
 
-def _check_model(source: str, value: object) -> ErrorDetail | None:
-    """Проверить ответ источника; у списка дополнительно сверить имя с запрошенным."""
+def _check_list_name(source: str, value: object) -> ErrorDetail | None:
+    """У проверенного списка сверить имя с запрошенным; остальные ответы уже проверены."""
     check = _CHECKS[source]
-    error = check_source_model(check, value)
-    if error is not None:
-        return error
     if check.model_type is XKeenList and value.name is not _LIST_NAME[source]:
         return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, check.code, check.data_message, reason=LIST_NAME_MISMATCH)
     return None
@@ -599,13 +596,10 @@ class InspectProxyConfigHandler:
         """
         if type(source) is not ProxyConfigSource:
             raise TypeError("Источник задаётся ProxyConfigSource.")
-        read = self._reader(source)
-        try:
-            value = read()
-        except Exception:
-            # Текст и цепочка исключения источника могут содержать пароли, адреса и пути.
-            return unavailable(*_UNAVAILABLE[source.value])
-        error = _check_model(source.value, value)
+        value = read_source_checked(_CHECKS[source.value], self._reader(source), *_UNAVAILABLE[source.value])
+        if isinstance(value, ErrorDetail):
+            return value
+        error = _check_list_name(source.value, value)
         return value if error is None else error
 
     def _reader(self, source: ProxyConfigSource) -> Callable[[], object]:

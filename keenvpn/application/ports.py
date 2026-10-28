@@ -146,6 +146,53 @@ class XrayProcessSource(Protocol):
         ...
 
 
+class RouterReadFailure(StrEnum):
+    """Почему источник чтения роутера не получил данные; повреждённые данные — ошибка домена, не этот отказ."""
+
+    MISSING = "missing"
+    """Файл, каталог или команда чтения отсутствуют."""
+    PERMISSION_DENIED = "permission_denied"
+    """Нет прав на чтение файла, каталога или запуск команды."""
+    UNSAFE = "unsafe"
+    """Символическая ссылка в пути или объект неожиданного типа вместо файла или каталога."""
+    TOO_LARGE = "too_large"
+    """Данные превышают предел размера или числа файлов."""
+    CHANGED = "changed"
+    """Файл или каталог изменились во время чтения."""
+    IO_ERROR = "io_error"
+    """Ошибка ввода-вывода или запуска команды."""
+    TIMEOUT = "timeout"
+    """Команда чтения не завершилась за отведённое время."""
+    EXIT_STATUS = "exit_status"
+    """Команда чтения завершилась с неожиданным кодом возврата."""
+
+
+_ROUTER_READ_MESSAGES = {
+    RouterReadFailure.MISSING: "Данные источника отсутствуют на роутере.",
+    RouterReadFailure.PERMISSION_DENIED: "Нет прав на чтение источника на роутере.",
+    RouterReadFailure.UNSAFE: "Путь источника содержит символическую ссылку или объект неожиданного типа.",
+    RouterReadFailure.TOO_LARGE: "Данные источника превышают допустимый размер.",
+    RouterReadFailure.CHANGED: "Источник изменился во время чтения.",
+    RouterReadFailure.IO_ERROR: "Ошибка ввода-вывода при чтении источника.",
+    RouterReadFailure.TIMEOUT: "Команда чтения источника не завершилась вовремя.",
+    RouterReadFailure.EXIT_STATUS: "Команда чтения источника завершилась с неожиданным кодом.",
+}
+
+
+class RouterReadError(Exception):
+    """Отказ источника чтения роутера с безопасным кодом и заранее заданным текстом.
+
+    Пути, имена файлов, вывод команд и текст системной ошибки в поля
+    и сообщение не попадают. Сценарий передаёт код в `reason` своего отказа.
+    """
+
+    def __init__(self, failure: RouterReadFailure) -> None:
+        if type(failure) is not RouterReadFailure:
+            raise TypeError("Отказ чтения роутера задаётся RouterReadFailure.")
+        self.failure = failure
+        super().__init__(_ROUTER_READ_MESSAGES[failure])
+
+
 class GeoDataSource(Protocol):
     """Доверенный источник членства значений в наборах GeoIP и GeoSite."""
 

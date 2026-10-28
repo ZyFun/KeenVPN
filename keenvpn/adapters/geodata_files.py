@@ -7,7 +7,7 @@ SHA-256. Перечисление каталога, чтение по SSH, `stat
 и версия базы передаются вызывающим кодом, а не выводятся из имени файла.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import hashlib
 from typing import NoReturn
 
@@ -50,6 +50,16 @@ def missing_geo_database_file(name: str, *, source: str | None = None, version: 
     return GeoDatabaseFile(name, False, None, None, source, version)
 
 
+def _inventory(files: Mapping[str, object], describe: Callable[[str, object], GeoDatabaseFile]) -> GeoDatabaseInventory:
+    if not isinstance(files, Mapping) or any(type(name) is not str for name in files):
+        _reject(GeoDataErrorCode.INVENTORY)
+    records = [
+        missing_geo_database_file(name) if value is None else describe(name, value) for name, value in files.items()
+    ]
+    records.extend(missing_geo_database_file(name) for name in STANDARD_FILE_NAMES.values() if name not in files)
+    return GeoDatabaseInventory(tuple(records))
+
+
 def geo_inventory_from_files(files: Mapping[str, bytes | None]) -> GeoDatabaseInventory:
     """Собрать инвентарь из байтов файлов по именам; `None` означает отсутствующий файл.
 
@@ -57,15 +67,19 @@ def geo_inventory_from_files(files: Mapping[str, bytes | None]) -> GeoDatabaseIn
     как отсутствующие. Порядок записей — порядок словаря, затем недостающие
     стандартные имена. Отбор файлов каталога выполняет источник при перечислении.
     """
-    if not isinstance(files, Mapping) or any(type(name) is not str for name in files):
-        _reject(GeoDataErrorCode.INVENTORY)
-    records = []
-    for name, content in files.items():
-        if content is None:
-            records.append(missing_geo_database_file(name))
-        else:
-            records.append(geo_database_file_from_bytes(name, content))
-    for name in STANDARD_FILE_NAMES.values():
-        if name not in files:
-            records.append(missing_geo_database_file(name))
-    return GeoDatabaseInventory(tuple(records))
+    return _inventory(files, geo_database_file_from_bytes)
+
+
+def geo_inventory_from_digests(files: Mapping[str, tuple[int, str] | None]) -> GeoDatabaseInventory:
+    """Собрать инвентарь из пар «размер, SHA-256» по именам; `None` означает отсутствующий файл.
+
+    Пары вычисляет транспорт потоком, не загружая базу в память. Порядок
+    и добавление недостающих стандартных имён — как у `geo_inventory_from_files`.
+    """
+
+    def describe(name: str, value: object) -> GeoDatabaseFile:
+        if type(value) is not tuple or len(value) != 2:
+            _reject(GeoDataErrorCode.FILE)
+        return geo_database_file_from_digest(name, *value)
+
+    return _inventory(files, describe)

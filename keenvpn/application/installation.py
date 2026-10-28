@@ -24,7 +24,7 @@ from keenvpn.application.contract import (
 from keenvpn.application.keenetic_state import InspectKeeneticStateHandler, KeeneticStateView
 from keenvpn.application.ports import GeoDatabaseSource, XrayProcessSource
 from keenvpn.application.proxy_config import InspectProxyConfigHandler, ProxyConfigView
-from keenvpn.application.source_checks import SourceCheck, check_source_model, unavailable
+from keenvpn.application.source_checks import SourceCheck, read_source_checked
 from keenvpn.application.views import view_dict, view_fields
 from keenvpn.domain.geodata import (
     GeoDatabaseInventory, GeoDataError, GeoDataState, assemble_geodata_state, validate_geo_inventory,
@@ -200,13 +200,7 @@ _CHECKS = {
 
 
 def _read_checked(source: str, read: Callable[[], object]) -> object | ErrorDetail:
-    try:
-        value = read()
-    except Exception:
-        # Текст и цепочка исключения источника могут содержать пути и вывод команд.
-        return unavailable(*_UNAVAILABLE[source])
-    error = check_source_model(_CHECKS[source], value)
-    return value if error is None else error
+    return read_source_checked(_CHECKS[source], read, *_UNAVAILABLE[source])
 
 
 def read_xray_process(processes: XrayProcessSource) -> XrayProcessObservation | ErrorDetail:

@@ -26,8 +26,11 @@ from keenvpn.application.routing_rules import MetadataState
 from keenvpn.application.ports import ManagerMetadataStoreError, MetadataStoreFailure
 from keenvpn.application.status_summary import PORT_53_HINT
 from keenvpn.domain.xkeen_config import XKeenListName
+from keenvpn.adapters.router_sources import (
+    GeoDatabaseFiles, XKeenInitFile, XKeenListFiles, XKeenSettingsFile, XrayConfigFiles, XrayProcessObserver,
+)
 from keenvpn.interfaces.cli.composition import (
-    MenuAssembly, MenuSources, assemble_main_menu, assemble_setup_menu, default_sources,
+    MenuAssembly, MenuSources, assemble_main_menu, assemble_setup_menu, default_sources, router_sources,
 )
 from keenvpn.interfaces.cli.menu import (
     MAX_LIST_LINE_LENGTH, REASON_MESSAGES, Menu, MenuAction, MenuError, MenuItem, MenuNavigator, UnavailableReason,
@@ -41,7 +44,14 @@ from tests.support.in_memory import InMemoryManagerMetadataStore
 from tests.support.isolation import forbid_external_effects
 import json
 
+import os
+import shutil
+import subprocess
+import tempfile
+from unittest.mock import patch
+
 from keenvpn.adapters.xray_configs import xray_config_from_files
+from tests.support.router_files import ScriptedCommand, router_file_sources, write_router_snapshot
 from tests.support.snapshot import load_xray_snapshot_files, snapshot_installation_sources
 
 
@@ -241,6 +251,49 @@ class RunLoopTests(unittest.TestCase):
 
 
 class CompositionTests(unittest.TestCase):
+    def test_router_sources_connect_entware_files_and_process_only(self):
+        with forbid_external_effects():
+            sources = router_sources()
+            assembly = assemble_main_menu(sources)
+        self.assertEqual(
+            {name: type(getattr(sources, name)) for name in ("xray", "xkeen_settings", "xkeen_init", "xkeen_lists", "geodata", "process")},
+            {"xray": XrayConfigFiles, "xkeen_settings": XKeenSettingsFile, "xkeen_init": XKeenInitFile,
+             "xkeen_lists": XKeenListFiles, "geodata": GeoDatabaseFiles, "process": XrayProcessObserver},
+        )
+        for name in ("policies", "hotspot", "registrations", "runtime", "metadata", "geo_match"):
+            self.assertIsNone(getattr(sources, name), name)
+        found = states(assembly)
+        for action_id in (
+            "status.summary", "status.quick_check", "connections.list", "routing.list", "routing.explain",
+            "failsafe.port53_check",
+        ):
+            self.assertIsNone(found[action_id], action_id)
+        # Состояние Keenetic и хранилище метаданных в этой версии не подключаются.
+        self.assertIs(found["devices.list"], UnavailableReason.SOURCE_NOT_CONNECTED)
+        self.assertIs(found["settings.storage"], UnavailableReason.SOURCE_NOT_CONNECTED)
+
+    def test_menu_over_router_files_shows_results_without_private_values(self):
+        root = Path(os.path.realpath(tempfile.mkdtemp(prefix="keenvpn-menu-router-")))
+        self.addCleanup(shutil.rmtree, root)
+        write_router_snapshot(root)
+        command = ScriptedCommand()
+        assembly = assemble_main_menu(router_file_sources(root, command))
+        stdout = io.StringIO()
+        with patch.object(subprocess, "Popen", side_effect=AssertionError("Запуск процессов в тесте запрещён.")):
+            code = run_menu(
+                MenuNavigator(assembly.menu), assembly.actions, io.StringIO("1\n1\n7\n0\n6\n7\n0\n0\n"), stdout,
+                assembly.header,
+            )
+        out = stdout.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("  Ядро Xray: работает\n", out)
+        self.assertNotIn(REASON_MESSAGES[UnavailableReason.SOURCE_NOT_CONNECTED], out.split("Устройства и политики")[0])
+        self.assertNotIn(str(root), out)
+        for marker in PRIVATE_MARKERS:
+            self.assertNotIn(marker, out)
+        # Шапка, сводка и быстрая проверка читают процесс; каждый выбор — новое наблюдение.
+        self.assertGreaterEqual(len(command.calls), 3)
+
     def test_default_sources_leave_summary_and_help_available(self):
         assembly = assemble_main_menu(default_sources())
         found = states(assembly)

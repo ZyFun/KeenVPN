@@ -154,6 +154,35 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 ключей; тест-снимок контракта фиксирует набор ключей, категорий и кодов
 шагов вместе с номером версии.
 
+### Отказ чтения роутера
+
+Источник, который читает файлы или запускает команду на роутере, сообщает
+об отказе исключением `RouterReadError` из `keenvpn.application.ports`.
+Его поле `failure` — значение `RouterReadFailure`, текст заранее задан
+для каждого значения; пути, имена файлов, вывод команд и текст системной
+ошибки в исключение не попадают, цепочка `__context__` отсоединена.
+
+| Код | Значение |
+| --- | --- |
+| `missing` | Файл, каталог или команда чтения отсутствуют |
+| `permission_denied` | Нет прав на чтение или запуск команды |
+| `unsafe` | Символическая ссылка в пути или объект неожиданного типа вместо файла или каталога |
+| `too_large` | Данные превышают предел размера или числа файлов |
+| `changed` | Файл или каталог изменились во время чтения |
+| `io_error` | Ошибка ввода-вывода или запуска команды |
+| `timeout` | Команда не завершилась за отведённое время |
+| `exit_status` | Команда завершилась с неожиданным кодом возврата |
+
+Сценарии чтения конфигурации Xray и XKeen, геобаз и процесса вызывают
+источник через `read_source_checked` из `keenvpn.application.source_checks`:
+`RouterReadError` даёт код `*_unavailable` своего источника с кодом отказа
+в `reason`; ошибка домена, поднятая при разборе уже прочитанных данных внутри
+источника (повреждённый JSON, текст не в UTF-8, неверный вывод `pidof`), —
+код `invalid_*` этого источника с кодом домена в `reason`. Любое другое
+исключение — `*_unavailable` без уточнения. Следующий шаг по-прежнему
+выбирается по категории и коду, а не по уточнению. Источники, которые
+бросают такие отказы, описаны в [источниках чтения роутера](router-sources.md).
+
 ### Статусы проверок
 
 Проверки внутри данных результата используют общий словарь `CheckStatus`
@@ -658,8 +687,8 @@ inbound/outbound, балансировщики с `fallbackTag`, число пр
 | Ситуация | Категория и код |
 | --- | --- |
 | Неверный тип команды или версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
-| Источник вызвал исключение | `source_failed` / `xray_config_unavailable`, `xkeen_settings_unavailable`, `xkeen_init_unavailable`, `xkeen_port_exclude_unavailable`, `xkeen_port_proxying_unavailable`, `xkeen_ip_exclude_unavailable` |
-| Источник вернул объект другого типа, повреждённую модель или список с другим именем | `invalid_source_data` / `invalid_xray_config`, `invalid_xkeen_settings`, `invalid_xkeen_init`, `invalid_xkeen_port_exclude`, `invalid_xkeen_port_proxying`, `invalid_xkeen_ip_exclude` |
+| Источник вызвал исключение | `source_failed` / `xray_config_unavailable`, `xkeen_settings_unavailable`, `xkeen_init_unavailable`, `xkeen_port_exclude_unavailable`, `xkeen_port_proxying_unavailable`, `xkeen_ip_exclude_unavailable`; для `RouterReadError` уточнение — [код отказа чтения](#отказ-чтения-роутера), для остальных исключений уточнения нет |
+| Источник вернул объект другого типа, повреждённую модель или список с другим именем либо поднял ошибку домена при разборе прочитанных данных | `invalid_source_data` / `invalid_xray_config`, `invalid_xkeen_settings`, `invalid_xkeen_init`, `invalid_xkeen_port_exclude`, `invalid_xkeen_port_proxying`, `invalid_xkeen_ip_exclude` с кодом домена в уточнении |
 | Модели не удалось собрать | `invalid_source_data` / `proxy_config_inconsistent` |
 
 Поля представления, правила разбора и пример с искусственными источниками
@@ -712,8 +741,8 @@ inbound/outbound, балансировщики с `fallbackTag`, число пр
 | --- | --- |
 | Неверный тип команды или версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
 | Отказ или некорректный ответ источника Keenetic, Xray или XKeen | коды сценариев `inspect_keenetic_state` и `inspect_proxy_config` без изменения |
-| Источник геобаз или процесса вызвал исключение | `source_failed` / `geo_databases_unavailable`, `xray_process_unavailable` |
-| Источник вернул объект другого типа или повреждённую модель | `invalid_source_data` / `invalid_geo_databases`, `invalid_xray_process` |
+| Источник геобаз или процесса вызвал исключение | `source_failed` / `geo_databases_unavailable`, `xray_process_unavailable`; для `RouterReadError` уточнение — [код отказа чтения](#отказ-чтения-роутера) |
+| Источник вернул объект другого типа или повреждённую модель либо поднял ошибку домена при разборе прочитанных данных | `invalid_source_data` / `invalid_geo_databases`, `invalid_xray_process` с кодом домена в уточнении |
 | Инвентарь и ссылки не удалось собрать | `invalid_source_data` / `installation_inconsistent` |
 
 Поля представления, правила разбора ссылок, состояния процесса и пример

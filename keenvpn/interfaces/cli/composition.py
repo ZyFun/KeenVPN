@@ -1,9 +1,12 @@
 """Сборка меню: подключение источников к сценариям application и действиям пунктов.
 
 Единственный модуль интерфейса, которому разрешён импорт конкретных адаптеров.
-Транспорта чтения роутера в этой версии нет, поэтому сборка по умолчанию
-не подключает ни одного источника: пункты, сценарию которых нужен источник,
-показываются недоступными. Объяснение маршрута открывает запрос значения
+Сборка по умолчанию не подключает ни одного источника: пункты, сценарию
+которых нужен источник, показываются недоступными. Чтение роутера включается
+явно (`vpn-menu --read-router`): тогда подключаются источники файлов Xray,
+XKeen и геобаз Entware и наблюдения процесса Xray. Источники состояния
+Keenetic, хранилище метаданных и членство в наборах геобаз в этой версии
+не подключаются ни в одном режиме. Объяснение маршрута открывает запрос значения
 и передаёт введённую строку сценарию без разбора. Сводка состояния и быстрая проверка допускают
 неподключённые источники, поэтому пункты «Сводка» и «Быстрая проверка без изменений» и шапка
 главного меню доступны всегда и показывают такие области и проверки «не проверено». Каждое действие выполняет сценарий
@@ -17,6 +20,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from keenvpn.adapters.router_sources import (
+    GeoDatabaseFiles, XKeenInitFile, XKeenListFiles, XKeenSettingsFile, XrayConfigFiles, XrayProcessObserver,
+)
 from keenvpn.application.contract import OperationIdFactory, new_operation_id
 from keenvpn.application.keenetic_devices import ListKeeneticDevices, ListKeeneticDevicesHandler
 from keenvpn.application.keenetic_state import InspectKeeneticStateHandler
@@ -88,8 +94,21 @@ class MenuAssembly:
 
 
 def default_sources() -> MenuSources:
-    """Источники запуска на этой версии: транспорта чтения роутера нет, ничего не подключено."""
+    """Источники запуска без явного включения чтения роутера: ничего не подключено ни на какой платформе."""
     return MenuSources()
+
+
+def router_sources() -> MenuSources:
+    """Источники запуска с флагом `--read-router`: файлы Entware и процесс Xray проверенной платформы.
+
+    Источники только читают. Состояние Keenetic, хранилище метаданных и
+    членство в наборах геобаз не подключаются: зависящие от них пункты
+    остаются с пометкой, а правила показываются без названий и идентификаторов.
+    """
+    return MenuSources(
+        xray=XrayConfigFiles(), xkeen_settings=XKeenSettingsFile(), xkeen_init=XKeenInitFile(),
+        xkeen_lists=XKeenListFiles(), geodata=GeoDatabaseFiles(), process=XrayProcessObserver(),
+    )
 
 
 def _bindings(

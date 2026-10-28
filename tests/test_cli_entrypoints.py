@@ -10,12 +10,16 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from keenvpn.interfaces.cli.composition import MenuSources
 from keenvpn.interfaces.cli.entrypoints import (
-    EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, FAILURE_MESSAGE, INTERRUPTED_MESSAGE, vpn_menu, vpn_setup,
+    EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, FAILURE_MESSAGE, INTERRUPTED_MESSAGE, READ_ROUTER_FLAG,
+    vpn_menu, vpn_setup,
 )
 from keenvpn.interfaces.cli.terminal import UNAVAILABLE_MARK
 from keenvpn.interfaces.cli.tree import MAIN_MENU_TITLE, SETUP_MENU_TITLE
+from tests.support.in_memory import InMemoryXrayProcessSource
 from tests.support.isolation import forbid_external_effects
+from tests.support.snapshot import synthetic_xray_process
 
 
 class Interrupting:
@@ -55,13 +59,34 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(err, "")
 
     def test_arguments_are_rejected_without_opening_the_menu(self):
+        expected = {"vpn-menu": "vpn-menu принимает только флаг --read-router.\n", "vpn-setup": "vpn-setup не принимает аргументов.\n"}
         for entry, command in ((vpn_menu, "vpn-menu"), (vpn_setup, "vpn-setup")):
-            for argv in (["--help"], ["0"], ["a", "b"], ("x",)):
-                with self.subTest(command=command, argv=argv):
+            for argv in (
+                ["--help"], ["0"], ["a", "b"], ("x",), ["--read-router", "--read-router"], ["--read-router=1"],
+                ["--READ-ROUTER"], ["TEST_secret_argument"], ["--read-router", "TEST_secret_argument"],
+            ):
+                with self.subTest(command=command, argv=argv), \
+                        patch("keenvpn.interfaces.cli.entrypoints.router_sources") as sources:
                     code, out, err = call(entry, argv, "0\n")
                     self.assertEqual(code, EXIT_USAGE)
                     self.assertEqual(out, "")
-                    self.assertEqual(err, f"{command} не принимает аргументов.\n")
+                    self.assertEqual(err, expected[command])
+                    sources.assert_not_called()
+        code, out, err = call(vpn_setup, [READ_ROUTER_FLAG], "0\n")
+        self.assertEqual((code, out, err), (EXIT_USAGE, "", "vpn-setup не принимает аргументов.\n"))
+
+    def test_read_router_flag_connects_router_sources_and_default_does_not(self):
+        connected = MenuSources(process=InMemoryXrayProcessSource(synthetic_xray_process()))
+        with patch("keenvpn.interfaces.cli.entrypoints.router_sources", return_value=connected) as sources:
+            code, out, err = call(vpn_menu, [READ_ROUTER_FLAG], "0\n")
+            self.assertEqual((code, err), (EXIT_OK, ""))
+            sources.assert_called_once_with()
+            self.assertIn("  Ядро Xray: работает\n", out)
+            sources.reset_mock()
+            code, out, err = call(vpn_menu, [], "0\n")
+            self.assertEqual((code, err), (EXIT_OK, ""))
+            sources.assert_not_called()
+            self.assertIn("  Ядро Xray: не проверено\n", out)
 
     def test_keyboard_interrupt_gives_fixed_message_and_130(self):
         for entry in (vpn_menu, vpn_setup):
@@ -111,7 +136,7 @@ class ScriptTests(unittest.TestCase):
         completed = self.run_script("vpn_menu.py", argv=["--version"], text="0\n")
         self.assertEqual(completed.returncode, EXIT_USAGE)
         self.assertEqual(completed.stdout, "")
-        self.assertEqual(completed.stderr, "vpn-menu не принимает аргументов.\n")
+        self.assertEqual(completed.stderr, "vpn-menu принимает только флаг --read-router.\n")
 
 
 if __name__ == "__main__":

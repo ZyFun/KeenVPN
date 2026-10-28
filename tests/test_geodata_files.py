@@ -8,8 +8,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.adapters.geodata_files import (
-    XRAY_ASSET_DIRECTORY, geo_database_file_from_bytes, geo_database_file_from_digest, geo_inventory_from_files,
-    missing_geo_database_file,
+    XRAY_ASSET_DIRECTORY, geo_database_file_from_bytes, geo_database_file_from_digest, geo_inventory_from_digests,
+    geo_inventory_from_files, missing_geo_database_file,
 )
 from keenvpn.domain.geodata import (
     GEOIP_FILE_NAME, GEOSITE_FILE_NAME, GeoDatabaseFile, GeoDatabaseInventory, GeoDataError, GeoDataErrorCode,
@@ -43,6 +43,32 @@ class GeoDataFilesTests(unittest.TestCase):
             [("custom.dat", True), (GEOSITE_FILE_NAME, False), (GEOIP_FILE_NAME, False)],
         )
         self.assertEqual([(item.name, item.present) for item in empty.files], [(GEOIP_FILE_NAME, False), (GEOSITE_FILE_NAME, False)])
+
+    def test_inventory_from_digests_matches_inventory_from_bytes(self):
+        content = b"fixture-geoip-bytes"
+        with forbid_external_effects():
+            inventory = geo_inventory_from_digests({
+                "custom.dat": (len(content), hashlib.sha256(content).hexdigest()), GEOSITE_FILE_NAME: None,
+            })
+            expected = geo_inventory_from_files({"custom.dat": content, GEOSITE_FILE_NAME: None})
+            empty = geo_inventory_from_digests({})
+        self.assertEqual(inventory, expected)
+        self.assertEqual([(item.name, item.present) for item in empty.files], [(GEOIP_FILE_NAME, False), (GEOSITE_FILE_NAME, False)])
+
+    def test_digest_rejections_keep_model_codes_and_detach_context(self):
+        for files, code in (
+            (None, GeoDataErrorCode.INVENTORY), ({1: (1, "ab" * 32)}, GeoDataErrorCode.INVENTORY),
+            ({GEOIP_FILE_NAME: [1, "ab" * 32]}, GeoDataErrorCode.FILE), ({GEOIP_FILE_NAME: (1,)}, GeoDataErrorCode.FILE),
+            ({GEOIP_FILE_NAME: (1, "zz" * 32)}, GeoDataErrorCode.FILE), ({GEOIP_FILE_NAME: (-1, "ab" * 32)}, GeoDataErrorCode.FILE),
+        ):
+            with self.subTest(files=repr(files)[:40]):
+                try:
+                    raise ValueError("fixture-private-context")
+                except ValueError:
+                    with self.assertRaises(GeoDataError) as caught:
+                        geo_inventory_from_digests(files)
+                self.assertIs(caught.exception.code, code)
+                self.assertIsNone(caught.exception.__context__)
 
     def test_rejections_keep_model_codes_and_detach_context(self):
         for files in (None, [(GEOIP_FILE_NAME, b"")], {1: b""}):

@@ -9,7 +9,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application.contract import ErrorCategory, ErrorDetail
-from keenvpn.application.source_checks import SourceCheck, check_source_model, unavailable
+from keenvpn.application.ports import RouterReadError, RouterReadFailure
+from keenvpn.application.source_checks import SourceCheck, check_source_model, read_source_checked, unavailable
 
 
 class _Code(StrEnum):
@@ -47,6 +48,11 @@ class UnavailableTests(unittest.TestCase):
             detail, ErrorDetail(ErrorCategory.SOURCE_FAILED, "test_unavailable", "Не удалось прочитать тестовый источник."),
         )
         self.assertIsNone(detail.reason)
+
+    def test_keeps_a_safe_reason(self):
+        detail = unavailable("test_unavailable", "Не удалось прочитать тестовый источник.", reason="missing")
+        self.assertEqual(detail.reason, "missing")
+        self.assertIs(detail.category, ErrorCategory.SOURCE_FAILED)
 
 
 class SourceCheckTests(unittest.TestCase):
@@ -103,6 +109,74 @@ class CheckSourceModelTests(unittest.TestCase):
         detail = check_source_model(_check(validate=reject), _Model(1))
         self.assertEqual(detail.message, "Неподдерживаемый формат.")
         self.assertIsNone(detail.reason)
+
+
+class ReadSourceCheckedTests(unittest.TestCase):
+    def read(self, outcome, check=None):
+        calls = []
+
+        def source() -> object:
+            calls.append(1)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        detail = read_source_checked(check or _check(), source, "test_unavailable", "Не удалось прочитать.")
+        self.assertEqual(calls, [1])
+        return detail
+
+    def test_valid_model_is_returned_after_one_read(self):
+        self.assertEqual(self.read(_Model(1)), _Model(1))
+
+    def test_router_read_failure_keeps_its_code_as_reason(self):
+        for failure in RouterReadFailure:
+            with self.subTest(failure=failure):
+                self.assertEqual(self.read(RouterReadError(failure)), ErrorDetail(
+                    ErrorCategory.SOURCE_FAILED, "test_unavailable", "Не удалось прочитать.", reason=failure.value,
+                ))
+
+    def test_router_read_error_with_replaced_failure_has_no_reason(self):
+        error = RouterReadError(RouterReadFailure.MISSING)
+        error.failure = "TEST_SECRET_PATH"
+        detail = self.read(error)
+        self.assertEqual(detail, ErrorDetail(ErrorCategory.SOURCE_FAILED, "test_unavailable", "Не удалось прочитать."))
+
+    def test_domain_error_while_reading_is_invalid_source_data_with_its_code(self):
+        self.assertEqual(self.read(_DomainError(_Code.BROKEN)), ErrorDetail(
+            ErrorCategory.INVALID_SOURCE_DATA, "invalid_test_model", "Некорректные данные.", reason="model_broken",
+        ))
+
+    def test_other_error_is_unavailable_without_its_text(self):
+        detail = self.read(OSError("TEST_SECRET_PATH /opt/etc/TEST_secret"))
+        self.assertEqual(detail, ErrorDetail(ErrorCategory.SOURCE_FAILED, "test_unavailable", "Не удалось прочитать."))
+        self.assertNotIn("TEST_SECRET", repr(detail) + str(detail.to_dict()))
+
+    def test_invalid_model_is_checked_after_reading(self):
+        self.assertEqual(self.read(_Model(-1)), ErrorDetail(
+            ErrorCategory.INVALID_SOURCE_DATA, "invalid_test_model", "Некорректные данные.", reason="model_broken",
+        ))
+        self.assertEqual(self.read("модель").message, "Неподдерживаемый формат.")
+
+    def test_interruptions_are_not_converted(self):
+        for error in (KeyboardInterrupt(), SystemExit()):
+            with self.subTest(error=type(error).__name__):
+                with self.assertRaises(type(error)):
+                    self.read(error)
+
+
+class RouterReadErrorTests(unittest.TestCase):
+    def test_has_fixed_text_per_failure_and_requires_the_enum(self):
+        messages = {str(RouterReadError(failure)) for failure in RouterReadFailure}
+        self.assertEqual(len(messages), len(RouterReadFailure))
+        for failure in RouterReadFailure:
+            error = RouterReadError(failure)
+            self.assertIs(error.failure, failure)
+            self.assertEqual(error.args, (str(error),))
+            self.assertNotIn("/", str(error))
+        for value in ("missing", None, 1):
+            with self.subTest(value=value):
+                with self.assertRaises(TypeError):
+                    RouterReadError(value)
 
 
 if __name__ == "__main__":

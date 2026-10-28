@@ -1,13 +1,18 @@
 """Точки входа `vpn-menu` и `vpn-setup` с внедряемыми потоками.
 
 Функции возвращают код завершения; потоки и аргументы процесса передаёт
-тонкий скрипт. Прерывание и непредвиденная ошибка завершаются фиксированным
-текстом без traceback: в нём могли бы оказаться пути и содержимое источников.
+тонкий скрипт. `vpn-menu` принимает единственный флаг `--read-router`,
+который явно включает чтение роутера; `vpn-setup` аргументов не принимает.
+Неверные аргументы не повторяются в сообщении. Прерывание и непредвиденная
+ошибка завершаются фиксированным текстом без traceback: в нём могли бы
+оказаться пути и содержимое источников.
 """
 
 from collections.abc import Callable, Sequence
 
-from keenvpn.interfaces.cli.composition import MenuAssembly, assemble_main_menu, assemble_setup_menu, default_sources
+from keenvpn.interfaces.cli.composition import (
+    MenuAssembly, assemble_main_menu, assemble_setup_menu, default_sources, router_sources,
+)
 from keenvpn.interfaces.cli.menu import MenuNavigator
 from keenvpn.interfaces.cli.terminal import TextInput, TextOutput, run_menu
 
@@ -20,15 +25,13 @@ EXIT_INTERRUPTED = 130
 
 INTERRUPTED_MESSAGE = "Прервано."
 FAILURE_MESSAGE = "Меню завершилось с внутренней ошибкой; настройки не менялись."
+READ_ROUTER_FLAG = "--read-router"
+"""Флаг `vpn-menu`: подключить источники чтения роутера. Без него ничего не подключается."""
 
 Assembler = Callable[[], MenuAssembly]
 
 
-def _run(command: str, assemble: Assembler, argv: Sequence[str], stdin: TextInput, stdout: TextOutput,
-         stderr: TextOutput) -> int:
-    if len(argv):
-        stderr.write(f"{command} не принимает аргументов.\n")
-        return EXIT_USAGE
+def _run(assemble: Assembler, stdin: TextInput, stdout: TextOutput, stderr: TextOutput) -> int:
     try:
         assembly = assemble()
         return run_menu(MenuNavigator(assembly.menu), assembly.actions, stdin, stdout, assembly.header)
@@ -42,10 +45,21 @@ def _run(command: str, assemble: Assembler, argv: Sequence[str], stdin: TextInpu
 
 
 def vpn_menu(argv: Sequence[str], stdin: TextInput, stdout: TextOutput, stderr: TextOutput) -> int:
-    """Открыть главное меню и вернуть код завершения."""
-    return _run("vpn-menu", lambda: assemble_main_menu(default_sources()), argv, stdin, stdout, stderr)
+    """Открыть главное меню и вернуть код завершения; `--read-router` подключает источники чтения роутера."""
+    arguments = tuple(argv)
+    if arguments == (READ_ROUTER_FLAG,):
+        sources = router_sources
+    elif not arguments:
+        sources = default_sources
+    else:
+        stderr.write(f"vpn-menu принимает только флаг {READ_ROUTER_FLAG}.\n")
+        return EXIT_USAGE
+    return _run(lambda: assemble_main_menu(sources()), stdin, stdout, stderr)
 
 
 def vpn_setup(argv: Sequence[str], stdin: TextInput, stdout: TextOutput, stderr: TextOutput) -> int:
     """Открыть меню мастера и вернуть код завершения."""
-    return _run("vpn-setup", lambda: assemble_setup_menu(default_sources()), argv, stdin, stdout, stderr)
+    if len(argv):
+        stderr.write("vpn-setup не принимает аргументов.\n")
+        return EXIT_USAGE
+    return _run(lambda: assemble_setup_menu(default_sources()), stdin, stdout, stderr)

@@ -12,8 +12,7 @@
 раздела по UUID и свободное место заранее этот адаптер не проверяет.
 """
 
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 import errno
 import fcntl
 import os
@@ -22,6 +21,7 @@ import re
 import stat
 from typing import NoReturn
 
+from keenvpn.adapters.entware_files import DIRECTORY_FLAGS, PathFailure, classify_open_failure, walk_directory
 from keenvpn.adapters.xkeen_files import XKEEN_LIST_DIRECTORY
 from keenvpn.adapters.xray_configs import XRAY_CONFIG_DIRECTORY
 from keenvpn.application.ports import ManagerMetadataStoreError, MetadataStoreFailure, MetadataStoreReason
@@ -38,7 +38,6 @@ PROTECTED_DIRECTORIES = (posixpath.dirname(XRAY_CONFIG_DIRECTORY), XKEEN_LIST_DI
 
 _TEMPORARY_PREFIX = "." + METADATA_FILE_NAME + ".tmp-"
 _TEMPORARY = re.compile(re.escape(_TEMPORARY_PREFIX) + r"[0-9a-f]{16}")
-_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _FILE_MODE = 0o600
 _DIRECTORY_MODE = 0o700
 _NO_SPACE = frozenset(code for code in (errno.ENOSPC, getattr(errno, "EDQUOT", None)) if code is not None)
@@ -64,52 +63,42 @@ def _write_reason(error: OSError) -> MetadataStoreReason:
     return MetadataStoreReason.IO_ERROR
 
 
-def _open_failed(
-    parent: int, name: str, error: OSError, *, directory: bool,
-    missing_failure: MetadataStoreFailure = MetadataStoreFailure.UNAVAILABLE,
-) -> NoReturn:
-    """Объяснить отказ открытия по типу объекта без перехода по ссылке.
+_UNSAFE_PATHS = {
+    PathFailure.SYMLINK: MetadataStoreReason.SYMLINK,
+    PathFailure.NOT_DIRECTORY: MetadataStoreReason.NOT_DIRECTORY,
+    PathFailure.NOT_REGULAR_FILE: MetadataStoreReason.NOT_REGULAR_FILE,
+}
 
-    Коды ошибок `O_NOFOLLOW` для ссылки различаются между системами,
-    поэтому тип определяется отдельным `lstat`. При подтверждении файла
-    его отсутствие означает конфликт ревизии, а не недоступность хранилища.
+
+def _path_failed(
+    kind: PathFailure, missing_failure: MetadataStoreFailure = MetadataStoreFailure.UNAVAILABLE,
+) -> NoReturn:
+    """Перевести отказ компонента пути в отказ хранилища.
+
+    При подтверждении файла его отсутствие означает конфликт ревизии,
+    а не недоступность хранилища.
     """
-    try:
-        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
-    except FileNotFoundError:
+    if kind is PathFailure.MISSING:
         reason = MetadataStoreReason.MISSING if missing_failure is MetadataStoreFailure.UNAVAILABLE else None
         _raise(missing_failure, reason)
-    except OSError:
-        _raise(MetadataStoreFailure.UNAVAILABLE, MetadataStoreReason.IO_ERROR)
-    if stat.S_ISLNK(info.st_mode):
-        _raise(MetadataStoreFailure.UNSAFE, MetadataStoreReason.SYMLINK)
-    if directory and not stat.S_ISDIR(info.st_mode):
-        _raise(MetadataStoreFailure.UNSAFE, MetadataStoreReason.NOT_DIRECTORY)
-    if not directory and not stat.S_ISREG(info.st_mode):
-        _raise(MetadataStoreFailure.UNSAFE, MetadataStoreReason.NOT_REGULAR_FILE)
-    if error.errno in (errno.EACCES, errno.EPERM):
+    if kind in _UNSAFE_PATHS:
+        _raise(MetadataStoreFailure.UNSAFE, _UNSAFE_PATHS[kind])
+    if kind is PathFailure.PERMISSION_DENIED:
         _raise(MetadataStoreFailure.UNAVAILABLE, MetadataStoreReason.PERMISSION_DENIED)
     _raise(MetadataStoreFailure.UNAVAILABLE, MetadataStoreReason.IO_ERROR)
 
 
-@contextmanager
-def _walk(path: str) -> Iterator[int]:
+def _open_failed(
+    parent: int, name: str, error: OSError, *, directory: bool,
+    missing_failure: MetadataStoreFailure = MetadataStoreFailure.UNAVAILABLE,
+) -> NoReturn:
+    """Объяснить отказ открытия по типу объекта без перехода по ссылке."""
+    _path_failed(classify_open_failure(parent, name, error, directory=directory), missing_failure)
+
+
+def _walk(path: str) -> AbstractContextManager[int]:
     """Открыть каталог по абсолютному пути, не проходя по ссылкам ни в одном компоненте."""
-    try:
-        descriptor = os.open("/", _DIRECTORY_FLAGS)
-    except OSError:
-        _raise(MetadataStoreFailure.UNAVAILABLE, MetadataStoreReason.IO_ERROR)
-    try:
-        for name in (part for part in path.split("/") if part):
-            try:
-                child = os.open(name, _DIRECTORY_FLAGS, dir_fd=descriptor)
-            except OSError as error:
-                _open_failed(descriptor, name, error, directory=True)
-            os.close(descriptor)
-            descriptor = child
-        yield descriptor
-    finally:
-        os.close(descriptor)
+    return walk_directory(path, _path_failed)
 
 
 class ManagerMetadataFiles:
@@ -194,7 +183,7 @@ class ManagerMetadataFiles:
             except OSError as error:
                 _raise(MetadataStoreFailure.WRITE_FAILED, _write_reason(error))
         try:
-            descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
+            descriptor = os.open(name, DIRECTORY_FLAGS, dir_fd=parent)
         except FileNotFoundError:
             if not create:
                 return None

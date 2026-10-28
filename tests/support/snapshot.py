@@ -136,14 +136,19 @@ def snapshot_xray_config() -> XrayConfigSet:
     return xray_config_from_files(load_xray_snapshot_files())
 
 
+def snapshot_xkeen_settings_bytes() -> bytes:
+    """Сериализация настроек XKeen снимка: фикстура хранит разобранный объект, а не файл роутера."""
+    settings = load_xkeen_snapshot()["settings"]
+    return (json.dumps(settings, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
 def snapshot_xkeen_settings() -> XKeenSettings:
     """Настройки XKeen из проекции снимка.
 
     Фикстура хранит разобранный объект, поэтому размер и SHA-256 относятся
     к его сериализации, а не к файлу роутера.
     """
-    settings = load_xkeen_snapshot()["settings"]
-    return xkeen_settings_from_bytes((json.dumps(settings, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+    return xkeen_settings_from_bytes(snapshot_xkeen_settings_bytes())
 
 
 def snapshot_xkeen_init() -> XKeenInitParameters:
@@ -182,9 +187,7 @@ def snapshot_proxy_sources() -> SnapshotProxySources:
         lists.set_response(name, xkeen_list_from_bytes(name, xkeen["lists"][name.value].encode("utf-8")))
     return SnapshotProxySources(
         InMemoryXrayConfigSource(xray_config_from_files(load_xray_snapshot_files())),
-        InMemoryXKeenSettingsSource(xkeen_settings_from_bytes(
-            (json.dumps(xkeen["settings"], indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
-        )),
+        InMemoryXKeenSettingsSource(xkeen_settings_from_bytes(snapshot_xkeen_settings_bytes())),
         InMemoryXKeenInitSource(xkeen_init_from_flags(xkeen["init_flags"])),
         lists,
     )

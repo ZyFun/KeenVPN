@@ -10,11 +10,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application.contract import CONTRACT_VERSION, ErrorCategory, ErrorDetail
+from keenvpn.application.ports import RouterReadError, RouterReadFailure
 from keenvpn.application.proxy_config import (
     LIST_NAME_MISMATCH, InspectProxyConfig, InspectProxyConfigHandler, ProxyConfigSource, ProxyConfigView,
     XrayPositionView,
 )
-from keenvpn.domain.config_document import ConfigDocument
+from keenvpn.domain.config_document import ConfigDocument, ConfigDocumentError, ConfigDocumentErrorCode
 from keenvpn.domain.xkeen_config import (
     Port53Facts, XKeenConfig, XKeenConfigError, XKeenConfigErrorCode, XKeenFlag, XKeenInitAssignment,
     XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings, parse_xkeen_init,
@@ -298,6 +299,35 @@ class InspectProxyConfigTests(unittest.TestCase):
                 result = handler_for(sources).execute(InspectProxyConfig())
                 self.assert_failed(result, ErrorCategory.SOURCE_FAILED, UNAVAILABLE_CODES[name])
                 self.assertEqual(sources.calls, calls_after_failure(index))
+
+    def test_domain_error_while_reading_is_invalid_source_data_with_reason(self):
+        # Реальный источник разбирает прочитанные байты внутри вызова: повреждённый файл
+        # должен отличаться от недоступного.
+        errors = {
+            "xray": ConfigDocumentError(ConfigDocumentErrorCode.JSON),
+            "settings": ConfigDocumentError(ConfigDocumentErrorCode.JSON),
+            "init": XKeenConfigError(XKeenConfigErrorCode.INIT),
+            "port_exclude": XKeenConfigError(XKeenConfigErrorCode.LIST),
+            "port_proxying": XKeenConfigError(XKeenConfigErrorCode.LIST),
+            "ip_exclude": XKeenConfigError(XKeenConfigErrorCode.LIST),
+        }
+        for index, name in enumerate(SOURCES):
+            with self.subTest(source=name):
+                sources = snapshot_proxy_sources()
+                configure(sources, name, errors[name])
+                result = handler_for(sources, operation_ids=lambda: "op-1").execute(InspectProxyConfig())
+                self.assert_failed(result, ErrorCategory.INVALID_SOURCE_DATA, INVALID_CODES[name], errors[name].code.value)
+                self.assertEqual(sources.calls, calls_after_failure(index))
+
+    def test_router_read_failure_reason_is_kept_with_unavailable_code(self):
+        for index, name in enumerate(SOURCES):
+            for failure in RouterReadFailure:
+                with self.subTest(source=name, failure=failure):
+                    sources = snapshot_proxy_sources()
+                    configure(sources, name, RouterReadError(failure))
+                    result = handler_for(sources, operation_ids=lambda: "op-1").execute(InspectProxyConfig())
+                    self.assert_failed(result, ErrorCategory.SOURCE_FAILED, UNAVAILABLE_CODES[name], failure.value)
+                    self.assertEqual(sources.calls, calls_after_failure(index))
 
     def test_invalid_source_data_has_distinct_codes_and_domain_reasons(self):
         class DerivedConfig(XrayConfigSet):

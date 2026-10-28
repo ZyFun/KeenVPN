@@ -13,6 +13,7 @@ from keenvpn.application.checks import GEODATA_REFERENCES_CHECK, VPN_REACHABLE_C
 from keenvpn.application.contract import CONTRACT_VERSION, CheckStatus, ErrorCategory
 from keenvpn.application.installation import InspectInstallation, InspectInstallationHandler, InstallationView
 from keenvpn.application.keenetic_state import InspectKeeneticState, InspectKeeneticStateHandler
+from keenvpn.application.ports import RouterReadError, RouterReadFailure
 from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler
 from keenvpn.domain.config_document import ConfigDocument
 from keenvpn.domain.geodata import (
@@ -27,7 +28,7 @@ from keenvpn.domain.keenetic_policy import KeeneticPolicy, KeeneticPolicySet
 from keenvpn.domain.routing import GeoDatabase
 from keenvpn.domain.xkeen_config import XKeenConfig, XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings
 from keenvpn.domain.xray_config import XrayConfigSet
-from keenvpn.domain.xray_process import XrayProcessObservation
+from keenvpn.domain.xray_process import XrayProcessError, XrayProcessErrorCode, XrayProcessObservation
 from tests.support.in_memory import (
     AdapterSetupError, InMemoryGeoDatabaseSource, InMemoryXrayProcessSource, UnconfiguredResponseError,
 )
@@ -226,6 +227,30 @@ class InspectInstallationTests(unittest.TestCase):
                 result = handler_for(sources).execute(InspectInstallation())
                 self.assert_failed(result, ErrorCategory.SOURCE_FAILED, UNAVAILABLE_CODES[name])
                 self.assertEqual(sources.calls, calls_after_failure(index))
+
+    def test_domain_error_while_reading_geodata_or_process_is_invalid_with_reason(self):
+        # Реальный источник разбирает наблюдение внутри вызова: неверный вывод `pidof`
+        # и некорректный инвентарь — данные источника, а не его недоступность.
+        for name, error in (
+            ("geodata", GeoDataError(GeoDataErrorCode.INVENTORY)),
+            ("process", XrayProcessError(XrayProcessErrorCode.OBSERVATION)),
+        ):
+            with self.subTest(source=name):
+                sources = snapshot_installation_sources()
+                configure(sources, name, error)
+                result = handler_for(sources, operation_ids=lambda: "op-1").execute(InspectInstallation())
+                self.assert_failed(result, ErrorCategory.INVALID_SOURCE_DATA, INVALID_CODES[name], error.code.value)
+                self.assertEqual(sources.calls, calls_after_failure(SOURCES.index(name)))
+
+    def test_router_read_failure_reason_is_kept_for_geodata_and_process(self):
+        for name in ("geodata", "process"):
+            for failure in RouterReadFailure:
+                with self.subTest(source=name, failure=failure):
+                    sources = snapshot_installation_sources()
+                    configure(sources, name, RouterReadError(failure))
+                    result = handler_for(sources, operation_ids=lambda: "op-1").execute(InspectInstallation())
+                    self.assert_failed(result, ErrorCategory.SOURCE_FAILED, UNAVAILABLE_CODES[name], failure.value)
+                    self.assertEqual(sources.calls, calls_after_failure(SOURCES.index(name)))
 
     def test_invalid_source_data_keeps_area_codes_and_domain_reasons(self):
         class DerivedInventory(GeoDatabaseInventory):

@@ -10,11 +10,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from keenvpn.application.contract import ErrorCategory, ErrorDetail
+from keenvpn.application.ports import RouterReadError, RouterReadFailure
 
 
-def unavailable(code: str, message: str) -> ErrorDetail:
-    """Описать отказ источника категорией `source_failed` с фиксированным текстом."""
-    return ErrorDetail(ErrorCategory.SOURCE_FAILED, code, message)
+def unavailable(code: str, message: str, *, reason: str | None = None) -> ErrorDetail:
+    """Описать отказ источника категорией `source_failed` с фиксированным текстом и безопасной причиной."""
+    return ErrorDetail(ErrorCategory.SOURCE_FAILED, code, message, reason=reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,3 +65,25 @@ def check_source_model(check: SourceCheck, value: object) -> ErrorDetail | None:
     except Exception:
         return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, check.code, check.type_message)
     return None
+
+
+def read_source_checked(check: SourceCheck, read: Callable[[], object], code: str, message: str) -> object | ErrorDetail:
+    """Вызвать источник один раз и проверить ответ; отказ — ErrorDetail с кодами этого источника.
+
+    `RouterReadError` даёт `code` с кодом отказа чтения в `reason`. Ошибка домена,
+    поднятая при разборе уже прочитанных данных внутри источника, — `check.code`
+    с её кодом в `reason`: повреждённый файл отличается от недоступного. Любое
+    другое исключение — `code` без причины: его текст и цепочка могут содержать
+    пути, пароли и вывод команд. Прерывания не перехватываются.
+    """
+    try:
+        value = read()
+    except RouterReadError as error:
+        failure = error.failure
+        return unavailable(code, message, reason=failure.value if type(failure) is RouterReadFailure else None)
+    except check.domain_errors as error:
+        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, check.code, check.data_message, reason=error.code.value)
+    except Exception:
+        return unavailable(code, message)
+    error = check_source_model(check, value)
+    return value if error is None else error

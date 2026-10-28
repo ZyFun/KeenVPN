@@ -1,4 +1,4 @@
-"""Источники чтения роутера поверх файлов Entware и `pidof`: модели, отказы и коды сценариев."""
+"""Источники чтения роутера поверх файлов Entware, `pidof` и локального RCI: модели, отказы и коды сценариев."""
 
 import errno
 import json
@@ -16,29 +16,44 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.adapters import router_sources
 from keenvpn.adapters.geodata_files import geo_inventory_from_files
+from keenvpn.adapters.keenetic_rci_http import RciResource
 from keenvpn.adapters.router_sources import (
     GEO_DATABASE_COUNT_LIMIT, PIDOF_OUTPUT_LIMIT, PIDOF_PATH, PIDOF_TIMEOUT, XKEEN_INIT_LIMIT, XKEEN_LIST_LIMIT,
     XKEEN_SETTINGS_LIMIT, XRAY_PART_COUNT_LIMIT, XRAY_PART_LIMIT, XRAY_PARTS_TOTAL_LIMIT, GeoDatabaseFiles,
-    XKeenInitFile, XKeenListFiles, XKeenSettingsFile, XrayConfigFiles, XrayProcessObserver, run_read_command,
+    KeeneticHotspotRuntimeRci, KeeneticHotspotSettingsRci, KeeneticPoliciesRci, KeeneticRegistrationsRci, XKeenInitFile,
+    XKeenListFiles, XKeenSettingsFile, XrayConfigFiles, XrayProcessObserver, run_read_command,
 )
 from keenvpn.adapters.xkeen_files import xkeen_init_from_bytes
 from keenvpn.application.contract import ErrorCategory
 from keenvpn.application.installation import read_geo_databases, read_xray_process
+from keenvpn.application.keenetic_policies import ResolveKeeneticPolicy, ResolveKeeneticPolicyHandler
+from keenvpn.application.keenetic_state import InspectKeeneticState, InspectKeeneticStateHandler
 from keenvpn.application.ports import RouterReadError, RouterReadFailure
 from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler
 from keenvpn.domain.config_document import ConfigDocumentError
 from keenvpn.domain.xkeen_config import XKeenConfigError, XKeenListName
 from keenvpn.domain.xray_process import XrayProcessError, XrayProcessObservation
 from tests.support.isolation import forbid_external_effects
+from tests.support.privacy import reachable
+from tests.support.rci import RciReply, ScriptedRci, rci_sources
 from tests.support.router_files import (
     GEODATA, INIT, READY, SYNTHETIC_GEOIP, SYNTHETIC_INIT, XKEEN, XRAY_CONFIGS, ScriptedCommand, write_router_snapshot,
 )
-from tests.support.snapshot import snapshot_xkeen_list, snapshot_xkeen_settings, snapshot_xray_config
+from tests.support.snapshot import (
+    snapshot_hotspot_runtime, snapshot_hotspot_settings, snapshot_keenetic_sources, snapshot_policies,
+    snapshot_registrations, snapshot_xkeen_list, snapshot_xkeen_settings, snapshot_xray_config,
+)
 
 
 Failure = RouterReadFailure
 # Имена частей Xray и списков XKeen показываются представлением по контракту; пути и секреты — нет.
 PRIVATE_MARKERS = ("fixture-password", "/fixture/ws", "192.0.2.", "2001:db8", "/opt/etc", "S05xkeen", "tmp/.xkeen")
+# MAC, имена, описания политик и интерфейсов снимка Keenetic, адрес и пути RCI.
+RCI_PRIVATE_MARKERS = (
+    "02:00:00:54", "device-", "192.0.2.", "2001:db8", "fixture-policy", "fixture-interface", "fixture-private",
+    "127.0.0.1", "/rci/", "Command::",
+)
+RCI_PATHS = tuple(resource.path for resource in RciResource)
 
 
 class RouterFilesCase(unittest.TestCase):
@@ -298,6 +313,115 @@ class ScenarioTests(RouterFilesCase):
             ErrorCategory.INVALID_SOURCE_DATA, "invalid_xray_process", "invalid_xray_process_observation",
         ))
         self.assert_private(error)
+
+
+class RciSourcesTests(unittest.TestCase):
+    def assert_private(self, value):
+        text = repr(value) + str(value)
+        if hasattr(value, "to_dict"):
+            text += json.dumps(value.to_dict(), ensure_ascii=False)
+        for marker in RCI_PRIVATE_MARKERS:
+            self.assertNotIn(marker, text)
+        self.assertFalse(any(isinstance(item, BaseException) for item in reachable(value)))
+
+    def state_handler(self, script):
+        sources = rci_sources(script)
+        return InspectKeeneticStateHandler(
+            sources["policies"], sources["hotspot"], sources["registrations"], sources["runtime"],
+            operation_ids=lambda: "op-1",
+        )
+
+    def test_sources_read_snapshot_responses_into_the_same_models(self):
+        script = ScriptedRci()
+        sources = rci_sources(script)
+        self.assertEqual(sources["policies"].current_policies(), snapshot_policies())
+        self.assertEqual(sources["hotspot"].current_hotspot_settings(), snapshot_hotspot_settings())
+        self.assertEqual(sources["registrations"].current_registrations(), snapshot_registrations())
+        self.assertEqual(sources["runtime"].current_hotspot_runtime(), snapshot_hotspot_runtime())
+        # Один запрос на вызов порта, каждый по своему пути.
+        self.assertEqual(script.paths, RCI_PATHS)
+
+    def test_constructing_sources_touches_nothing(self):
+        with forbid_external_effects():
+            for source_type in (
+                KeeneticPoliciesRci, KeeneticHotspotSettingsRci, KeeneticRegistrationsRci, KeeneticHotspotRuntimeRci,
+            ):
+                source_type()
+
+    def test_wrong_reader_or_its_result_is_a_programming_error(self):
+        for source_type in (
+            KeeneticPoliciesRci, KeeneticHotspotSettingsRci, KeeneticRegistrationsRci, KeeneticHotspotRuntimeRci,
+        ):
+            with self.subTest(source=source_type.__name__), self.assertRaises(TypeError):
+                source_type(read=None)
+
+        class DerivedDict(dict):
+            pass
+
+        for result in ([], None, DerivedDict()):
+            with self.subTest(result=type(result).__name__), self.assertRaises(TypeError):
+                KeeneticPoliciesRci(read=lambda _resource, result=result: result).current_policies()
+
+    def test_keenetic_state_over_rci_matches_in_memory_sources(self):
+        script = ScriptedRci()
+        result = self.state_handler(script).execute(InspectKeeneticState())
+        memory = snapshot_keenetic_sources()
+        expected = InspectKeeneticStateHandler(
+            memory.policies, memory.hotspot, memory.registrations, memory.runtime, operation_ids=lambda: "op-1",
+        ).execute(InspectKeeneticState())
+        self.assertTrue(result.succeeded)
+        self.assertEqual(result.to_dict(), expected.to_dict())
+        self.assertEqual(script.paths, RCI_PATHS)
+        self.assert_private(result)
+
+    def test_scenario_codes_for_rci_failures_and_corrupt_data(self):
+        nested_error = json.dumps({"status": [{"status": "error", "message": "fixture-private"}]}).encode("utf-8")
+        policies, hotspot, registrations, runtime = RCI_PATHS
+        cases = (
+            ({}, {"connect": ConnectionRefusedError(errno.ECONNREFUSED, "fixture-private")},
+             ErrorCategory.SOURCE_FAILED, "keenetic_policies_unavailable", "connection_failed", 1),
+            ({}, {"getresponse": TimeoutError("fixture-private")},
+             ErrorCategory.SOURCE_FAILED, "keenetic_policies_unavailable", "timeout", 1),
+            ({hotspot: RciReply(body=b"{")},
+             {}, ErrorCategory.SOURCE_FAILED, "keenetic_hotspot_unavailable", "invalid_response", 2),
+            ({registrations: RciReply(body=nested_error)},
+             {}, ErrorCategory.SOURCE_FAILED, "keenetic_registrations_unavailable", "rci_error", 3),
+            ({runtime: RciReply(status=500)},
+             {}, ErrorCategory.SOURCE_FAILED, "keenetic_runtime_unavailable", "http_status", 4),
+            ({runtime: RciReply(body=b"{}", length=64 * 1024 * 1024)},
+             {}, ErrorCategory.SOURCE_FAILED, "keenetic_runtime_unavailable", "too_large", 4),
+            ({policies: RciReply(body=b'{"Policy10": "fixture-policy-1"}')},
+             {}, ErrorCategory.INVALID_SOURCE_DATA, "invalid_keenetic_policies", "invalid_policies", 1),
+            ({hotspot: RciReply(body=b'{"host": "fixture-private"}')},
+             {}, ErrorCategory.INVALID_SOURCE_DATA, "invalid_keenetic_hotspot", "invalid_hotspot_settings", 2),
+            ({registrations: RciReply(body=b'{"device-1": 1}')},
+             {}, ErrorCategory.INVALID_SOURCE_DATA, "invalid_keenetic_registrations", "invalid_registrations", 3),
+            ({runtime: RciReply(body=b'{"host": 1}')},
+             {}, ErrorCategory.INVALID_SOURCE_DATA, "invalid_keenetic_runtime", "invalid_hotspot_runtime", 4),
+        )
+        for replies, failures, category, code, reason, requests in cases:
+            with self.subTest(code=code, reason=reason):
+                script = ScriptedRci(failures=failures)
+                script.replies.update(replies)
+                result = self.state_handler(script).execute(InspectKeeneticState())
+                self.assertFalse(result.succeeded)
+                self.assertIs(result.error.category, category)
+                self.assertEqual((result.error.code, result.error.reason), (code, reason))
+                # Источники после отказавшего не читаются; каждое соединение закрыто.
+                self.assertEqual(len(script.connections), requests)
+                self.assertTrue(all(connection.calls[-1] == ("close",) for connection in script.connections))
+                self.assert_private(result)
+
+    def test_policy_resolution_over_rci(self):
+        script = ScriptedRci()
+        handler = ResolveKeeneticPolicyHandler(KeeneticPoliciesRci(read=script.read), operation_ids=lambda: "op-1")
+        result = handler.execute(ResolveKeeneticPolicy("fixture-policy-3"))
+        self.assertEqual((result.data.outcome, result.data.policy_id), ("resolved", "Policy30"))
+        self.assertEqual(script.paths, (RCI_PATHS[0],))
+        script.replies[RCI_PATHS[0]] = RciReply(status=302)
+        result = handler.execute(ResolveKeeneticPolicy("fixture-policy-3"))
+        self.assertEqual((result.error.code, result.error.reason), ("keenetic_policies_unavailable", "http_status"))
+        self.assert_private(result)
 
 
 if __name__ == "__main__":

@@ -4,8 +4,8 @@
 Сборка по умолчанию не подключает ни одного источника: пункты, сценарию
 которых нужен источник, показываются недоступными. Чтение роутера включается
 явно (`vpn-menu --read-router`): тогда подключаются источники файлов Xray,
-XKeen и геобаз Entware и наблюдения процесса Xray. Источники состояния
-Keenetic, хранилище метаданных и членство в наборах геобаз в этой версии
+XKeen и геобаз Entware, наблюдения процесса Xray и состояния Keenetic через
+локальный RCI. Хранилище метаданных и членство в наборах геобаз в этой версии
 не подключаются ни в одном режиме. Объяснение маршрута открывает запрос значения
 и передаёт введённую строку сценарию без разбора. Сводка состояния и быстрая проверка допускают
 неподключённые источники, поэтому пункты «Сводка» и «Быстрая проверка без изменений» и шапка
@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from keenvpn.adapters.router_sources import (
-    GeoDatabaseFiles, XKeenInitFile, XKeenListFiles, XKeenSettingsFile, XrayConfigFiles, XrayProcessObserver,
+    GeoDatabaseFiles, KeeneticHotspotRuntimeRci, KeeneticHotspotSettingsRci, KeeneticPoliciesRci,
+    KeeneticRegistrationsRci, XKeenInitFile, XKeenListFiles, XKeenSettingsFile, XrayConfigFiles, XrayProcessObserver,
 )
 from keenvpn.application.contract import OperationIdFactory, new_operation_id
 from keenvpn.application.keenetic_devices import ListKeeneticDevices, ListKeeneticDevicesHandler
@@ -99,15 +100,18 @@ def default_sources() -> MenuSources:
 
 
 def router_sources() -> MenuSources:
-    """Источники запуска с флагом `--read-router`: файлы Entware и процесс Xray проверенной платформы.
+    """Источники запуска с флагом `--read-router`: файлы Entware, процесс Xray и локальный RCI проверенной платформы.
 
-    Источники только читают. Состояние Keenetic, хранилище метаданных и
-    членство в наборах геобаз не подключаются: зависящие от них пункты
-    остаются с пометкой, а правила показываются без названий и идентификаторов.
+    Источники только читают. Хранилище метаданных и членство в наборах геобаз
+    не подключаются: зависящие от них пункты остаются с пометкой, а правила
+    показываются без названий и идентификаторов. Создание источников ничего
+    не читает: файлы, процесс и RCI читаются при выполнении сценария.
     """
     return MenuSources(
-        xray=XrayConfigFiles(), xkeen_settings=XKeenSettingsFile(), xkeen_init=XKeenInitFile(),
-        xkeen_lists=XKeenListFiles(), geodata=GeoDatabaseFiles(), process=XrayProcessObserver(),
+        policies=KeeneticPoliciesRci(), hotspot=KeeneticHotspotSettingsRci(), registrations=KeeneticRegistrationsRci(),
+        runtime=KeeneticHotspotRuntimeRci(), xray=XrayConfigFiles(), xkeen_settings=XKeenSettingsFile(),
+        xkeen_init=XKeenInitFile(), xkeen_lists=XKeenListFiles(), geodata=GeoDatabaseFiles(),
+        process=XrayProcessObserver(),
     )
 
 

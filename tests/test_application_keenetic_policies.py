@@ -10,8 +10,9 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application.contract import CONTRACT_VERSION, ErrorCategory
 from keenvpn.application.keenetic_policies import ResolveKeeneticPolicy, ResolveKeeneticPolicyHandler
+from keenvpn.application.ports import RouterReadError, RouterReadFailure
 from keenvpn.domain.keenetic_policy import (
-    KeeneticPolicy, KeeneticPolicyError, KeeneticPolicySet, PolicyResolution,
+    KeeneticPolicy, KeeneticPolicyError, KeeneticPolicyErrorCode, KeeneticPolicySet, PolicyResolution,
 )
 from tests.support.in_memory import (
     AdapterSetupError, InMemoryKeeneticPolicySource, UnconfiguredResponseError,
@@ -164,6 +165,18 @@ class ResolveKeeneticPolicyTests(unittest.TestCase):
             with self.subTest(outcome=type(outcome).__name__):
                 self.source.outcome = outcome
                 self.assert_failed(self.execute(), ErrorCategory.INVALID_SOURCE_DATA, "invalid_keenetic_policies")
+
+    def test_router_read_failure_keeps_reason_and_parse_error_in_source_is_invalid_data(self):
+        # Отказ чтения роутера сохраняет причину, а ошибка разбора ответа внутри источника — не отказ источника.
+        for outcome, category, code, reason in (
+            (RouterReadError(RouterReadFailure.TIMEOUT), ErrorCategory.SOURCE_FAILED, "keenetic_policies_unavailable",
+             "timeout"),
+            (KeeneticPolicyError(KeeneticPolicyErrorCode.POLICIES), ErrorCategory.INVALID_SOURCE_DATA,
+             "invalid_keenetic_policies", "invalid_policies"),
+        ):
+            with self.subTest(code=code):
+                self.source.outcome = outcome
+                self.assert_failed(self.execute(), category, code, reason)
 
     def test_corrupted_source_model_is_rejected_with_domain_reason(self):
         broken_id = KeeneticPolicy("Policy9", DESCRIPTION)

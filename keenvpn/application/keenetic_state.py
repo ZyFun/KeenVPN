@@ -7,11 +7,11 @@ from keenvpn.application.contract import (
     CONTRACT_VERSION, ErrorCategory, ErrorDetail, OperationIdFactory, Result,
     check_contract_version, failed, invalid_command, new_operation_id, succeeded,
 )
-from keenvpn.application.keenetic_policies import POLICIES_UNAVAILABLE, check_policies
+from keenvpn.application.keenetic_policies import read_policies
 from keenvpn.application.ports import (
     KeeneticHotspotRuntimeSource, KeeneticHotspotSettingsSource, KeeneticPolicySource, KeeneticRegistrationSource,
 )
-from keenvpn.application.source_checks import SourceCheck, check_source_model, unavailable
+from keenvpn.application.source_checks import SourceCheck, read_source_checked
 from keenvpn.application.views import view_dict, view_fields
 from keenvpn.domain.keenetic_device import KeeneticDeviceError
 from keenvpn.domain.keenetic_native import (
@@ -202,14 +202,9 @@ class InspectKeeneticStateHandler:
         порядок чтения и коды отказов. Состояние содержит MAC и имена: наружу
         передаётся только представление.
         """
-        try:
-            policies = self._policies.current_policies()
-        except Exception:
-            # Текст и цепочка исключения адаптера могут содержать описания политик.
-            return POLICIES_UNAVAILABLE
-        error = check_policies(policies)
-        if error is not None:
-            return error
+        policies = read_policies(self._policies)
+        if isinstance(policies, ErrorDetail):
+            return policies
 
         models = {}
         for source, read in (
@@ -217,14 +212,10 @@ class InspectKeeneticStateHandler:
             ("registrations", self._registrations.current_registrations),
             ("runtime", self._runtime.current_hotspot_runtime),
         ):
-            try:
-                value = read()
-            except Exception:
-                # Ответ и исключение источника могут содержать MAC, имена и адреса.
-                return unavailable(*_UNAVAILABLE[source])
-            error = check_source_model(_CHECKS[source], value)
-            if error is not None:
-                return error
+            # Ответ и исключение источника могут содержать MAC, имена и адреса: в результат попадают только коды.
+            value = read_source_checked(_CHECKS[source], read, *_UNAVAILABLE[source])
+            if isinstance(value, ErrorDetail):
+                return value
             models[source] = value
 
         try:

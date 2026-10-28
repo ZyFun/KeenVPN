@@ -156,11 +156,12 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 
 ### Отказ чтения роутера
 
-Источник, который читает файлы или запускает команду на роутере, сообщает
-об отказе исключением `RouterReadError` из `keenvpn.application.ports`.
-Его поле `failure` — значение `RouterReadFailure`, текст заранее задан
-для каждого значения; пути, имена файлов, вывод команд и текст системной
-ошибки в исключение не попадают, цепочка `__context__` отсоединена.
+Источник, который читает файлы, запускает команду или запрашивает локальный
+RCI на роутере, сообщает об отказе исключением `RouterReadError` из
+`keenvpn.application.ports`. Его поле `failure` — значение `RouterReadFailure`,
+текст заранее задан для каждого значения; пути, имена файлов, вывод команд,
+адрес, тело ответа и текст системной ошибки в исключение не попадают,
+цепочка `__context__` отсоединена.
 
 | Код | Значение |
 | --- | --- |
@@ -169,16 +170,24 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 | `unsafe` | Символическая ссылка в пути или объект неожиданного типа вместо файла или каталога |
 | `too_large` | Данные превышают предел размера или числа файлов |
 | `changed` | Файл или каталог изменились во время чтения |
-| `io_error` | Ошибка ввода-вывода или запуска команды |
-| `timeout` | Команда не завершилась за отведённое время |
+| `io_error` | Ошибка ввода-вывода, запуска команды или сокета во время обмена |
+| `timeout` | Команда или запрос не завершились за отведённое время |
 | `exit_status` | Команда завершилась с неожиданным кодом возврата |
+| `connection_failed` | Локальный интерфейс управления роутера не принял соединение |
+| `http_status` | Код ответа RCI не 200, в том числе перенаправление |
+| `invalid_response` | Ответ RCI оборван, нарушает протокол или не является строгим JSON-объектом в UTF-8 |
+| `rci_error` | Ответ RCI содержит вложенный статус ошибки |
 
-Сценарии чтения конфигурации Xray и XKeen, геобаз и процесса вызывают
+Ответ, который не удалось разобрать как документ своего формата, — отказ
+чтения: источник не получил данных. Корректный документ с нарушенной
+структурой записей — ошибка домена. Сценарии чтения конфигурации Xray
+и XKeen, геобаз, процесса, политик и состояния Keenetic вызывают
 источник через `read_source_checked` из `keenvpn.application.source_checks`:
 `RouterReadError` даёт код `*_unavailable` своего источника с кодом отказа
 в `reason`; ошибка домена, поднятая при разборе уже прочитанных данных внутри
-источника (повреждённый JSON, текст не в UTF-8, неверный вывод `pidof`), —
-код `invalid_*` этого источника с кодом домена в `reason`. Любое другое
+источника (повреждённый JSON файла, текст не в UTF-8, неверный вывод `pidof`,
+запись RCI неверной структуры), — код `invalid_*` этого источника с кодом
+домена в `reason`. Любое другое
 исключение — `*_unavailable` без уточнения. Следующий шаг по-прежнему
 выбирается по категории и коду, а не по уточнению. Источники, которые
 бросают такие отказы, описаны в [источниках чтения роутера](router-sources.md).
@@ -610,7 +619,9 @@ assert handler.execute(ResolveKeeneticPolicy("VPN")).data.outcome == "missing"
 | Недопустимое описание для поиска | `invalid_input` / `invalid_policy_description` |
 | Выбранный ID недопустимого формата | `invalid_input` / `invalid_policy_id` |
 | Выбранный ID не входит в текущие совпадения | `invalid_input` / `policy_selection_mismatch` |
-| Источник вызвал исключение | `source_failed` / `keenetic_policies_unavailable` |
+| Источник поднял `RouterReadError` | `source_failed` / `keenetic_policies_unavailable`; [код отказа чтения](#отказ-чтения-роутера) в `reason` |
+| Источник поднял `KeeneticPolicyError` при разборе ответа | `invalid_source_data` / `invalid_keenetic_policies`; доменная причина в `reason` |
+| Источник вызвал другое исключение | `source_failed` / `keenetic_policies_unavailable`; `reason=None` |
 | Источник вернул не `KeeneticPolicySet`, включая подкласс | `invalid_source_data` / `invalid_keenetic_policies`; `reason=None` |
 | Список повреждён после создания | `invalid_source_data` / `invalid_keenetic_policies`; доменная причина в `reason` |
 
@@ -634,7 +645,9 @@ assert handler.execute(ResolveKeeneticPolicy("VPN")).data.outcome == "missing"
 | Ситуация | Категория и код |
 | --- | --- |
 | Неверный тип команды или версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
-| Источник вызвал исключение | `source_failed` / `keenetic_policies_unavailable`, `keenetic_hotspot_unavailable`, `keenetic_registrations_unavailable`, `keenetic_runtime_unavailable` |
+| Источник поднял `RouterReadError` | `source_failed` / `keenetic_policies_unavailable`, `keenetic_hotspot_unavailable`, `keenetic_registrations_unavailable`, `keenetic_runtime_unavailable`; [код отказа чтения](#отказ-чтения-роутера) в уточнении |
+| Источник поднял ошибку домена при разборе ответа | `invalid_source_data` / `invalid_keenetic_policies`, `invalid_keenetic_hotspot`, `invalid_keenetic_registrations`, `invalid_keenetic_runtime` с кодом домена в уточнении |
+| Источник вызвал другое исключение | `source_failed` / тот же код `*_unavailable` без уточнения |
 | Источник вернул объект другого типа или повреждённую модель | `invalid_source_data` / `invalid_keenetic_policies`, `invalid_keenetic_hotspot`, `invalid_keenetic_registrations`, `invalid_keenetic_runtime` |
 | Источники не удалось согласовать | `invalid_source_data` / `keenetic_state_inconsistent` |
 

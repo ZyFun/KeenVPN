@@ -13,7 +13,7 @@
 
 Настройки, регистрация и runtime читаются отдельно и не смешиваются: сохранённое назначение берётся только из `ip/hotspot`, а вычисленная роутером политика из наблюдения его не заменяет. Источник возвращает готовую модель либо вызывает исключение при сбое и не должен менять настройки при чтении.
 
-`keenvpn.adapters.keenetic_rci` преобразует разобранный JSON отдельного ресурса в модель: `policies_from_rci`, `hotspot_settings_from_rci`, `registrations_from_rci` и `hotspot_runtime_from_rci`. Имена ресурсов заданы константами `POLICIES_RESOURCE`, `HOTSPOT_SETTINGS_RESOURCE`, `REGISTRATIONS_RESOURCE` и `HOTSPOT_RUNTIME_RESOURCE`. Транспорт, таймауты, ограничение размера ответа и разбор вложенных статусов ошибок RCI в репозитории не реализованы; тесты получают модели из [обезличенного снимка](../tests/fixtures/router_snapshot/README.md).
+`keenvpn.adapters.keenetic_rci` преобразует разобранный JSON отдельного ресурса в модель: `policies_from_rci`, `hotspot_settings_from_rci`, `registrations_from_rci` и `hotspot_runtime_from_rci`. Имена ресурсов заданы константами `POLICIES_RESOURCE`, `HOTSPOT_SETTINGS_RESOURCE`, `REGISTRATIONS_RESOURCE` и `HOTSPOT_RUNTIME_RESOURCE`. Запрос ресурса на роутере, таймауты, ограничение размера ответа и разбор вложенных статусов ошибок RCI выполняет `keenvpn.adapters.keenetic_rci_http`; источники поверх него описаны в [источниках чтения роутера](router-sources.md#локальный-rci). Тесты сценария получают модели из [обезличенного снимка](../tests/fixtures/router_snapshot/README.md).
 
 ## Модели источников
 
@@ -117,7 +117,9 @@ ID политик и интерфейсов сегментов — технич�
 |---|---|
 | Неверный тип команды | `invalid_request` / `invalid_command` |
 | Неверная версия команды | `invalid_request` / `unsupported_contract_version` |
-| Источник вызвал исключение | `source_failed` / `keenetic_policies_unavailable`, `keenetic_hotspot_unavailable`, `keenetic_registrations_unavailable` или `keenetic_runtime_unavailable` |
+| Источник поднял `RouterReadError` | `source_failed` / `keenetic_policies_unavailable`, `keenetic_hotspot_unavailable`, `keenetic_registrations_unavailable` или `keenetic_runtime_unavailable`; [код отказа чтения](application.md#отказ-чтения-роутера) в `reason` |
+| Источник поднял ошибку домена при разборе ответа | тот же код `invalid_keenetic_*` источника; доменная причина в `reason` |
+| Источник вызвал другое исключение | тот же код `*_unavailable`; `reason=None` |
 | Источник вернул объект другого типа, включая подкласс | `invalid_source_data` / `invalid_keenetic_policies`, `invalid_keenetic_hotspot`, `invalid_keenetic_registrations` или `invalid_keenetic_runtime`; `reason=None` |
 | Модель повреждена после создания | тот же код источника; доменная причина в `reason` |
 | Источники не удалось согласовать при сборке | `invalid_source_data` / `keenetic_state_inconsistent`; доменная причина в `reason` |

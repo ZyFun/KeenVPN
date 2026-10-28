@@ -1,13 +1,14 @@
-"""Источники чтения роутера: файлы Xray, XKeen и геобаз Entware и наблюдение процесса Xray.
+"""Источники чтения роутера: файлы Entware, процесс Xray и состояние Keenetic через локальный RCI.
 
-Каждый класс реализует один порт чтения и передаёт прочитанные байты или
-вывод команды существующим преобразователям адаптеров. Пути — константы
-проверенной платформы (KN-1811, Entware в `/opt`); корень подменяется только
-в тестах. Файлы читаются без перехода по ссылкам и с пределами размера
-(`entware_files`), команда — массивом аргументов без shell, с таймаутом,
-пустым окружением и проверкой кода возврата. Ничего не записывается и не
-запускается, кроме `pidof`; команды XKeen и init не вызываются, init
-читается как текст. Успешное чтение не подтверждает работу VPN.
+Каждый класс реализует один порт чтения и передаёт прочитанные байты, вывод
+команды или ответ RCI существующим преобразователям адаптеров. Пути —
+константы проверенной платформы (KN-1811, Entware в `/opt`); корень
+подменяется только в тестах. Файлы читаются без перехода по ссылкам и с
+пределами размера (`entware_files`), команда — массивом аргументов без shell,
+с таймаутом, пустым окружением и проверкой кода возврата, ресурсы RCI —
+одним запросом `GET` на адрес обратной петли (`keenetic_rci_http`). Ничего не
+записывается и не запускается, кроме `pidof`; команды XKeen и init не
+вызываются, init читается как текст. Успешное чтение не подтверждает работу VPN.
 """
 
 from collections.abc import Callable
@@ -19,6 +20,10 @@ import time
 
 from keenvpn.adapters.entware_files import digest_files, fail_read, read_file, read_files, regular_file_exists
 from keenvpn.adapters.geodata_files import XRAY_ASSET_DIRECTORY, geo_inventory_from_digests
+from keenvpn.adapters.keenetic_rci import (
+    hotspot_runtime_from_rci, hotspot_settings_from_rci, policies_from_rci, registrations_from_rci,
+)
+from keenvpn.adapters.keenetic_rci_http import RciResource, read_rci
 from keenvpn.adapters.xkeen_files import (
     XKEEN_INIT_PATH, XKEEN_LIST_DIRECTORY, XKEEN_SETTINGS_PATH, xkeen_init_from_bytes, xkeen_list_from_bytes,
     xkeen_settings_from_bytes,
@@ -27,6 +32,8 @@ from keenvpn.adapters.xkeen_runtime import XKEEN_READY_MARKER_PATH, XRAY_PROCESS
 from keenvpn.adapters.xray_configs import XRAY_CONFIG_DIRECTORY, xray_config_from_files
 from keenvpn.application.ports import RouterReadFailure
 from keenvpn.domain.geodata import GeoDatabaseInventory
+from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
+from keenvpn.domain.keenetic_policy import KeeneticPolicySet
 from keenvpn.domain.manager_metadata import valid_storage_path
 from keenvpn.domain.xkeen_config import XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings
 from keenvpn.domain.xray_config import XrayConfigSet
@@ -56,6 +63,8 @@ _OUTPUT_CHUNK = 64 * KIB
 
 CommandRunner = Callable[[tuple[str, ...], float, int], tuple[int, bytes]]
 """Запуск команды чтения: аргументы, таймаут, предел вывода → код возврата и stdout; отказ — RouterReadError."""
+RciReader = Callable[[RciResource], dict[str, object]]
+"""Чтение одного ресурса RCI → разобранный JSON-объект; отказ — RouterReadError."""
 
 
 def _collect_output(process: subprocess.Popen, deadline: float, limit: int, chunks: list[bytes]) -> RouterReadFailure | None:
@@ -219,3 +228,46 @@ class XrayProcessObserver:
         if not ((status == 0 and output.strip()) or (status == 1 and not output)):
             fail_read(RouterReadFailure.EXIT_STATUS)
         return xray_process_from_pidof(output, regular_file_exists(self._marker))
+
+
+class _RciSource:
+    """Общая часть источников состояния Keenetic: один запрос RCI на вызов порта."""
+
+    def __init__(self, *, read: RciReader = read_rci) -> None:
+        if not callable(read):
+            raise TypeError("Чтение RCI задаётся вызываемым объектом.")
+        self._read = read
+
+    def _payload(self, resource: RciResource) -> dict[str, object]:
+        payload = self._read(resource)
+        if type(payload) is not dict:
+            raise TypeError("Чтение RCI вернуло результат неверного типа.")
+        return payload
+
+
+class KeeneticPoliciesRci(_RciSource):
+    """`KeeneticPolicySource`: настроенные политики из `ip/policy`."""
+
+    def current_policies(self) -> KeeneticPolicySet:
+        return policies_from_rci(self._payload(RciResource.POLICIES))
+
+
+class KeeneticHotspotSettingsRci(_RciSource):
+    """`KeeneticHotspotSettingsSource`: сохранённые настройки hotspot из `ip/hotspot`."""
+
+    def current_hotspot_settings(self) -> KeeneticHotspotSettings:
+        return hotspot_settings_from_rci(self._payload(RciResource.HOTSPOT_SETTINGS))
+
+
+class KeeneticRegistrationsRci(_RciSource):
+    """`KeeneticRegistrationSource`: реестр регистраций из `known/host`."""
+
+    def current_registrations(self) -> KeeneticRegistrations:
+        return registrations_from_rci(self._payload(RciResource.REGISTRATIONS))
+
+
+class KeeneticHotspotRuntimeRci(_RciSource):
+    """`KeeneticHotspotRuntimeSource`: наблюдаемое состояние клиентов из `show/ip/hotspot` на момент запроса."""
+
+    def current_hotspot_runtime(self) -> KeeneticHotspotRuntime:
+        return hotspot_runtime_from_rci(self._payload(RciResource.HOTSPOT_RUNTIME))

@@ -8,7 +8,7 @@ from keenvpn.application.contract import (
     check_contract_version, failed, invalid_command, new_operation_id, succeeded,
 )
 from keenvpn.application.ports import KeeneticPolicySource
-from keenvpn.application.source_checks import unavailable
+from keenvpn.application.source_checks import SourceCheck, read_source_checked, unavailable
 from keenvpn.domain.keenetic_policy import (
     KeeneticPolicyError, KeeneticPolicyErrorCode, KeeneticPolicySet, PolicyResolution,
     resolve_policy, validate_policy_description, validate_policy_id, validate_policy_set,
@@ -17,6 +17,12 @@ from keenvpn.domain.keenetic_policy import (
 
 POLICIES_UNAVAILABLE = unavailable("keenetic_policies_unavailable", "Не удалось прочитать политики Keenetic.")
 """Отказ источника политик; один для всех сценариев, которые их читают."""
+POLICIES_CHECK = SourceCheck(
+    "invalid_keenetic_policies", KeeneticPolicySet, validate_policy_set,
+    "Источник вернул политики Keenetic в неподдерживаемом формате.",
+    "Источник вернул некорректный список политик Keenetic.", (KeeneticPolicyError,),
+)
+"""Проверка ответа источника политик; повторная проверка ловит данные, изменённые после создания модели."""
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -85,27 +91,17 @@ def _well_typed(command: object) -> bool:
     )
 
 
-def check_policies(policies: object) -> ErrorDetail | None:
-    """Проверить ответ источника политик до его использования любым сценарием."""
-    if type(policies) is not KeeneticPolicySet:
-        return ErrorDetail(
-            ErrorCategory.INVALID_SOURCE_DATA, "invalid_keenetic_policies",
-            "Источник вернул политики Keenetic в неподдерживаемом формате.",
-        )
-    try:
-        # Повторная проверка ловит данные, изменённые после создания модели.
-        validate_policy_set(policies)
-    except KeeneticPolicyError as error:
-        return ErrorDetail(
-            ErrorCategory.INVALID_SOURCE_DATA, "invalid_keenetic_policies",
-            "Источник вернул некорректный список политик Keenetic.", reason=error.code.value,
-        )
-    except Exception:
-        return ErrorDetail(
-            ErrorCategory.INVALID_SOURCE_DATA, "invalid_keenetic_policies",
-            "Источник вернул политики Keenetic в неподдерживаемом формате.",
-        )
-    return None
+def read_policies(source: KeeneticPolicySource) -> KeeneticPolicySet | ErrorDetail:
+    """Прочитать политики один раз и проверить ответ до его использования любым сценарием.
+
+    Отказ чтения роутера даёт `keenetic_policies_unavailable` с причиной,
+    ошибка разбора ответа внутри источника — `invalid_keenetic_policies`
+    с кодом домена. Текст и цепочка прочих исключений источника могут
+    содержать описания политик и в результат не попадают.
+    """
+    return read_source_checked(
+        POLICIES_CHECK, source.current_policies, POLICIES_UNAVAILABLE.code, POLICIES_UNAVAILABLE.message,
+    )
 
 
 class ResolveKeeneticPolicyHandler:
@@ -137,14 +133,9 @@ class ResolveKeeneticPolicyHandler:
         except KeeneticPolicyError as invalid:
             return failed(operation_id, name, ErrorDetail(ErrorCategory.INVALID_INPUT, invalid.code.value, str(invalid)))
 
-        try:
-            policies = self._policies.current_policies()
-        except Exception:
-            # Текст и цепочка исключения адаптера могут содержать описания политик.
-            return failed(operation_id, name, POLICIES_UNAVAILABLE)
-        error = check_policies(policies)
-        if error is not None:
-            return failed(operation_id, name, error)
+        policies = read_policies(self._policies)
+        if isinstance(policies, ErrorDetail):
+            return failed(operation_id, name, policies)
 
         try:
             resolution = resolve_policy(

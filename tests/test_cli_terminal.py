@@ -26,8 +26,10 @@ from keenvpn.application.routing_rules import MetadataState
 from keenvpn.application.ports import ManagerMetadataStoreError, MetadataStoreFailure
 from keenvpn.application.status_summary import PORT_53_HINT
 from keenvpn.domain.xkeen_config import XKeenListName
+from keenvpn.adapters.keenetic_rci_http import RciResource
 from keenvpn.adapters.router_sources import (
-    GeoDatabaseFiles, XKeenInitFile, XKeenListFiles, XKeenSettingsFile, XrayConfigFiles, XrayProcessObserver,
+    GeoDatabaseFiles, KeeneticHotspotRuntimeRci, KeeneticHotspotSettingsRci, KeeneticPoliciesRci,
+    KeeneticRegistrationsRci, XKeenInitFile, XKeenListFiles, XKeenSettingsFile, XrayConfigFiles, XrayProcessObserver,
 )
 from keenvpn.interfaces.cli.composition import (
     MenuAssembly, MenuSources, assemble_main_menu, assemble_setup_menu, default_sources, router_sources,
@@ -51,6 +53,7 @@ import tempfile
 from unittest.mock import patch
 
 from keenvpn.adapters.xray_configs import xray_config_from_files
+from tests.support.rci import ScriptedRci, rci_sources
 from tests.support.router_files import ScriptedCommand, router_file_sources, write_router_snapshot
 from tests.support.snapshot import load_xray_snapshot_files, snapshot_installation_sources
 
@@ -251,25 +254,27 @@ class RunLoopTests(unittest.TestCase):
 
 
 class CompositionTests(unittest.TestCase):
-    def test_router_sources_connect_entware_files_and_process_only(self):
+    def test_router_sources_connect_entware_files_process_and_local_rci(self):
+        # Создание источников и сборка меню ничего не читают: файлы, процесс и RCI читаются при выборе пункта.
         with forbid_external_effects():
             sources = router_sources()
             assembly = assemble_main_menu(sources)
-        self.assertEqual(
-            {name: type(getattr(sources, name)) for name in ("xray", "xkeen_settings", "xkeen_init", "xkeen_lists", "geodata", "process")},
-            {"xray": XrayConfigFiles, "xkeen_settings": XKeenSettingsFile, "xkeen_init": XKeenInitFile,
-             "xkeen_lists": XKeenListFiles, "geodata": GeoDatabaseFiles, "process": XrayProcessObserver},
-        )
-        for name in ("policies", "hotspot", "registrations", "runtime", "metadata", "geo_match"):
+        expected = {
+            "policies": KeeneticPoliciesRci, "hotspot": KeeneticHotspotSettingsRci,
+            "registrations": KeeneticRegistrationsRci, "runtime": KeeneticHotspotRuntimeRci, "xray": XrayConfigFiles,
+            "xkeen_settings": XKeenSettingsFile, "xkeen_init": XKeenInitFile, "xkeen_lists": XKeenListFiles,
+            "geodata": GeoDatabaseFiles, "process": XrayProcessObserver,
+        }
+        self.assertEqual({name: type(getattr(sources, name)) for name in expected}, expected)
+        for name in ("metadata", "geo_match"):
             self.assertIsNone(getattr(sources, name), name)
         found = states(assembly)
         for action_id in (
             "status.summary", "status.quick_check", "connections.list", "routing.list", "routing.explain",
-            "failsafe.port53_check",
+            "failsafe.port53_check", "devices.list",
         ):
             self.assertIsNone(found[action_id], action_id)
-        # Состояние Keenetic и хранилище метаданных в этой версии не подключаются.
-        self.assertIs(found["devices.list"], UnavailableReason.SOURCE_NOT_CONNECTED)
+        # Хранилище метаданных в этой версии не подключается.
         self.assertIs(found["settings.storage"], UnavailableReason.SOURCE_NOT_CONNECTED)
 
     def test_menu_over_router_files_shows_results_without_private_values(self):
@@ -1020,6 +1025,25 @@ class DevicesFlowTests(unittest.TestCase):
         self.assertNotIn("Устройства Keenetic", output)
         self.assertNotIn("Номер — карточка", output)
         self.assertEqual(self.sources.keenetic.calls, (1, 1, 1, 1))
+
+    def test_devices_over_local_rci_show_the_same_list_and_the_failure_reason(self):
+        # Источники RCI, как у `--read-router`, но через подставное соединение без сокетов.
+        markers = SNAPSHOT_DEVICE_MARKERS + ("127.0.0.1", "/rci/", "fixture-private")
+        script = ScriptedRci()
+        code, output, navigator = self.flow("5\n1\n0\n0\n0\n", MenuSources(**rci_sources(script)), markers)
+        self.assertEqual((code, navigator.depth), (0, 0))
+        self.assertEqual(output, self.flow("5\n1\n0\n0\n0\n")[1])
+        self.assertEqual(script.paths, tuple(resource.path for resource in RciResource))
+        script = ScriptedRci(failures={"connect": ConnectionRefusedError(61, "fixture-private 127.0.0.1:79")})
+        code, output, navigator = self.flow("5\n1\n0\n0\n", MenuSources(**rci_sources(script)), markers)
+        self.assertEqual((code, navigator.depth), (0, 0))
+        self.assertIn(
+            "Отказ: source_failed / keenetic_policies_unavailable\nУточнение: connection_failed\n"
+            "Причина: Не удалось прочитать политики Keenetic.\n"
+            f"Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.CHECK_SOURCE]}\n",
+            output,
+        )
+        self.assertEqual(len(script.connections), 1)
 
 
 if __name__ == "__main__":

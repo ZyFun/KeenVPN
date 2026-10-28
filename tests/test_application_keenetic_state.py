@@ -18,7 +18,10 @@ from keenvpn.domain.keenetic_native import (
     KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticNativeError, KeeneticNativeErrorCode,
     KeeneticNativeState, KeeneticRegistrations, KeeneticSegmentAssignment,
 )
-from keenvpn.domain.keenetic_policy import KeeneticPolicy, KeeneticPolicySet, PolicyResolution
+from keenvpn.application.ports import RouterReadError, RouterReadFailure
+from keenvpn.domain.keenetic_policy import (
+    KeeneticPolicy, KeeneticPolicyError, KeeneticPolicyErrorCode, KeeneticPolicySet, PolicyResolution,
+)
 from tests.support.in_memory import (
     AdapterSetupError, InMemoryKeeneticHotspotRuntimeSource, InMemoryKeeneticHotspotSettingsSource,
     InMemoryKeeneticPolicySource, InMemoryKeeneticRegistrationSource, UnconfiguredResponseError,
@@ -138,6 +141,30 @@ class InspectKeeneticStateTests(unittest.TestCase):
                 result = handler.execute(InspectKeeneticState())
                 self.assert_failed(result, ErrorCategory.SOURCE_FAILED, UNAVAILABLE_CODES[name])
                 self.assertEqual(sources.calls, calls_after_failure(index))
+
+    def test_router_read_failure_keeps_reason_and_parse_error_in_source_is_invalid_data(self):
+        # Отказ чтения роутера сохраняет причину, а ошибка разбора внутри источника отличается от недоступного.
+        parse_errors = {
+            "policies": (KeeneticPolicyError(KeeneticPolicyErrorCode.POLICIES), "invalid_policies"),
+            "hotspot": (KeeneticNativeError(KeeneticNativeErrorCode.HOTSPOT_SETTINGS), "invalid_hotspot_settings"),
+            "registrations": (KeeneticNativeError(KeeneticNativeErrorCode.REGISTRATIONS), "invalid_registrations"),
+            "runtime": (KeeneticNativeError(KeeneticNativeErrorCode.HOTSPOT_RUNTIME), "invalid_hotspot_runtime"),
+        }
+        for index, name in enumerate(SOURCES):
+            parse_error, parse_reason = parse_errors[name]
+            for outcome, category, code, reason in (
+                (RouterReadError(RouterReadFailure.TIMEOUT), ErrorCategory.SOURCE_FAILED, UNAVAILABLE_CODES[name],
+                 "timeout"),
+                (parse_error, ErrorCategory.INVALID_SOURCE_DATA, INVALID_CODES[name], parse_reason),
+            ):
+                with self.subTest(source=name, code=code):
+                    sources = snapshot_keenetic_sources()
+                    getattr(sources, name).outcome = outcome
+                    handler = InspectKeeneticStateHandler(
+                        sources.policies, sources.hotspot, sources.registrations, sources.runtime,
+                    )
+                    self.assert_failed(handler.execute(InspectKeeneticState()), category, code, reason)
+                    self.assertEqual(sources.calls, calls_after_failure(index))
 
     def test_invalid_source_data_has_distinct_codes_and_domain_reasons(self):
         class DerivedSettings(KeeneticHotspotSettings):

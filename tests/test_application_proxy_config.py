@@ -171,6 +171,8 @@ LIST_FIELDS = dict(zip(SOURCES[3:], LIST_NAMES))
 
 
 def handler_for(sources, **options):
+    # Фиксированный идентификатор: случайный UUID мог совпасть с приватным маркером из одних цифр.
+    options.setdefault("operation_ids", lambda: "op-1")
     return InspectProxyConfigHandler(sources.xray, sources.settings, sources.init, sources.lists, **options)
 
 

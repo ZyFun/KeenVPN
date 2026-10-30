@@ -68,6 +68,9 @@ def configure(sources, name, outcome):
 
 
 def handler_for(sources, **options):
+    # Фиксированный идентификатор: случайный UUID мог совпасть с приватным маркером из одних цифр.
+    # Вложенный обработчик вызывается через read() и идентификатор операции не создаёт.
+    options.setdefault("operation_ids", lambda: "op-1")
     proxy = InspectProxyConfigHandler(sources.xray, sources.settings, sources.init, sources.lists)
     return ImportRoutingSchemeHandler(proxy, **options)
 

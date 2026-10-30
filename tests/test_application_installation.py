@@ -101,6 +101,9 @@ INVALID_CODES = {
 
 
 def handler_for(sources, **options):
+    # Фиксированный идентификатор: случайный UUID мог совпасть с приватным маркером из одних цифр.
+    # Вложенные обработчики вызываются через read() и идентификатор операции не создают.
+    options.setdefault("operation_ids", lambda: "op-1")
     keenetic, proxy = sources.keenetic, sources.proxy
     return InspectInstallationHandler(
         InspectKeeneticStateHandler(keenetic.policies, keenetic.hotspot, keenetic.registrations, keenetic.runtime),

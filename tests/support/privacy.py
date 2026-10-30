@@ -1,9 +1,13 @@
 """Проверки, что результаты и кадры не удерживают приватные данные, и искусственные небезопасные значения."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import gc
 import json
 import traceback
 import types
+from unittest.mock import patch
+import uuid
 
 from keenvpn.domain.config_document import ConfigDocument
 from keenvpn.domain.xkeen_config import XKeenSettings
@@ -111,3 +115,17 @@ def unsafe_xkeen_settings() -> XKeenSettings:
     u = UNSAFE_IDENTIFIERS
     document = {"xkeen": {"killswitch": "on", u["uri"]: 1, u["domain"]: 2, "verify_downloads": "strict"}, u["path"]: {}}
     return XKeenSettings(ConfigDocument("xkeen.json", json.dumps(document, ensure_ascii=False).encode("utf-8")))
+
+
+@contextmanager
+def operation_ids_with_marker(marker: str) -> Iterator[str]:
+    """Подменить случайный UUID так, чтобы идентификатор операции по умолчанию содержал маркер.
+
+    Случайный `operation_id` изредка совпадал с приватным маркером из одних
+    шестнадцатеричных цифр, и проверка приватности падала без утечки. Подмена
+    делает это совпадение постоянным. Маркер не из шестнадцатеричных цифр
+    отклоняется: с UUID он совпасть не может.
+    """
+    value = uuid.UUID(hex=(marker + "e" * 32)[:32])
+    with patch("uuid.uuid4", return_value=value):
+        yield value.hex

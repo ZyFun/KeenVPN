@@ -1,17 +1,19 @@
-"""Создание, просмотр и отмена одной сессии черновика изменений.
+"""Создание, просмотр, проверка актуальности и отмена одной сессии черновика изменений.
 
 Сценарии работают с собственным хранилищем черновика через порт
-`DraftSessionStore`; создание, кроме того, фиксирует исходные отпечатки
-управляемых источников через порт `SourceFingerprintSource`. Черновик ничего
-не применяет: конфигурация Xray и XKeen, настройки Keenetic и службы не
-меняются и не разбираются. Сессия одна: создание при существующем черновике
-— отказ без перезаписи. Отмена удаляет только файл сессии с идентификатором
-и токеном ревизии из команды. Результаты содержат идентификатор, непрозрачный
-токен ревизии, время создания, число неизвестных полей и состояния
-источников, без путей, ревизии файла, хешей и значений неизвестных полей.
-Расхождение черновика с ожидаемым командой возвращается с записью конфликта
-контракта. Сравнение с исходными отпечатками, блокировка устаревшего
-черновика и применение — не этого модуля.
+`DraftSessionStore`; создание и проверка актуальности, кроме того, читают
+отпечатки управляемых источников через порт `SourceFingerprintSource`.
+Черновик ничего не применяет: конфигурация Xray и XKeen, настройки Keenetic
+и службы не меняются и не разбираются. Сессия одна: создание при
+существующем черновике — отказ без перезаписи. Отмена удаляет только файл
+сессии с идентификатором и токеном ревизии из команды. Проверка актуальности
+ничего не записывает: черновик, источники которого изменились после его
+создания, — отказ с записями конфликта; общий помощник этой проверки
+вызывает и будущее применение. Результаты содержат идентификатор,
+непрозрачный токен ревизии, время создания, число неизвестных полей
+и состояния источников, без путей, ревизии файла, хешей и значений
+неизвестных полей. Расхождение черновика с ожидаемым командой возвращается
+с записью конфликта контракта. Применение — не этого модуля.
 """
 
 from collections.abc import Callable
@@ -30,7 +32,7 @@ from keenvpn.application.contract import (
 from keenvpn.application.ports import (
     DraftSessionStore, DraftSessionStoreError, DraftStoreFailure, SourceFingerprintSource, StoreReason,
 )
-from keenvpn.application.source_baseline import capture_baseline
+from keenvpn.application.source_baseline import capture_baseline, compare_baseline
 from keenvpn.application.views import view_dict, view_fields
 from keenvpn.domain.draft_session import (
     DraftSession, DraftSessionErrorCode, StoredDraftSession, draft_revision, encode_draft_session, valid_draft_id,
@@ -108,6 +110,20 @@ class DiscardDraft:
     """
 
     name: ClassVar[str] = "discard_draft"
+
+    draft_id: str
+    expected_revision: str
+    contract_version: int = CONTRACT_VERSION
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CheckDraftBaseline:
+    """Проверить, что черновик с этим идентификатором и токеном ревизии не устарел, ничего не записывая.
+
+    `draft_id` и `expected_revision` берутся из `DraftView`, как у отмены.
+    """
+
+    name: ClassVar[str] = "check_draft_baseline"
 
     draft_id: str
     expected_revision: str
@@ -219,6 +235,25 @@ class DraftDiscardView:
         return view_dict(self)
 
 
+class DraftBaselineOutcome(StrEnum):
+    """Итог успешной проверки актуальности черновика."""
+
+    CURRENT = "current"
+    """Все управляемые источники совпали с исходными отпечатками черновика на момент проверки."""
+
+
+@dataclass(frozen=True, slots=True)
+class DraftBaselineCheckView:
+    """Итог проверки актуальности и идентификатор из команды; токена, хешей и источников нет."""
+
+    outcome: str
+    draft_id: str
+
+    def to_dict(self) -> dict[str, object]:
+        """Вернуть JSON-совместимое представление."""
+        return view_dict(self)
+
+
 DRAFT_EXISTS = ErrorDetail(
     ErrorCategory.UNSUPPORTED, "draft_exists",
     "Черновик уже открыт: поддерживается одна сессия, существующий черновик не перезаписывается.",
@@ -267,6 +302,11 @@ DRAFT_CHANGED = ErrorDetail(
     conflicts=(Conflict(ConflictSubject.DRAFT, ConflictState.PRESENT, ConflictState.CHANGED),),
 )
 """Отказ изменения: токен ревизии команды не совпал с текущим — черновик изменился после чтения интерфейсом."""
+DRAFT_GONE = ErrorDetail(
+    _CONFLICT_CATEGORY, DraftStoreFailure.CONFLICT.value, _CONFLICT_MESSAGE,
+    conflicts=(Conflict(ConflictSubject.DRAFT, ConflictState.PRESENT, ConflictState.ABSENT),),
+)
+"""Отказ проверки: черновика, который ожидала команда, нет — он отменён или ещё не создан."""
 _STORE_REASONS = {reason.value: reason.value for reason in StoreReason}
 _DOMAIN_REASONS = {code.value: code.value for code in DraftSessionErrorCode}
 
@@ -341,6 +381,45 @@ def read_stored_draft(store: DraftSessionStore) -> StoredDraftSession | None | E
         # Повреждённый после создания ответ: подменённые поля, неверные типы.
         valid = False
     return stored if valid else INVALID_STORE_RESULT
+
+
+def check_draft_current(
+    store: DraftSessionStore, fingerprints: SourceFingerprintSource, draft_id: object, expected_revision: object,
+) -> StoredDraftSession | ErrorDetail:
+    """Проверить, что черновик из команды не устарел: общий помощник проверки и будущего применения.
+
+    Порядок: формат идентификатора и токена до чтения хранилища, чтение
+    черновика, сверка с командой (`check_expected_draft`), повторное чтение
+    всех управляемых источников и сравнение с исходными отпечатками
+    (`compare_baseline`), затем повторное чтение черновика. Черновик,
+    изменившийся или исчезнувший за время проверки, — конфликт черновика,
+    он важнее расхождений источников. Успех — черновик первого чтения:
+    ревизию для записи вызывающий берёт из него, а не из команды. Ни
+    хранилище, ни источники не изменяются.
+
+    Проверка — снимок на момент чтения: она не блокирует источники
+    и не обнаруживает изменение, сделанное после её завершения.
+    """
+    if not valid_expected_draft(draft_id, expected_revision):
+        # Идентификатор и токен берутся из представления черновика, а не вводятся пользователем.
+        return invalid_command()
+    stored = read_stored_draft(store)
+    if isinstance(stored, ErrorDetail):
+        return stored
+    if stored is None:
+        return DRAFT_GONE
+    error = check_expected_draft(stored, draft_id, expected_revision)
+    if error is not None:
+        return error
+    error = compare_baseline(fingerprints, stored.session.baseline)
+    again = read_stored_draft(store)
+    if isinstance(again, ErrorDetail):
+        return again
+    if again is None:
+        return DRAFT_GONE
+    if again.revision != stored.revision:
+        return DRAFT_CHANGED
+    return stored if error is None else error
 
 
 class InspectDraftHandler:
@@ -473,6 +552,41 @@ class DiscardDraftHandler:
         if error is not None:
             return failed(operation_id, name, error)
         return succeeded(operation_id, name, DraftDiscardView(outcome.value, command.draft_id))
+
+
+class CheckDraftBaselineHandler:
+    """Проверить актуальность черновика из команды перед подтверждением, ничего не записывая.
+
+    Выполняет `check_draft_current`: два чтения хранилища и по одному чтению
+    отпечатка каждого управляемого источника. Устаревший черновик —
+    `draft_baseline_changed` с записями конфликта и шагом `recreate_draft`;
+    источник, который не удалось прочитать, — отказ чтения с записями
+    конфликта, а не совпадение. Черновик, файлы и настройки не меняются.
+    """
+
+    def __init__(
+        self, store: DraftSessionStore, fingerprints: SourceFingerprintSource, *,
+        operation_ids: OperationIdFactory = new_operation_id,
+    ) -> None:
+        self._store = store
+        self._fingerprints = fingerprints
+        self._operation_ids = operation_ids
+
+    def execute(self, command: CheckDraftBaseline) -> Result[DraftBaselineCheckView]:
+        """Выполнить проверку; ожидаемые отказы возвращаются через Result."""
+        operation_id = self._operation_ids()
+        name = CheckDraftBaseline.name
+        if type(command) is not CheckDraftBaseline:
+            return failed(operation_id, name, invalid_command())
+        error = check_contract_version(command.contract_version)
+        if error is not None:
+            return failed(operation_id, name, error)
+        checked = check_draft_current(self._store, self._fingerprints, command.draft_id, command.expected_revision)
+        if isinstance(checked, ErrorDetail):
+            return failed(operation_id, name, checked)
+        return succeeded(
+            operation_id, name, DraftBaselineCheckView(DraftBaselineOutcome.CURRENT.value, command.draft_id),
+        )
 
 
 def _change_store(change: Callable[[], object], expected: ConflictState) -> ErrorDetail | None:

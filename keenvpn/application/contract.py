@@ -100,6 +100,8 @@ class NextStepCode(StrEnum):
     """Не перезаписывать и не удалять файл: сохранить копию и проверить вручную."""
     UPDATE_INTERFACE = "update_interface"
     """Использовать интерфейс, совместимый с версией контракта менеджера."""
+    RECREATE_DRAFT = "recreate_draft"
+    """Черновик устарел: сверить текущее состояние и создать черновик заново."""
 
 
 NEXT_STEP_MESSAGES: Mapping[NextStepCode, str] = MappingProxyType({
@@ -121,6 +123,10 @@ NEXT_STEP_MESSAGES: Mapping[NextStepCode, str] = MappingProxyType({
         "Не перезаписывайте и не удаляйте файл: сохраните его копию и проверьте вручную по документации."
     ),
     NextStepCode.UPDATE_INTERFACE: "Используйте интерфейс, совместимый с версией контракта установленного менеджера.",
+    NextStepCode.RECREATE_DRAFT: (
+        "Сверьте текущее состояние и создайте черновик заново: устаревший черновик не применяется, "
+        "настройки роутера при этом не менялись."
+    ),
 })
 """Заранее заданный русский текст каждого шага; других текстов у шагов нет. Таблица только для чтения."""
 
@@ -179,6 +185,8 @@ CODE_NEXT_STEPS: Mapping[tuple[ErrorCategory, str], NextStepCode | None] = Mappi
     (ErrorCategory.INVALID_SOURCE_DATA, "invalid_stored_draft"): NextStepCode.PRESERVE_FILE,
     (ErrorCategory.UNSUPPORTED, "draft_exists"): NextStepCode.OPEN_VIEW,
     (ErrorCategory.UNSUPPORTED, "draft_mismatch"): NextStepCode.OPEN_VIEW,
+    # Устаревший черновик: повтор не поможет, применять его поверх нового состояния нельзя.
+    (ErrorCategory.SOURCE_FAILED, "draft_baseline_changed"): NextStepCode.RECREATE_DRAFT,
 })
 """Переопределения по паре «категория, код»; остальные коды получают шаг категории. Таблица только для чтения."""
 

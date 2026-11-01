@@ -223,7 +223,7 @@ class StatusSummaryScenarioTests(unittest.TestCase):
                         self.assertEqual(item["check"]["reason"], code)
                         self.assertEqual(item["source_error"], {
                             "category": "source_failed", "code": code, "reason": None, "message": message,
-                            "next_step": CHECK_SOURCE_STEP,
+                            "next_step": CHECK_SOURCE_STEP, "conflicts": [],
                         })
                     else:
                         self.assertEqual(item, baseline[item["area"]])

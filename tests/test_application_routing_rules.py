@@ -483,7 +483,25 @@ class AssignRuleIdentifiersTests(ScenarioCase):
             self.store.content = foreign
 
         self.store.before_revision_check = edit
-        self.assert_failed(self.run_assign(), ErrorCategory.SOURCE_FAILED, "metadata_revision_conflict")
+        result = self.run_assign()
+        self.assert_failed(result, ErrorCategory.SOURCE_FAILED, "metadata_revision_conflict")
+        self.assertEqual(result.to_dict()["error"]["conflicts"], [
+            {"subject": "metadata", "source": None, "expected": "present", "found": "unknown"},
+        ])
+        self.assertEqual((self.store.content, self.store.publications), (foreign, 0))
+
+    def test_metadata_created_by_another_writer_is_a_conflict_without_overwrite(self):
+        foreign = stored_bytes(None, synthetic_storage_placement())
+
+        def create():
+            self.store.content = foreign
+
+        self.store.before_revision_check = create
+        result = self.run_assign()
+        self.assert_failed(result, ErrorCategory.SOURCE_FAILED, "metadata_revision_conflict")
+        self.assertEqual(result.to_dict()["error"]["conflicts"], [
+            {"subject": "metadata", "source": None, "expected": "absent", "found": "present"},
+        ])
         self.assertEqual((self.store.content, self.store.publications), (foreign, 0))
 
     def test_store_revision_not_matching_candidate_is_invalid_result(self):

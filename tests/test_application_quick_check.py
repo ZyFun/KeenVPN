@@ -258,7 +258,7 @@ class QuickCheckScenarioTests(unittest.TestCase):
                     if source["source"] == name:
                         self.assertEqual(source, {"source": name, "state": "failed", "error": {
                             "category": "source_failed", "code": code, "reason": None, "message": message,
-                            "next_step": CHECK_SOURCE_STEP,
+                            "next_step": CHECK_SOURCE_STEP, "conflicts": [],
                         }})
                     else:
                         self.assertEqual(source, {"source": source["source"], "state": "read", "error": None})

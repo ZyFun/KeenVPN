@@ -366,13 +366,18 @@ class ImportStoragePlacementTests(ScenarioCase):
 
     def test_external_change_just_before_revision_check_is_conflict_without_overwrite(self):
         external = stored_bytes(separate_partitions(), note="private-note")
-        for stored in (None, stored_bytes(None, note="private-note")):
+        # Ожидалось отсутствие — найден файл; ожидалась прочитанная ревизия — что стало с файлом, хранилище не сообщает.
+        for stored, expected, found in ((None, "absent", "present"), (stored_bytes(None, note="private-note"),
+                                                                        "present", "unknown")):
             with self.subTest(stored=stored is not None):
                 self.setUp()
                 self.store.content = stored
                 self.store.before_revision_check = lambda: setattr(self.store, "content", external)
                 result = self.run_import()
                 self.assert_failure(result, ErrorCategory.SOURCE_FAILED, "metadata_revision_conflict")
+                self.assertEqual(result.to_dict()["error"]["conflicts"], [
+                    {"subject": "metadata", "source": None, "expected": expected, "found": found},
+                ])
                 self.assertIs(self.store.content, external)
                 self.assertEqual(self.store.publications, 0)
 

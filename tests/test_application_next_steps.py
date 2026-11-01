@@ -13,9 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.adapters.trojan_uri import TrojanLinkParser, TrojanURIErrorCode
 from keenvpn.application.connections import InspectConnectionLink, InspectConnectionLinkHandler, link_rejection_detail
 from keenvpn.application.contract import (
-    CATEGORY_NEXT_STEPS, CODE_NEXT_STEPS, CONTRACT_VERSION, NEXT_STEP_MESSAGES, CheckStatus, ErrorCategory, ErrorCode,
-    ErrorDetail, NextStep, NextStepCode, OperationStatus, Result, check_contract_version, failed, invalid_command,
-    next_step_for, succeeded,
+    CATEGORY_NEXT_STEPS, CODE_NEXT_STEPS, CONTRACT_VERSION, NEXT_STEP_MESSAGES, CheckStatus, Conflict, ConflictState,
+    ConflictSubject, ErrorCategory, ErrorCode, ErrorDetail, NextStep, NextStepCode, OperationStatus, Result,
+    check_contract_version, failed, invalid_command, next_step_for, succeeded,
 )
 from keenvpn.application.keenetic_policies import POLICIES_UNAVAILABLE
 from keenvpn.application.manager_metadata import InspectManagerMetadata, InspectManagerMetadataHandler
@@ -476,6 +476,7 @@ class NextStepsInResultsTests(unittest.TestCase):
 
     def test_draft_store_failures_never_suggest_overwriting_or_removal(self):
         draft_id = "0000abcd-0000-4000-8000-00000000000d"
+        TOKEN = "0" * 32
         store = InMemoryDraftSessionStore()
         handler = DiscardDraftHandler(store, operation_ids=lambda: "test-operation")
         with forbid_external_effects():
@@ -483,16 +484,16 @@ class NextStepsInResultsTests(unittest.TestCase):
                 expected = EXPECTED_STORE_STEPS[MetadataStoreFailure[failure.name]]
                 with self.subTest(failure=failure.value):
                     store.read_failure = DraftSessionStoreError(failure, reason=None)
-                    result = handler.execute(DiscardDraft(draft_id=draft_id))
+                    result = handler.execute(DiscardDraft(draft_id=draft_id, expected_revision=TOKEN))
                     self.assertEqual(result.error.code, failure.value)
                     self.assertSafe(result, expected)
             store.read_failure = OSError(PRIVATE_PATH)
-            result = handler.execute(DiscardDraft(draft_id=draft_id))
+            result = handler.execute(DiscardDraft(draft_id=draft_id, expected_revision=TOKEN))
             self.assertEqual(result.error.code, "draft_store_failed")
             self.assertSafe(result, NextStepCode.OPEN_VIEW)
             store.read_failure = None
             store.content = b"{not json"
-            result = handler.execute(DiscardDraft(draft_id=draft_id))
+            result = handler.execute(DiscardDraft(draft_id=draft_id, expected_revision=TOKEN))
             self.assertEqual((result.error.code, result.error.reason), ("invalid_stored_draft", "invalid_draft_json"))
             self.assertSafe(result, NextStepCode.PRESERVE_FILE)
         self.assertEqual(store.remove_calls, ())
@@ -510,7 +511,15 @@ class ContractVersionSnapshotTests(unittest.TestCase):
             list(failed("op", "cmd", error).to_dict()),
             ["contract_version", "operation_id", "command", "status", "data", "error"],
         )
-        self.assertEqual(list(error.to_dict()), ["category", "code", "reason", "message", "next_step"])
+        # Ключи `next_step` и `conflicts` добавлены в версии контракта 1 как совместимые расширения внутри `error`.
+        self.assertEqual(list(error.to_dict()), ["category", "code", "reason", "message", "next_step", "conflicts"])
+        self.assertEqual(error.to_dict()["conflicts"], [])
+        self.assertEqual(
+            list(Conflict(ConflictSubject.DRAFT, ConflictState.PRESENT, ConflictState.CHANGED).to_dict()),
+            ["subject", "source", "expected", "found"],
+        )
+        self.assertEqual([subject.value for subject in ConflictSubject], ["draft", "metadata", "source"])
+        self.assertEqual([state.value for state in ConflictState], ["present", "absent", "changed", "unknown"])
         self.assertEqual(
             [category.value for category in ErrorCategory],
             ["invalid_request", "invalid_input", "unsupported", "source_failed", "invalid_source_data"],
@@ -540,6 +549,16 @@ class ContractVersionSnapshotTests(unittest.TestCase):
         failure = failed("op", "cmd", ErrorDetail(ErrorCategory.SOURCE_FAILED, "metadata_store_busy", "Занято.")).to_dict()
         self.assertEqual(json.loads(json.dumps(failure, ensure_ascii=False)), failure)
         self.assertEqual(failure["error"]["next_step"]["code"], "retry_later")
+        conflict = Conflict(ConflictSubject.METADATA, ConflictState.PRESENT, ConflictState.UNKNOWN)
+        error = ErrorDetail(
+            ErrorCategory.SOURCE_FAILED, "metadata_revision_conflict", "Изменились.", conflicts=(conflict,),
+        )
+        payload = failed("op", "cmd", error).to_dict()
+        self.assertEqual(json.loads(json.dumps(payload, ensure_ascii=False)), payload)
+        self.assertEqual(payload["error"]["conflicts"], [
+            {"subject": "metadata", "source": None, "expected": "present", "found": "unknown"},
+        ])
+        self.assertEqual(payload["error"]["next_step"]["code"], "open_view")
 
 
 if __name__ == "__main__":

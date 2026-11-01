@@ -26,7 +26,7 @@ from keenvpn.application.contract import (
     check_contract_version, failed, invalid_command, new_operation_id, succeeded,
 )
 from keenvpn.application.manager_metadata import (
-    INCONSISTENT, INVALID_STORE_RESULT, read_stored_metadata, store_error_detail,
+    INCONSISTENT, INVALID_STORE_RESULT, read_stored_metadata, store_error_detail, write_expectation,
 )
 from keenvpn.application.ports import ManagerMetadataStore
 from keenvpn.application.proxy_config import XrayConfigView, XrayPositionView, XrayRuleView
@@ -357,7 +357,7 @@ class AssignRuleIdentifiersHandler:
         try:
             revision = self._store.write_metadata(candidate, None if stored is None else stored.revision)
         except Exception as error:
-            return failed(operation_id, name, store_error_detail(error))
+            return failed(operation_id, name, store_error_detail(error, write_expectation(stored)))
         if type(revision) is not str or revision != metadata_revision(content):
             return failed(operation_id, name, INVALID_STORE_RESULT)
         try:

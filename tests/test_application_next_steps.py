@@ -19,8 +19,10 @@ from keenvpn.application.contract import (
 )
 from keenvpn.application.keenetic_policies import POLICIES_UNAVAILABLE
 from keenvpn.application.manager_metadata import InspectManagerMetadata, InspectManagerMetadataHandler
+from keenvpn.application.draft_session import DiscardDraft, DiscardDraftHandler
 from keenvpn.application.ports import (
-    ConnectionLinkRejected, LinkRejection, ManagerMetadataStoreError, MetadataStoreFailure,
+    ConnectionLinkRejected, DraftSessionStoreError, DraftStoreFailure, LinkRejection, ManagerMetadataStoreError,
+    MetadataStoreFailure,
 )
 from keenvpn.application.protocol_registry import RegistryErrorCode
 from keenvpn.application.protocol_support import registry_error_detail
@@ -29,7 +31,7 @@ from keenvpn.domain.connection import SecretValue
 from keenvpn.domain.keenetic_policy import KeeneticPolicyErrorCode
 from keenvpn.domain.routing import RoutingErrorCode
 from keenvpn.domain.routing_explanation import DomainSource
-from tests.support.in_memory import InMemoryManagerMetadataStore, InMemoryRoutingPolicySource
+from tests.support.in_memory import InMemoryDraftSessionStore, InMemoryManagerMetadataStore, InMemoryRoutingPolicySource
 from tests.support.isolation import forbid_external_effects
 
 
@@ -60,6 +62,15 @@ EXPECTED_CODE_STEPS = {
     (ErrorCategory.SOURCE_FAILED, "metadata_store_unsafe"): NextStepCode.PRESERVE_FILE,
     (ErrorCategory.INVALID_SOURCE_DATA, "invalid_stored_metadata"): NextStepCode.PRESERVE_FILE,
     (ErrorCategory.UNSUPPORTED, "storage_placement_mismatch"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.SOURCE_FAILED, "draft_store_busy"): NextStepCode.RETRY_LATER,
+    (ErrorCategory.SOURCE_FAILED, "draft_revision_conflict"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.SOURCE_FAILED, "draft_write_unconfirmed"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.SOURCE_FAILED, "draft_store_failed"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.INVALID_SOURCE_DATA, "invalid_draft_store_result"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.SOURCE_FAILED, "draft_store_unsafe"): NextStepCode.PRESERVE_FILE,
+    (ErrorCategory.INVALID_SOURCE_DATA, "invalid_stored_draft"): NextStepCode.PRESERVE_FILE,
+    (ErrorCategory.UNSUPPORTED, "draft_exists"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.UNSUPPORTED, "draft_mismatch"): NextStepCode.OPEN_VIEW,
 }
 EXPECTED_STORE_STEPS = {
     MetadataStoreFailure.UNAVAILABLE: NextStepCode.CHECK_SOURCE,
@@ -136,6 +147,17 @@ LITERAL_PAIRS = sorted({
     ("source_failed", "metadata_write_unconfirmed"),
     ("invalid_source_data", "rule_binding_failed"),
     ("invalid_source_data", "rule_id_generation_failed"),
+    ("unsupported", "draft_exists"),
+    ("unsupported", "draft_mismatch"),
+    ("invalid_source_data", "invalid_draft_store_result"),
+    ("source_failed", "draft_store_failed"),
+    ("source_failed", "draft_store_unavailable"),
+    ("source_failed", "draft_store_unsafe"),
+    ("source_failed", "draft_store_busy"),
+    ("source_failed", "draft_revision_conflict"),
+    ("invalid_source_data", "invalid_stored_draft"),
+    ("source_failed", "draft_write_failed"),
+    ("source_failed", "draft_write_unconfirmed"),
 })
 """Пары «категория, код», которые сценарии задают литералами; снимок неизменности кодов и категорий."""
 
@@ -160,6 +182,8 @@ def _code(node: ast.expr, constants: dict[str, str]) -> str | None:
             return ErrorCode[member].value
         if owner == "MetadataStoreFailure":
             return MetadataStoreFailure[member].value
+        if owner == "DraftStoreFailure":
+            return DraftStoreFailure[member].value
     return None
 
 
@@ -168,7 +192,7 @@ def literal_pairs_of(source: str) -> set[tuple[ErrorCategory, str]]:
 
     Учитываются `ErrorDetail(ErrorCategory.X, "code", ...)`, `unavailable("code", ...)`,
     `SourceCheck("code", ...)`, таблицы `_UNAVAILABLE` и таблицы отказов хранилища
-    с ключами `MetadataStoreFailure.X`; коды через константы модуля разрешаются.
+    с ключами `MetadataStoreFailure.X` и `DraftStoreFailure.X`; коды через константы модуля разрешаются.
     """
     tree = ast.parse(source)
     constants = {
@@ -338,6 +362,7 @@ class NextStepAssignmentTests(unittest.TestCase):
         for code, expected in (
             ("metadata_store_unavailable", NextStepCode.CHECK_SOURCE), ("metadata_write_failed", NextStepCode.CHECK_SOURCE),
             ("storage_placement_unavailable", NextStepCode.CHECK_SOURCE),
+            ("draft_store_unavailable", NextStepCode.CHECK_SOURCE), ("draft_write_failed", NextStepCode.CHECK_SOURCE),
         ):
             self.assertEqual(step_code(next_step_for(ErrorCategory.SOURCE_FAILED, code)), expected)
         for code in ("manager_metadata_inconsistent", "invalid_storage_placement"):
@@ -446,6 +471,29 @@ class NextStepsInResultsTests(unittest.TestCase):
             )
             self.assertSafe(result, NextStepCode.PRESERVE_FILE)
         self.assertEqual(store.write_calls, ())
+
+    def test_draft_store_failures_never_suggest_overwriting_or_removal(self):
+        draft_id = "0000abcd-0000-4000-8000-00000000000d"
+        store = InMemoryDraftSessionStore()
+        handler = DiscardDraftHandler(store, operation_ids=lambda: "test-operation")
+        with forbid_external_effects():
+            for failure in DraftStoreFailure:
+                expected = EXPECTED_STORE_STEPS[MetadataStoreFailure[failure.name]]
+                with self.subTest(failure=failure.value):
+                    store.read_failure = DraftSessionStoreError(failure, reason=None)
+                    result = handler.execute(DiscardDraft(draft_id=draft_id))
+                    self.assertEqual(result.error.code, failure.value)
+                    self.assertSafe(result, expected)
+            store.read_failure = OSError(PRIVATE_PATH)
+            result = handler.execute(DiscardDraft(draft_id=draft_id))
+            self.assertEqual(result.error.code, "draft_store_failed")
+            self.assertSafe(result, NextStepCode.OPEN_VIEW)
+            store.read_failure = None
+            store.content = b"{not json"
+            result = handler.execute(DiscardDraft(draft_id=draft_id))
+            self.assertEqual((result.error.code, result.error.reason), ("invalid_stored_draft", "invalid_draft_json"))
+            self.assertSafe(result, NextStepCode.PRESERVE_FILE)
+        self.assertEqual(store.remove_calls, ())
 
 
 class ContractVersionSnapshotTests(unittest.TestCase):

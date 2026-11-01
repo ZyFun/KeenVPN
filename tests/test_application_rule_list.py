@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application import routing_import as routing_import_module
 from keenvpn.application.contract import CONTRACT_VERSION, ErrorCategory, ErrorDetail
 from keenvpn.application.manager_metadata import InspectManagerMetadata
-from keenvpn.application.ports import ManagerMetadataStoreError, MetadataStoreFailure as Failure, MetadataStoreReason as Reason
+from keenvpn.application.ports import ManagerMetadataStoreError, MetadataStoreFailure as Failure, StoreReason as Reason
 from keenvpn.application.proxy_config import InspectProxyConfigHandler, XrayPositionView
 from keenvpn.application.routing_import import ImportRoutingScheme, ImportRoutingSchemeHandler, RoutingSchemeView
 from keenvpn.application.routing_rules import (

@@ -9,6 +9,7 @@ from typing import Protocol
 from uuid import UUID
 
 from keenvpn.domain.connection import TrojanConnection
+from keenvpn.domain.draft_session import DraftSession, StoredDraftSession
 from keenvpn.domain.geodata import GeoDatabaseInventory
 from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
 from keenvpn.domain.keenetic_policy import KeeneticPolicySet
@@ -251,8 +252,11 @@ class MetadataStoreFailure(StrEnum):
     """Новый файл виден, но сохранность переименования на диске не подтверждена."""
 
 
-class MetadataStoreReason(StrEnum):
-    """Уточнение отказа хранилища, кроме `invalid_stored_metadata`."""
+class StoreReason(StrEnum):
+    """Уточнение отказа хранилищ приватных файлов менеджера — метаданных и черновика.
+
+    Не используется для отказа формата файла: там `reason` — код домена.
+    """
 
     INVALID_DIRECTORY = "invalid_directory"
     PROTECTED_DIRECTORY = "protected_directory"
@@ -314,4 +318,73 @@ class ManagerMetadataStore(Protocol):
         `expected_revision=None` означает, что метаданных быть не должно.
         Совпадающее содержимое не перезаписывается. При отказе — ManagerMetadataStoreError.
         """
+        ...
+
+
+class DraftStoreFailure(StrEnum):
+    """Почему хранилище сессии черновика отказало."""
+
+    UNAVAILABLE = "draft_store_unavailable"
+    """Каталог или его родитель отсутствует либо не читается."""
+    UNSAFE = "draft_store_unsafe"
+    """Ссылка, неверные права, владелец или тип, защищённый или подменённый каталог."""
+    BUSY = "draft_store_busy"
+    """Черновик уже изменяет другая операция."""
+    CONFLICT = "draft_revision_conflict"
+    """Текущая ревизия не совпала с ожидаемой: черновик появился, исчез или изменился после чтения."""
+    INVALID = "invalid_stored_draft"
+    """Файл нарушает формат или имеет другую версию схемы; код домена — в `reason`."""
+    WRITE_FAILED = "draft_write_failed"
+    """Создание или удаление не выполнено, прежнее состояние файла сохранено."""
+    WRITE_UNCONFIRMED = "draft_write_unconfirmed"
+    """Создание или удаление видно, но сохранность на диске не подтверждена."""
+
+
+_DRAFT_STORE_MESSAGES = {
+    DraftStoreFailure.UNAVAILABLE: "Каталог черновика недоступен.",
+    DraftStoreFailure.UNSAFE: "Каталог или файл черновика небезопасен: ссылка, неверные права, владелец или тип.",
+    DraftStoreFailure.BUSY: "Черновик уже изменяет другая операция.",
+    DraftStoreFailure.CONFLICT: "Черновик изменился после чтения: операция отклонена.",
+    DraftStoreFailure.INVALID: "Файл черновика повреждён или имеет неподдерживаемую версию схемы.",
+    DraftStoreFailure.WRITE_FAILED: "Не удалось изменить черновик: прежнее состояние файла сохранено.",
+    DraftStoreFailure.WRITE_UNCONFIRMED: "Черновик изменён, но сохранность на диске не подтверждена: перечитайте его.",
+}
+
+
+class DraftSessionStoreError(Exception):
+    """Отказ хранилища черновика с безопасными кодами и заранее заданным текстом.
+
+    Пути, имена файлов, содержимое и текст системной ошибки в поля
+    и сообщение не попадают.
+    """
+
+    def __init__(self, failure: DraftStoreFailure, *, reason: str | None = None) -> None:
+        self.failure = failure
+        self.reason = reason
+        super().__init__(_DRAFT_STORE_MESSAGES[failure])
+
+
+class DraftSessionStore(Protocol):
+    """Одна сессия черновика менеджера отдельно от active configs.
+
+    Ревизия — SHA-256 байтов файла. Создание не перезаписывает существующий
+    черновик, удаление сверяет ревизию; при расхождении — отказ без изменения
+    файла. Отсутствие черновика закрепляется на диске отдельным вызовом.
+    Хранилище ничего не применяет к конфигурации.
+    """
+
+    def read_draft(self) -> StoredDraftSession | None:
+        """Вернуть сессию с ревизией или None, если черновика нет; при отказе — DraftSessionStoreError."""
+        ...
+
+    def create_draft(self, session: DraftSession) -> str:
+        """Создать черновик, если его нет, и вернуть ревизию; существующий — `draft_revision_conflict`."""
+        ...
+
+    def remove_draft(self, expected_revision: str) -> None:
+        """Удалить черновик с этой ревизией; другой или отсутствующий — `draft_revision_conflict`."""
+        ...
+
+    def confirm_draft_absent(self) -> None:
+        """Закрепить на диске отсутствие черновика; появившийся — `draft_revision_conflict` без удаления."""
         ...

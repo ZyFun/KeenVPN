@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from keenvpn.adapters import manager_metadata_files
+from keenvpn.adapters import private_files
 from keenvpn.adapters.manager_metadata_files import METADATA_FILE_NAME, ManagerMetadataFiles
 from keenvpn.application import manager_metadata as scenarios
 from keenvpn.application.contract import CONTRACT_VERSION, ErrorCategory
@@ -27,7 +27,7 @@ from keenvpn.application.manager_metadata import (
     ManagerMetadataStatusView, StoragePlacementImportOutcome, StoragePlacementImportView,
 )
 from keenvpn.application.ports import (
-    ManagerMetadataStoreError, MetadataStoreFailure as Failure, MetadataStoreReason as Reason,
+    ManagerMetadataStoreError, MetadataStoreFailure as Failure, StoreReason as Reason,
 )
 from keenvpn.domain import manager_metadata as domain
 from keenvpn.domain.manager_metadata import (
@@ -844,8 +844,8 @@ class FileStoreIntegrationTests(unittest.TestCase):
                 raise OSError(errno.EIO, "Искусственный отказ fsync")
             return original_fsync(descriptor)
 
-        with patch.object(manager_metadata_files.os, "replace", replace), \
-                patch.object(manager_metadata_files.os, "fsync", fsync):
+        with patch.object(private_files.os, "replace", replace), \
+                patch.object(private_files.os, "fsync", fsync):
             result = self.run_import()
         self.assertEqual((result.error.code, result.error.reason), ("metadata_write_unconfirmed", "io_error"))
         self.assertEqual(self.file.read_bytes(), stored_bytes(placement()))

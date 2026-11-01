@@ -32,7 +32,8 @@ from keenvpn.adapters.keenetic_rci import (
     HOTSPOT_RUNTIME_RESOURCE, HOTSPOT_SETTINGS_RESOURCE, POLICIES_RESOURCE, REGISTRATIONS_RESOURCE,
     hotspot_runtime_from_rci, hotspot_settings_from_rci, policies_from_rci, registrations_from_rci,
 )
-from keenvpn.adapters.manager_metadata_files import METADATA_FILE_NAME, PROTECTED_DIRECTORIES, ManagerMetadataFiles
+from keenvpn.adapters.manager_metadata_files import METADATA_FILE_NAME, ManagerMetadataFiles
+from keenvpn.adapters.private_files import PROTECTED_DIRECTORIES
 from keenvpn.adapters.xkeen_files import (
     XKEEN_INIT_PATH, XKEEN_LIST_DIRECTORY, XKEEN_SETTINGS_PATH, xkeen_init_from_bytes, xkeen_list_from_bytes,
     xkeen_settings_from_bytes,
@@ -42,7 +43,7 @@ from keenvpn.application.contract import ErrorCategory
 from keenvpn.application.installation import InspectInstallation, InspectInstallationHandler
 from keenvpn.application.keenetic_state import InspectKeeneticStateHandler
 from keenvpn.application.manager_metadata import ImportStoragePlacement, ImportStoragePlacementHandler
-from keenvpn.application.ports import MetadataStoreFailure, MetadataStoreReason
+from keenvpn.application.ports import MetadataStoreFailure, StoreReason
 from keenvpn.application.proxy_config import InspectProxyConfigHandler
 from keenvpn.application.routing_import import ImportRoutingScheme, ImportRoutingSchemeHandler
 from keenvpn.domain.geodata import GEOIP_FILE_NAME
@@ -573,7 +574,7 @@ class FirstConnectionFileTreeTests(FlowAssertions):
                 self.assertEqual(
                     (error.category, error.code, error.reason),
                     (ErrorCategory.SOURCE_FAILED, MetadataStoreFailure.UNSAFE.value,
-                     MetadataStoreReason.PROTECTED_DIRECTORY.value),
+                     StoreReason.PROTECTED_DIRECTORY.value),
                 )
                 self.assertEqual(store.writes, 0)
                 self.assertEqual(tree_state(self.root), before)

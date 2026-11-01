@@ -66,7 +66,7 @@ assert [item.check.reason for item in unconnected.areas if item.area.value == "c
 | `dns` — DNS и порт 53 | параметры init, списки исключённых и перехватываемых портов | `excluded`, `excluded_by_range`, `not_excluded` | `dns_port_53_path`, сетевая | всегда `not_checked` / `network_check_not_performed`: фактический путь DNS требует сетевой пробы |
 | `autostart` — автозапуск | параметры init | `on`, `off` по флагу `start_auto` | `autostart_flag_unambiguous` | `passed` при `on` или `off`; `failed` / `flag_missing` — флага нет, `flag_duplicate` — повтор, в том числе с отступом, `flag_unexpected` — другое значение; `unsupported` / `flag_unsupported` — единственное присваивание с отступом или выражение. Запуск при загрузке не проверяется |
 | `fallback` — режим резерва | `xkeen.json`, части Xray | `no_direct_fallback`, `direct_fallback` | `fallback_profile_consistent` | по [правилу режима резерва](#режим-резерва) |
-| `draft` — черновик | нет | нет | `draft_present` | всегда `unsupported` / `drafts_not_implemented`: черновиков в этой версии нет |
+| `draft` — черновик | нет | нет | `draft_present` | всегда `unsupported` / `drafts_not_implemented`: сводка не читает [хранилище черновика](draft-session.md) |
 
 Отказ или неподключённый источник меняют только области `core`, `dns`, `autostart` и `fallback`; у `interception`, `vpn` и `draft` источников нет, и их статус от подключения не зависит. Признак `active_network_check` всегда `False`: сетевые проверки областей `vpn` и `dns` не могут быть `passed` или `failed`, это проверяет набор проверок результата.
 

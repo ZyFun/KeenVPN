@@ -140,7 +140,7 @@ AUTOSTART_CHECK = "autostart_flag_unambiguous"
 FALLBACK_CHECK = "fallback_profile_consistent"
 """kill-switch и fallback балансировщиков образуют один из двух профилей резерва."""
 DRAFT_CHECK = "draft_present"
-"""Есть ли черновик изменений; черновиков в этой версии нет."""
+"""Есть ли черновик изменений; сводка этой версии хранилище черновика не читает."""
 
 
 class SummaryReason(StrEnum):
@@ -151,7 +151,7 @@ class SummaryReason(StrEnum):
     INTERCEPTION_NOT_OBSERVED = "interception_not_observed"
     """Правила перехвата не читаются: перехват не выводится из процесса и файлов."""
     DRAFTS_NOT_IMPLEMENTED = "drafts_not_implemented"
-    """Черновиков в этой версии нет."""
+    """Сводка не читает хранилище черновика."""
     FLAG_MISSING = "flag_missing"
     FLAG_DUPLICATE = "flag_duplicate"
     FLAG_UNEXPECTED = "flag_unexpected"

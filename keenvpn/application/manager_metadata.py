@@ -23,7 +23,7 @@ from keenvpn.application.contract import (
     check_contract_version, failed, invalid_command, new_operation_id, succeeded,
 )
 from keenvpn.application.ports import (
-    ManagerMetadataStore, ManagerMetadataStoreError, MetadataStoreFailure, MetadataStoreReason,
+    ManagerMetadataStore, ManagerMetadataStoreError, MetadataStoreFailure, StoreReason,
     StoragePlacementSource,
 )
 from keenvpn.application.views import view_dict, view_fields
@@ -225,13 +225,13 @@ _STORE_FAILURES = {
         "Метаданные менеджера записаны, но сохранность на диске не подтверждена: перечитайте их.",
     ),
 }
-_STORE_REASONS = {reason.value: reason.value for reason in MetadataStoreReason}
+_STORE_REASONS = {reason.value: reason.value for reason in StoreReason}
 _DOMAIN_REASONS = {code.value: code.value for code in ManagerMetadataErrorCode}
 
 
 def _reason(failure: MetadataStoreFailure, value: object) -> str | None:
     """Передать причину только из известного набора; иначе строка хранилища не выводится."""
-    if type(value) in (MetadataStoreReason, ManagerMetadataErrorCode):
+    if type(value) in (StoreReason, ManagerMetadataErrorCode):
         value = value.value
     if type(value) is not str:
         return None

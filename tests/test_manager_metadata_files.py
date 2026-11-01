@@ -15,9 +15,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.adapters import manager_metadata_files
-from keenvpn.adapters.manager_metadata_files import METADATA_FILE_NAME, PROTECTED_DIRECTORIES, ManagerMetadataFiles
+from keenvpn.adapters.manager_metadata_files import METADATA_FILE_NAME, ManagerMetadataFiles
+from keenvpn.adapters.private_files import PROTECTED_DIRECTORIES
 from keenvpn.application.ports import (
-    ManagerMetadataStore, ManagerMetadataStoreError, MetadataStoreFailure as Failure, MetadataStoreReason as Reason,
+    ManagerMetadataStore, ManagerMetadataStoreError, MetadataStoreFailure as Failure, StoreReason as Reason,
 )
 from keenvpn.domain.manager_metadata import (
     MAX_METADATA_SIZE, METADATA_FORMAT, HistoryLimits, ManagerMetadata, ManagerMetadataError, RoleLocation,
@@ -1299,9 +1300,12 @@ class SafetyTests(StoreCase):
             store = ManagerMetadataFiles(str(self.directory), protected_directories=protected_value)
             self.assert_failure(store.read_metadata, Failure.UNSAFE, Reason.INVALID_DIRECTORY)
 
-    def test_default_protection_covers_xray_and_xkeen_directories(self):
-        self.assertEqual(PROTECTED_DIRECTORIES, ("/opt/etc/xray", "/opt/etc/xkeen"))
-        for path in ("/opt/etc/xray", "/opt/etc/xray/configs", "/opt/etc/xkeen", "/opt/etc/xkeen/keenvpn"):
+    def test_default_protection_covers_xray_xkeen_and_init_directories(self):
+        self.assertEqual(PROTECTED_DIRECTORIES, ("/opt/etc/xray", "/opt/etc/xkeen", "/opt/etc/init.d"))
+        for path in (
+            "/opt/etc/xray", "/opt/etc/xray/configs", "/opt/etc/xkeen", "/opt/etc/xkeen/keenvpn",
+            "/opt/etc/init.d", "/opt/etc/init.d/keenvpn",
+        ):
             with self.subTest(path=path), patch.object(os, "open", side_effect=AssertionError("обращение к файлам")):
                 self.assert_failure(ManagerMetadataFiles(path).read_metadata, Failure.UNSAFE,
                                     Reason.PROTECTED_DIRECTORY)

@@ -165,6 +165,16 @@ CODE_NEXT_STEPS: Mapping[tuple[ErrorCategory, str], NextStepCode | None] = Mappi
     (ErrorCategory.SOURCE_FAILED, "metadata_store_unsafe"): NextStepCode.PRESERVE_FILE,
     (ErrorCategory.INVALID_SOURCE_DATA, "invalid_stored_metadata"): NextStepCode.PRESERVE_FILE,
     (ErrorCategory.UNSUPPORTED, "storage_placement_mismatch"): NextStepCode.OPEN_VIEW,
+    # Отказы хранилища черновика: ни один шаг не подталкивает к перезаписи или удалению файла.
+    (ErrorCategory.SOURCE_FAILED, "draft_store_busy"): NextStepCode.RETRY_LATER,
+    (ErrorCategory.SOURCE_FAILED, "draft_revision_conflict"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.SOURCE_FAILED, "draft_write_unconfirmed"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.SOURCE_FAILED, "draft_store_failed"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.INVALID_SOURCE_DATA, "invalid_draft_store_result"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.SOURCE_FAILED, "draft_store_unsafe"): NextStepCode.PRESERVE_FILE,
+    (ErrorCategory.INVALID_SOURCE_DATA, "invalid_stored_draft"): NextStepCode.PRESERVE_FILE,
+    (ErrorCategory.UNSUPPORTED, "draft_exists"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.UNSUPPORTED, "draft_mismatch"): NextStepCode.OPEN_VIEW,
 })
 """Переопределения по паре «категория, код»; остальные коды получают шаг категории. Таблица только для чтения."""
 

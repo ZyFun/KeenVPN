@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.adapters.manager_metadata_files import METADATA_FILE_NAME, ManagerMetadataFiles
 from keenvpn.application.contract import CONTRACT_VERSION, ErrorCategory
 from keenvpn.application.manager_metadata import InspectManagerMetadata, InspectManagerMetadataHandler
-from keenvpn.application.ports import ManagerMetadataStoreError, MetadataStoreFailure as Failure, MetadataStoreReason as Reason
+from keenvpn.application.ports import ManagerMetadataStoreError, MetadataStoreFailure as Failure, StoreReason as Reason
 from keenvpn.application.proxy_config import InspectProxyConfigHandler
 from keenvpn.application.routing_import import ImportRoutingScheme, ImportRoutingSchemeHandler
 from keenvpn.application.routing_rules import (

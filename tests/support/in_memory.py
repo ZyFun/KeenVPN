@@ -12,18 +12,23 @@ from typing import Any, NoReturn
 from uuid import UUID
 
 from keenvpn.application.ports import (
-    ConnectionLinkParser, ConnectionProfileSource, GeoDatabaseSource, GeoDataSource, KeeneticHotspotRuntimeSource,
-    KeeneticHotspotSettingsSource, KeeneticPolicySource, KeeneticRegistrationSource, ManagerMetadataStore,
-    ManagerMetadataStoreError, MetadataStoreFailure, RoutingPolicySource, StoragePlacementSource, XKeenInitSource,
-    XKeenListSource, XKeenSettingsSource, XrayConfigSource, XrayProcessSource,
+    ConnectionLinkParser, ConnectionProfileSource, DraftSessionStore, DraftSessionStoreError, DraftStoreFailure,
+    GeoDatabaseSource, GeoDataSource, KeeneticHotspotRuntimeSource, KeeneticHotspotSettingsSource,
+    KeeneticPolicySource, KeeneticRegistrationSource, ManagerMetadataStore, ManagerMetadataStoreError,
+    MetadataStoreFailure, RoutingPolicySource, StoragePlacementSource, XKeenInitSource, XKeenListSource,
+    XKeenSettingsSource, XrayConfigSource, XrayProcessSource,
 )
 from keenvpn.domain.connection import TrojanConnection
+from keenvpn.domain.draft_session import (
+    DraftSession, DraftSessionError, DraftSessionErrorCode, StoredDraftSession, decode_draft_session, draft_revision,
+    encode_draft_session,
+)
 from keenvpn.domain.geodata import GeoDatabaseInventory
 from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
 from keenvpn.domain.keenetic_policy import KeeneticPolicySet
 from keenvpn.domain.manager_metadata import (
     ManagerMetadata, ManagerMetadataError, StoragePlacement, StoredManagerMetadata, decode_manager_metadata,
-    encode_manager_metadata, metadata_revision,
+    encode_manager_metadata, metadata_revision, valid_metadata_revision,
 )
 from keenvpn.domain.profile import ConnectionProfile
 from keenvpn.domain.routing import DomainCondition, GeoIPCondition, GeoSiteCondition
@@ -204,7 +209,7 @@ def _store_failure(failure: MetadataStoreFailure, reason: str | None = None) -> 
 
 def _checked_content(content: Any) -> bytes | None:
     if content is not None and type(content) is not bytes:
-        raise AdapterSetupError("Содержимое файла метаданных задаётся bytes или None.")
+        raise AdapterSetupError("Содержимое файла хранилища задаётся bytes или None.")
     return content
 
 
@@ -321,6 +326,157 @@ class InMemoryManagerMetadataStore(ManagerMetadataStore):
         return (
             f"InMemoryManagerMetadataStore(present={self._content is not None}, read_calls={self.read_calls}, "
             f"write_calls={len(self._write_calls)}, publications={self.publications})"
+        )
+
+
+def _draft_failure(failure: DraftStoreFailure, reason: str | None = None) -> NoReturn:
+    """Отказ хранилища черновика без активного чужого исключения в цепочке, как у файлового адаптера."""
+    try:
+        raise DraftSessionStoreError(failure, reason=reason) from None
+    except DraftSessionStoreError as error:
+        error.__context__ = None
+        raise
+
+
+class InMemoryDraftSessionStore(DraftSessionStore):
+    """Файл сессии черновика в памяти с семантикой `DraftSessionFiles`.
+
+    `content` — байты файла или `None`, если черновика нет. Чтение разбирает
+    их штатным `decode_draft_session`: повреждённые байты и другая версия
+    схемы дают `invalid_stored_draft` с кодом домена в `reason`. Создание
+    сначала кодирует модель штатным `encode_draft_session` (некорректная —
+    `DraftSessionError` без изменений), затем требует отсутствия черновика:
+    существующий — `draft_revision_conflict`, повреждённый файл не
+    перезаписывается. Удаление проверяет формат ревизии (неверный —
+    `DraftSessionError`), затем сверяет её с текущей: отсутствие или
+    расхождение — конфликт, повреждённый файл не удаляется. Подтверждение
+    отсутствия ничего не меняет: любые байты, в том числе повреждённые, —
+    конфликт.
+
+    Отказы задаются экземплярами исключений и повторяются до замены:
+    `read_failure` — при чтении; `write_failure` — при создании, удалении
+    и подтверждении отсутствия до сверки без изменения байтов, а при
+    `publish_before_failure=True` — после сверки и изменения, как
+    `draft_write_unconfirmed` файлового хранилища. `before_revision_check`
+    вызывается непосредственно перед сверкой: так тест имитирует внешнюю
+    правку в последний момент. `create_calls` и `remove_calls` — история
+    запросов, включая отклонённые; `confirm_calls` — число подтверждений
+    отсутствия. Каталоги, файлы и блокировки не используются.
+    """
+
+    def __init__(self, content: bytes | None = None) -> None:
+        self._content = _checked_content(content)
+        self._read_failure: BaseException | None = None
+        self._write_failure: BaseException | None = None
+        self.publish_before_failure = False
+        self.before_revision_check: Callable[[], None] | None = None
+        self.read_calls = 0
+        self.changes = 0
+        self._create_calls: list[Any] = []
+        self._remove_calls: list[Any] = []
+        self.confirm_calls = 0
+
+    @property
+    def content(self) -> bytes | None:
+        """Текущие байты файла или None."""
+        return self._content
+
+    @content.setter
+    def content(self, content: bytes | None) -> None:
+        # Замена байтов тестом — внешняя правка файла в обход хранилища.
+        self._content = _checked_content(content)
+
+    @property
+    def read_failure(self) -> BaseException | None:
+        """Настроенный отказ чтения."""
+        return self._read_failure
+
+    @read_failure.setter
+    def read_failure(self, outcome: BaseException | None) -> None:
+        checked = _checked_failure(outcome)
+        _release(self._read_failure)
+        self._read_failure = checked
+
+    @property
+    def write_failure(self) -> BaseException | None:
+        """Настроенный отказ создания, удаления и подтверждения отсутствия."""
+        return self._write_failure
+
+    @write_failure.setter
+    def write_failure(self, outcome: BaseException | None) -> None:
+        checked = _checked_failure(outcome)
+        _release(self._write_failure)
+        self._write_failure = checked
+
+    @property
+    def create_calls(self) -> tuple[Any, ...]:
+        """Модели из запросов создания, включая отклонённые."""
+        return tuple(self._create_calls)
+
+    @property
+    def remove_calls(self) -> tuple[Any, ...]:
+        """Ожидаемые ревизии из запросов удаления, включая отклонённые."""
+        return tuple(self._remove_calls)
+
+    def read_draft(self) -> StoredDraftSession | None:
+        self.read_calls += 1
+        if self._read_failure is not None:
+            _resolve(self._read_failure)
+        return self._current()
+
+    def create_draft(self, session: DraftSession) -> str:
+        self._create_calls.append(session)
+        content = encode_draft_session(session)
+        self._change(None, content)
+        return draft_revision(content)
+
+    def remove_draft(self, expected_revision: str) -> None:
+        self._remove_calls.append(expected_revision)
+        if not valid_metadata_revision(expected_revision):
+            raise DraftSessionError(DraftSessionErrorCode.REVISION)
+        self._change(expected_revision, None)
+
+    def confirm_draft_absent(self) -> None:
+        self.confirm_calls += 1
+        failure = self._write_failure
+        if failure is not None and not self.publish_before_failure:
+            _resolve(failure)
+        if self.before_revision_check is not None:
+            self.before_revision_check()
+        if self._content is not None:
+            _draft_failure(DraftStoreFailure.CONFLICT)
+        if failure is not None:
+            _resolve(failure)
+
+    def _change(self, expected_revision: str | None, content: bytes | None) -> None:
+        failure = self._write_failure
+        if failure is not None and not self.publish_before_failure:
+            _resolve(failure)
+        if self.before_revision_check is not None:
+            self.before_revision_check()
+        current = self._current()
+        if (None if current is None else current.revision) != expected_revision:
+            _draft_failure(DraftStoreFailure.CONFLICT)
+        self._content = content
+        self.changes += 1
+        if failure is not None:
+            _resolve(failure)
+
+    def _current(self) -> StoredDraftSession | None:
+        if self._content is None:
+            return None
+        code = None
+        try:
+            return decode_draft_session(self._content)
+        except DraftSessionError as error:
+            code = error.code
+        _draft_failure(DraftStoreFailure.INVALID, code.value)
+
+    def __repr__(self) -> str:
+        return (
+            f"InMemoryDraftSessionStore(present={self._content is not None}, read_calls={self.read_calls}, "
+            f"create_calls={len(self._create_calls)}, remove_calls={len(self._remove_calls)}, "
+            f"confirm_calls={self.confirm_calls}, changes={self.changes})"
         )
 
 

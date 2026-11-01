@@ -686,7 +686,12 @@ def decode_manager_metadata(content: bytes) -> StoredManagerMetadata:
     return StoredManagerMetadata(metadata, metadata_revision(content))
 
 
-def _rebuild_extra(extra: object) -> UnknownFields:
+def rebuild_unknown_fields(extra: object) -> UnknownFields:
+    """Пересобрать неизвестные поля из их снимка; подмена типа или снимка — `invalid_unknown_fields`.
+
+    Общий помощник повторной проверки моделей с неизвестными полями,
+    в том числе сессии черновика.
+    """
     if type(extra) is not UnknownFields:
         _fail(ManagerMetadataErrorCode.UNKNOWN_FIELDS)
     rebuilt = UnknownFields(extra.export())
@@ -698,14 +703,14 @@ def _rebuild_extra(extra: object) -> UnknownFields:
 def _rebuild_tracked(value: object, name: str) -> TrackedValue:
     if type(value) is not TrackedValue:
         _fail(ManagerMetadataErrorCode.FORMAT, name)
-    return _build(name, TrackedValue, state=value.state, value=value.value, extra=_rebuild_extra(value.extra))
+    return _build(name, TrackedValue, state=value.state, value=value.value, extra=rebuild_unknown_fields(value.extra))
 
 
 def _rebuild_role(location: object, name: str) -> RoleLocation:
     if type(location) is not RoleLocation:
         _fail(ManagerMetadataErrorCode.FORMAT, name)
     values: dict[str, object] = {
-        "state": location.state, "verified": location.verified, "extra": _rebuild_extra(location.extra),
+        "state": location.state, "verified": location.verified, "extra": rebuild_unknown_fields(location.extra),
     }
     for key in ("storage_id", "path"):
         item = getattr(location, key)
@@ -725,20 +730,20 @@ def _rebuild_storage(placement: object) -> StoragePlacement:
         _fail(ManagerMetadataErrorCode.FORMAT, limits_name)
     rebuilt_roles = _build(roles_name, StorageRoles, **{
         key: _rebuild_role(getattr(roles, key), _join(roles_name, key)) for key in _ROLES_KEYS
-    }, extra=_rebuild_extra(roles.extra))
+    }, extra=rebuild_unknown_fields(roles.extra))
     rebuilt_limits = _build(limits_name, HistoryLimits, **{
         key: _rebuild_tracked(getattr(limits, key), _join(limits_name, key)) for key in _LIMIT_KEYS
-    }, extra=_rebuild_extra(limits.extra))
+    }, extra=rebuild_unknown_fields(limits.extra))
     return _build(
         name, StoragePlacement, variant=_rebuild_tracked(placement.variant, _join(name, "variant")),
-        roles=rebuilt_roles, history_limits=rebuilt_limits, extra=_rebuild_extra(placement.extra),
+        roles=rebuilt_roles, history_limits=rebuilt_limits, extra=rebuild_unknown_fields(placement.extra),
     )
 
 
 def _rebuild_key(key: object, name: str) -> RuleKey:
     if type(key) is not RuleKey:
         _fail(ManagerMetadataErrorCode.FORMAT, name)
-    return _build(name, RuleKey, condition=key.condition, value=key.value, action=key.action, extra=_rebuild_extra(key.extra))
+    return _build(name, RuleKey, condition=key.condition, value=key.value, action=key.action, extra=rebuild_unknown_fields(key.extra))
 
 
 def _rebuild_record(record: object, name: str) -> RuleRecord:
@@ -746,7 +751,7 @@ def _rebuild_record(record: object, name: str) -> RuleRecord:
         _fail(ManagerMetadataErrorCode.FORMAT, name)
     return _build(
         name, RuleRecord, rule_id=record.rule_id, name=record.name, key=_rebuild_key(record.key, _join(name, "key")),
-        extra=_rebuild_extra(record.extra),
+        extra=rebuild_unknown_fields(record.extra),
     )
 
 
@@ -770,7 +775,7 @@ def validate_manager_metadata(metadata: ManagerMetadata) -> None:
         if type(metadata) is not ManagerMetadata:
             _fail(ManagerMetadataErrorCode.METADATA)
         storage = None if metadata.storage is None else _rebuild_storage(metadata.storage)
-        ManagerMetadata(storage=storage, rules=_rebuild_rules(metadata.rules), extra=_rebuild_extra(metadata.extra))
+        ManagerMetadata(storage=storage, rules=_rebuild_rules(metadata.rules), extra=rebuild_unknown_fields(metadata.extra))
     except ManagerMetadataError as error:
         code, name = error.code, error.field
     except Exception:

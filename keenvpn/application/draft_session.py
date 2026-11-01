@@ -1,14 +1,16 @@
 """Создание, просмотр и отмена одной сессии черновика изменений.
 
-Сценарии работают только с собственным хранилищем черновика через порт
-`DraftSessionStore`: черновик ничего не применяет, конфигурация Xray
-и XKeen, настройки Keenetic и службы не читаются и не меняются. Сессия
-одна: создание при существующем черновике — отказ без перезаписи. Отмена
-удаляет только файл сессии с идентификатором из команды и ревизией из
-чтения. Результаты содержат идентификатор, время создания и число
-неизвестных полей, без путей, ревизии и значений неизвестных полей.
-Ревизии и конфликты для будущих интерфейсов, исходные хеши, блокировка
-устаревшего черновика и применение — не этого модуля.
+Сценарии работают с собственным хранилищем черновика через порт
+`DraftSessionStore`; создание, кроме того, фиксирует исходные отпечатки
+управляемых источников через порт `SourceFingerprintSource`. Черновик ничего
+не применяет: конфигурация Xray и XKeen, настройки Keenetic и службы не
+меняются и не разбираются. Сессия одна: создание при существующем черновике
+— отказ без перезаписи. Отмена удаляет только файл сессии с идентификатором
+из команды и ревизией из чтения. Результаты содержат идентификатор, время
+создания, число неизвестных полей и состояния источников, без путей,
+ревизии, хешей и значений неизвестных полей. Ревизии и конфликты для будущих
+интерфейсов, сравнение с исходными отпечатками, блокировка устаревшего
+черновика и применение — не этого модуля.
 """
 
 from collections.abc import Callable
@@ -22,7 +24,10 @@ from keenvpn.application.contract import (
     CONTRACT_VERSION, ErrorCategory, ErrorDetail, OperationIdFactory, Result, check_contract_version, failed,
     invalid_command, new_operation_id, succeeded,
 )
-from keenvpn.application.ports import DraftSessionStore, DraftSessionStoreError, DraftStoreFailure, StoreReason
+from keenvpn.application.ports import (
+    DraftSessionStore, DraftSessionStoreError, DraftStoreFailure, SourceFingerprintSource, StoreReason,
+)
+from keenvpn.application.source_baseline import capture_baseline
 from keenvpn.application.views import view_dict, view_fields
 from keenvpn.domain.draft_session import (
     DraftSession, DraftSessionErrorCode, StoredDraftSession, draft_revision, encode_draft_session, valid_draft_id,
@@ -74,24 +79,69 @@ class DiscardDraft:
 
 
 @dataclass(frozen=True, slots=True)
-class DraftView:
-    """Безопасное представление сессии: идентификатор, время создания UTC и число неизвестных полей.
+class BaselineSourceView:
+    """Источник исходного отпечатка и его состояние: `present` или `absent`, без хешей."""
 
-    Путь, ревизия, имена и значения неизвестных полей сюда не входят.
+    source: str
+    state: str
+
+    def to_dict(self) -> dict[str, object]:
+        """Вернуть JSON-совместимое представление."""
+        return view_dict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class DraftBaselineView:
+    """Зафиксированные источники в порядке перечня и число записей, неизвестных этой версии.
+
+    Хеши, имена частей Xray и значения неизвестных записей сюда не входят.
+    """
+
+    sources: tuple[BaselineSourceView, ...]
+    unknown_source_count: int
+
+    @classmethod
+    def from_diagnostic(cls, values: dict[str, object]) -> "DraftBaselineView":
+        """Построить представление из безопасной диагностики раздела."""
+        fields = view_fields(cls, values)
+        fields["sources"] = tuple(
+            BaselineSourceView(**view_fields(BaselineSourceView, item)) for item in fields["sources"]
+        )
+        return cls(**fields)
+
+    def to_dict(self) -> dict[str, object]:
+        """Вернуть JSON-совместимое представление."""
+        return {
+            "sources": [item.to_dict() for item in self.sources], "unknown_source_count": self.unknown_source_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DraftView:
+    """Безопасное представление сессии: идентификатор, время создания UTC, число неизвестных полей и источники.
+
+    `baseline` — состояния зафиксированных источников либо None, если раздела
+    в файле нет. Путь, ревизия, хеши, имена и значения неизвестных полей сюда не входят.
     """
 
     draft_id: str
     created_at: str
     unknown_field_count: int
+    baseline: DraftBaselineView | None
 
     @classmethod
     def from_session(cls, session: DraftSession) -> "DraftView":
         """Построить представление из безопасной диагностики домена."""
-        return cls(**view_fields(cls, session.to_diagnostic()))
+        fields = view_fields(cls, session.to_diagnostic())
+        if fields["baseline"] is not None:
+            fields["baseline"] = DraftBaselineView.from_diagnostic(fields["baseline"])
+        return cls(**fields)
 
     def to_dict(self) -> dict[str, object]:
         """Вернуть JSON-совместимое представление."""
-        return view_dict(self)
+        fields = view_dict(self)
+        fields["baseline"] = None if self.baseline is None else self.baseline.to_dict()
+        return fields
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,21 +303,26 @@ class InspectDraftHandler:
 
 
 class CreateDraftHandler:
-    """Создать сессию черновика с новым идентификатором и временем создания UTC.
+    """Создать сессию черновика с новым идентификатором, временем создания UTC и исходными отпечатками.
 
-    Порядок: одно чтение хранилища и не больше одной записи. Существующий
-    черновик — отказ `draft_exists` без записи; повреждённый файл — отказ
-    хранилища без перезаписи. Отсутствие черновика в последний момент перед
-    записью сверяет хранилище: появившийся после чтения черновик — конфликт
-    ревизии. Отказ записи, включая неподтверждённую, не превращается в успех.
-    `draft_ids` и `clock` подменяются в тестах; время берётся с точностью до секунды.
+    Порядок: одно чтение хранилища, затем по одному чтению отпечатка каждого
+    управляемого источника и не больше одной записи. Существующий черновик —
+    отказ `draft_exists` без чтения источников и без записи; повреждённый файл
+    — отказ хранилища без перезаписи. Недоступный источник или некорректный
+    отпечаток — отказ без записи: черновик без полного исходного состояния не
+    создаётся. Отсутствие черновика в последний момент перед записью сверяет
+    хранилище: появившийся после чтения черновик — конфликт ревизии. Отказ
+    записи, включая неподтверждённую, не превращается в успех. `draft_ids`
+    и `clock` подменяются в тестах; время берётся с точностью до секунды.
     """
 
     def __init__(
-        self, store: DraftSessionStore, *, operation_ids: OperationIdFactory = new_operation_id,
-        draft_ids: DraftIdFactory = new_draft_id, clock: Clock = utc_now,
+        self, store: DraftSessionStore, fingerprints: SourceFingerprintSource, *,
+        operation_ids: OperationIdFactory = new_operation_id, draft_ids: DraftIdFactory = new_draft_id,
+        clock: Clock = utc_now,
     ) -> None:
         self._store = store
+        self._fingerprints = fingerprints
         self._operation_ids = operation_ids
         self._draft_ids = draft_ids
         self._clock = clock
@@ -286,9 +341,12 @@ class CreateDraftHandler:
             return failed(operation_id, name, stored)
         if stored is not None:
             return failed(operation_id, name, DRAFT_EXISTS)
+        baseline = capture_baseline(self._fingerprints)
+        if isinstance(baseline, ErrorDetail):
+            return failed(operation_id, name, baseline)
 
         created_at = self._clock().astimezone(timezone.utc).replace(microsecond=0)
-        session = DraftSession(self._draft_ids(), created_at)
+        session = DraftSession(self._draft_ids(), created_at, baseline=baseline)
         content = encode_draft_session(session)
         try:
             revision = self._store.create_draft(session)

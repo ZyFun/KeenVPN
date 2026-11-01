@@ -1,7 +1,8 @@
 """Источники чтения роутера: файлы Entware, процесс Xray и состояние Keenetic через локальный RCI.
 
 Каждый класс реализует один порт чтения и передаёт прочитанные байты, вывод
-команды или ответ RCI существующим преобразователям адаптеров. Пути —
+команды или ответ RCI существующим преобразователям адаптеров; источник
+исходных отпечатков черновика вместо разбора считает их хеши. Пути —
 константы проверенной платформы (KN-1811, Entware в `/opt`); корень
 подменяется только в тестах. Файлы читаются без перехода по ссылкам и с
 пределами размера (`entware_files`), команда — массивом аргументов без shell,
@@ -18,7 +19,9 @@ import selectors
 import subprocess
 import time
 
-from keenvpn.adapters.entware_files import digest_files, fail_read, read_file, read_files, regular_file_exists
+from keenvpn.adapters.entware_files import (
+    digest_file, digest_files, fail_read, read_file, read_files, regular_file_exists,
+)
 from keenvpn.adapters.geodata_files import XRAY_ASSET_DIRECTORY, geo_inventory_from_digests
 from keenvpn.adapters.keenetic_rci import (
     hotspot_runtime_from_rci, hotspot_settings_from_rci, policies_from_rci, registrations_from_rci,
@@ -30,11 +33,12 @@ from keenvpn.adapters.xkeen_files import (
 )
 from keenvpn.adapters.xkeen_runtime import XKEEN_READY_MARKER_PATH, XRAY_PROCESS_NAME, xray_process_from_pidof
 from keenvpn.adapters.xray_configs import XRAY_CONFIG_DIRECTORY, xray_config_from_files
-from keenvpn.application.ports import RouterReadFailure
+from keenvpn.application.ports import RouterReadError, RouterReadFailure
 from keenvpn.domain.geodata import GeoDatabaseInventory
 from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
 from keenvpn.domain.keenetic_policy import KeeneticPolicySet
 from keenvpn.domain.manager_metadata import valid_storage_path
+from keenvpn.domain.source_baseline import BaselineSource, FingerprintState, SourceFingerprint, native_fingerprint
 from keenvpn.domain.xkeen_config import XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings
 from keenvpn.domain.xray_config import XrayConfigSet
 from keenvpn.domain.xray_process import XrayProcessObservation
@@ -271,3 +275,57 @@ class KeeneticHotspotRuntimeRci(_RciSource):
 
     def current_hotspot_runtime(self) -> KeeneticHotspotRuntime:
         return hotspot_runtime_from_rci(self._payload(RciResource.HOTSPOT_RUNTIME))
+
+
+class SourceFingerprints(_RciSource):
+    """`SourceFingerprintSource`: исходные отпечатки файлов Xray и XKeen и native-настроек Keenetic.
+
+    Файлы читаются потоком теми же путями и с теми же пределами, что источники
+    разбора, без перехода по ссылкам и с проверкой неизменности; содержимое не
+    разбирается. Отпечаток файла — SHA-256 байтов, каталога частей Xray —
+    SHA-256 каждого `*.json` по порядку имён; подкаталоги пропускаются, ссылка
+    с окончанием `.json` — отказ. Отсутствие файла, каталога или его родителя
+    — `absent`; пустой файл и пустой каталог — `present`. Ресурс RCI читается
+    одним запросом, отпечаток — SHA-256 канонического JSON всего объекта.
+    Прочие отказы чтения проходят наружу.
+    """
+
+    def __init__(self, *, root: str = "/", read: RciReader = read_rci) -> None:
+        super().__init__(read=read)
+        lists = _under(root, XKEEN_LIST_DIRECTORY)
+        self._xray = _under(root, XRAY_CONFIG_DIRECTORY)
+        self._files = {
+            BaselineSource.XKEEN_SETTINGS: (_under(root, XKEEN_SETTINGS_PATH), XKEEN_SETTINGS_LIMIT),
+            BaselineSource.XKEEN_INIT: (_under(root, XKEEN_INIT_PATH), XKEEN_INIT_LIMIT),
+            BaselineSource.XKEEN_PORT_EXCLUDE: (
+                posixpath.join(lists, XKeenListName.PORT_EXCLUDE.value), XKEEN_LIST_LIMIT,
+            ),
+            BaselineSource.XKEEN_PORT_PROXYING: (
+                posixpath.join(lists, XKeenListName.PORT_PROXYING.value), XKEEN_LIST_LIMIT,
+            ),
+            BaselineSource.XKEEN_IP_EXCLUDE: (posixpath.join(lists, XKeenListName.IP_EXCLUDE.value), XKEEN_LIST_LIMIT),
+        }
+        self._resources = {
+            BaselineSource.KEENETIC_POLICIES: RciResource.POLICIES,
+            BaselineSource.KEENETIC_HOTSPOT_SETTINGS: RciResource.HOTSPOT_SETTINGS,
+        }
+
+    def current_fingerprint(self, source: BaselineSource) -> SourceFingerprint:
+        if type(source) is not BaselineSource:
+            raise TypeError("Источник отпечатка задаётся BaselineSource.")
+        present = FingerprintState.PRESENT
+        if source in self._resources:
+            return SourceFingerprint(source, present, sha256=native_fingerprint(self._payload(self._resources[source])))
+        try:
+            if source is BaselineSource.XRAY_CONFIGS:
+                digests = digest_files(
+                    self._xray, ".json", file_limit=XRAY_PART_LIMIT, count_limit=XRAY_PART_COUNT_LIMIT,
+                )
+                parts = tuple((name, digest) for name, (_size, digest) in digests.items())
+                return SourceFingerprint(source, present, parts=parts)
+            path, limit = self._files[source]
+            return SourceFingerprint(source, present, sha256=digest_file(path, limit)[1])
+        except RouterReadError as error:
+            if error.failure is not RouterReadFailure.MISSING:
+                raise
+        return SourceFingerprint(source, FingerprintState.ABSENT)

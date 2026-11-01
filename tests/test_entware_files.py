@@ -14,7 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.adapters import entware_files
 from keenvpn.adapters.entware_files import (
-    PathFailure, digest_files, read_file, read_files, regular_file_exists, walk_directory,
+    PathFailure, digest_file, digest_files, read_file, read_files, regular_file_exists, walk_directory,
 )
 from keenvpn.application.ports import RouterReadError, RouterReadFailure
 
@@ -370,6 +370,178 @@ class DigestFilesTests(FilesCase):
             digests = digest_files(str(self.root / "dat"), ".dat", file_limit=8 * 1024 * 1024, count_limit=4)
         self.assertEqual(digests["geoip.dat"][0], 3 * 1024 * 1024 + 5)
         self.assertLessEqual(max(sizes), 1024 * 1024)
+
+
+class DigestFileTests(FilesCase):
+    def test_digest_of_regular_file_and_empty_file(self):
+        path = self.write("etc/init.d/S05xkeen", b"#!/bin/sh\n")
+        self.assertEqual(digest_file(str(path), 64), (10, hashlib.sha256(b"#!/bin/sh\n").hexdigest()))
+        self.write("etc/empty", b"")
+        self.assertEqual(digest_file(str(self.root / "etc/empty"), 0), (0, hashlib.sha256(b"").hexdigest()))
+
+    def test_same_failures_as_reading_the_file(self):
+        target = self.write("real/etc/xkeen.json", b"{}")
+        (self.root / "link-file").symlink_to(target)
+        (self.root / "link-dir").symlink_to(self.root / "real")
+        (self.root / "etc/dir").mkdir(parents=True)
+        self.write("etc/large", b"x" * 65)
+        for relative, failure in (
+            ("etc/absent", Failure.MISSING), ("absent/etc/xkeen.json", Failure.MISSING),
+            ("link-file", Failure.UNSAFE), ("link-dir/etc/xkeen.json", Failure.UNSAFE), ("etc/dir", Failure.UNSAFE),
+            ("etc/large", Failure.TOO_LARGE),
+        ):
+            with self.subTest(path=relative):
+                self.assert_failure(lambda: digest_file(str(self.root / relative), 64), failure)
+        self.assert_failure(lambda: digest_file("etc/xkeen.json", 64), Failure.UNSAFE)
+        self.assert_failure(lambda: digest_file(str(self.root) + "/etc/../etc/xkeen.json", 64), Failure.UNSAFE)
+
+    def test_file_or_parent_changed_while_hashing(self):
+        path = self.write("etc/xkeen/xkeen.json", b"0123456789")
+        original = os.read
+
+        def rewrite(descriptor, size):
+            chunk = original(descriptor, size)
+            if chunk:
+                os.utime(path, ns=(1, 1))
+            return chunk
+
+        with patch.object(os, "read", rewrite):
+            self.assert_failure(lambda: digest_file(str(path), 64), Failure.CHANGED)
+
+        def swap_parent(descriptor, size):
+            chunk = original(descriptor, size)
+            if chunk and (self.root / "etc/xkeen").exists() and not (self.root / "etc/xkeen.old").exists():
+                (self.root / "etc/xkeen").rename(self.root / "etc/xkeen.old")
+                shutil.copytree(self.root / "etc/xkeen.old", self.root / "etc/xkeen")
+            return chunk
+
+        with patch.object(os, "read", swap_parent):
+            self.assert_failure(lambda: digest_file(str(path), 64), Failure.CHANGED)
+
+    def test_streams_in_chunks_without_loading_the_file(self):
+        path = self.write("etc/init.d/S05xkeen", b"x" * (2 * 1024 * 1024 + 3))
+        sizes = []
+        original = os.read
+
+        def counting(descriptor, size):
+            chunk = original(descriptor, size)
+            sizes.append(len(chunk))
+            return chunk
+
+        with patch.object(os, "read", counting):
+            size, digest = digest_file(str(path), 4 * 1024 * 1024)
+        self.assertEqual((size, digest), (2 * 1024 * 1024 + 3, hashlib.sha256(b"x" * (2 * 1024 * 1024 + 3)).hexdigest()))
+        self.assertLessEqual(max(sizes), 1024 * 1024)
+
+
+class MissingConfirmedTests(FilesCase):
+    """Отсутствие в каталоге, заменённом по пути во время чтения, — `changed`, а не `missing` или `False`."""
+
+    def swap_on_open(self, name: str, replace):
+        """Подменить каталог по пути непосредственно перед открытием `name` в удерживаемом каталоге."""
+        original = os.open
+        done = []
+
+        def opening(path, flags, *args, **kwargs):
+            if path == name and kwargs.get("dir_fd") is not None and not done:
+                done.append(1)
+                replace()
+            return original(path, flags, *args, **kwargs)
+
+        return patch.object(os, "open", opening), done
+
+    def replace_with(self, relative: str, *files: str):
+        """Переименовать каталог и создать по прежнему пути новый с этими файлами."""
+        def run():
+            path = self.root / relative
+            path.rename(path.with_name(path.name + ".old"))
+            path.mkdir()
+            for name in files:
+                self.write(f"{relative}/{name}", b"{}")
+        return run
+
+    def swap_on_stat(self, name: str, replace):
+        """То же для проверки наличия файла: подмена перед `stat` имени в удерживаемом каталоге."""
+        original = os.stat
+        done = []
+
+        def stating(path, *args, **kwargs):
+            if path == name and kwargs.get("dir_fd") is not None and not done:
+                done.append(1)
+                replace()
+            return original(path, *args, **kwargs)
+
+        return patch.object(os, "stat", stating), done
+
+    def test_file_missing_in_replaced_parent_is_changed(self):
+        path = str(self.root / "etc/xkeen/xkeen.json")
+        for title, call, swap in (
+            ("read_file", lambda: read_file(path, 64), self.swap_on_open),
+            ("digest_file", lambda: digest_file(path, 64), self.swap_on_open),
+            ("regular_file_exists", lambda: regular_file_exists(path), self.swap_on_stat),
+        ):
+            with self.subTest(call=title):
+                shutil.rmtree(self.root / "etc", ignore_errors=True)
+                self.write("etc/xkeen/other", b"x")
+                patcher, done = swap("xkeen.json", self.replace_with("etc/xkeen", "xkeen.json"))
+                with patcher:
+                    self.assert_failure(call, Failure.CHANGED)
+                self.assertEqual(done, [1])
+
+    def test_component_missing_in_replaced_ancestor_is_changed(self):
+        for title, call in (
+            ("read_file", lambda: read_file(str(self.root / "etc/xkeen/xkeen.json"), 64)),
+            ("digest_file", lambda: digest_file(str(self.root / "etc/xkeen/xkeen.json"), 64)),
+            ("digest_files", lambda: digest_files(str(self.root / "etc/xkeen"), ".json", file_limit=64, count_limit=4)),
+            ("read_files", lambda: read_files(str(self.root / "etc/xkeen"), ".json", **LIMITS)),
+            ("regular_file_exists", lambda: regular_file_exists(str(self.root / "etc/xkeen/xkeen.json"))),
+        ):
+            with self.subTest(call=title):
+                shutil.rmtree(self.root / "etc", ignore_errors=True)
+                shutil.rmtree(self.root / "etc.old", ignore_errors=True)
+                (self.root / "etc").mkdir()
+
+                def replace():
+                    (self.root / "etc").rename(self.root / "etc.old")
+                    self.write("etc/xkeen/xkeen.json", b"{}")
+
+                patcher, done = self.swap_on_open("xkeen", replace)
+                with patcher:
+                    self.assert_failure(call, Failure.CHANGED)
+                self.assertEqual(done, [1])
+
+    def test_genuine_absence_is_still_missing(self):
+        self.write("etc/xkeen/other", b"x")
+        for relative in ("etc/xkeen/xkeen.json", "etc/absent/xkeen.json", "absent/etc/xkeen.json"):
+            with self.subTest(path=relative):
+                path = str(self.root / relative)
+                self.assert_failure(lambda: read_file(path, 64), Failure.MISSING)
+                self.assert_failure(lambda: digest_file(path, 64), Failure.MISSING)
+                self.assertFalse(regular_file_exists(path))
+        self.assert_failure(
+            lambda: digest_files(str(self.root / "etc/absent"), ".json", file_limit=64, count_limit=4), Failure.MISSING,
+        )
+
+    def test_walk_confirms_only_missing_components_with_the_held_directory(self):
+        self.write("etc/plain", b"x")
+        calls = []
+
+        def confirm(path, descriptor):
+            calls.append((path, os.path.samestat(os.fstat(descriptor), os.stat(path))))
+
+        def fail(kind):
+            raise RouterReadError(Failure.MISSING if kind is PathFailure.MISSING else Failure.UNSAFE)
+
+        for relative, expected in (("etc/absent/inner", "etc"), ("absent", "")):
+            with self.subTest(path=relative), self.assertRaises(RouterReadError):
+                with walk_directory(str(self.root / relative), fail, confirm_missing=confirm):
+                    pass
+            self.assertEqual(calls.pop(), (str(self.root / expected).rstrip("/"), True))
+        with self.assertRaises(RouterReadError), walk_directory(str(self.root / "etc/plain/x"), fail, confirm_missing=confirm):
+            pass
+        self.assertEqual(calls, [])
+        with self.assertRaises(RouterReadError), walk_directory(str(self.root / "etc/absent"), fail):
+            pass
 
 
 class RegularFileExistsTests(FilesCase):

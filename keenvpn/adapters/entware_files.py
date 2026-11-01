@@ -6,9 +6,11 @@
 а не переход. Файл читается через дескриптор не больше предела плюс один
 байт; состояние файла сверяется до и после чтения, набор файлов каталога
 — повторным перечислением, а сам каталог — повторным проходом пути от корня.
-Ничего не записывается, не создаётся и не
-исполняется. Отказы — `RouterReadError` с безопасным кодом без путей и
-текста системной ошибки.
+Отказ `missing` сообщается только после такого же прохода к каталогу, в
+котором не нашлось файла или подкаталога: в каталоге, уже заменённом по
+пути, отсутствие ничего не говорит о текущем состоянии, и это `changed`.
+Ничего не записывается, не создаётся и не исполняется. Отказы —
+`RouterReadError` с безопасным кодом без путей и текста системной ошибки.
 
 Обход каталогов без ссылок используют также хранилище метаданных менеджера:
 `walk_directory` и `classify_open_failure` переводят отказ в вид
@@ -16,7 +18,7 @@
 """
 
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from enum import StrEnum
 import errno
 import hashlib
@@ -71,24 +73,35 @@ def classify_open_failure(parent: int, name: str, error: OSError, *, directory: 
 
 
 @contextmanager
-def walk_directory(path: str, fail: Callable[[PathFailure], NoReturn]) -> Iterator[int]:
+def walk_directory(
+    path: str, fail: Callable[[PathFailure], NoReturn], *,
+    confirm_missing: Callable[[str, int], None] | None = None,
+) -> Iterator[int]:
     """Открыть каталог по абсолютному пути, не проходя по ссылкам ни в одном компоненте.
 
     Отказ передаётся в `fail`, который обязан поднять исключение вызывающего кода.
-    Дескриптор закрывается при выходе из блока.
+    Перед отказом «отсутствует» вызывается `confirm_missing(путь, дескриптор)`
+    удерживаемого каталога, в котором не нашлось компонента: он может поднять
+    свой отказ, если этот каталог по пути уже заменён. Дескриптор закрывается
+    при выходе из блока.
     """
     try:
         descriptor = os.open("/", DIRECTORY_FLAGS)
     except OSError:
         fail(PathFailure.IO_ERROR)
     try:
+        held = "/"
         for name in (part for part in path.split("/") if part):
             try:
                 child = os.open(name, DIRECTORY_FLAGS, dir_fd=descriptor)
             except OSError as error:
-                fail(classify_open_failure(descriptor, name, error, directory=True))
+                kind = classify_open_failure(descriptor, name, error, directory=True)
+                if kind is PathFailure.MISSING and confirm_missing is not None:
+                    confirm_missing(held, descriptor)
+                fail(kind)
             os.close(descriptor)
             descriptor = child
+            held = posixpath.join(held, name)
         yield descriptor
     finally:
         os.close(descriptor)
@@ -154,6 +167,11 @@ def _confirm_path(path: str, directory: int) -> None:
         fail_read(RouterReadFailure.CHANGED)
 
 
+def _walk(path: str) -> AbstractContextManager[int]:
+    """Обход пути источника: отсутствие компонента — `missing`, только если каталог перед ним не заменён."""
+    return walk_directory(path, _fail_path, confirm_missing=_confirm_path)
+
+
 def _read_entry(
     directory: int, name: str, limit: int, consume: Callable[[bytes], object], *, listed: bool = False,
 ) -> int:
@@ -195,14 +213,40 @@ def _read_entry(
     return size
 
 
+def _read_single(path: str, limit: int, consume: Callable[[bytes], object]) -> int:
+    """Прочитать обычный файл по пути потоком и убедиться, что каталог по пути не заменён.
+
+    Отсутствие файла в удерживаемом каталоге — `missing`, только если путь
+    по-прежнему ведёт к этому каталогу; иначе — `changed`.
+    """
+    parent, name = _split(path)
+    with _walk(parent) as directory:
+        try:
+            size = _read_entry(directory, name, limit, consume)
+        except RouterReadError as error:
+            if error.failure is RouterReadFailure.MISSING:
+                _confirm_path(parent, directory)
+            raise
+        _confirm_path(parent, directory)
+    return size
+
+
 def read_file(path: str, limit: int) -> bytes:
     """Прочитать обычный файл целиком, не больше `limit` байт."""
-    parent, name = _split(path)
     chunks: list[bytes] = []
-    with walk_directory(parent, _fail_path) as directory:
-        _read_entry(directory, name, limit, chunks.append)
-        _confirm_path(parent, directory)
+    _read_single(path, limit, chunks.append)
     return b"".join(chunks)
+
+
+def digest_file(path: str, limit: int) -> tuple[int, str]:
+    """Размер и SHA-256 обычного файла, не больше `limit` байт; файл не загружается в память.
+
+    Проверки те же, что у `read_file`: путь без ссылок, неизменность файла
+    и каталога во время чтения, подтверждённое отсутствие.
+    """
+    hasher = hashlib.sha256()
+    size = _read_single(path, limit, hasher.update)
+    return size, hasher.hexdigest()
 
 
 def _entries(directory: int, suffix: str, count_limit: int) -> dict[str, tuple[int, ...]]:
@@ -239,7 +283,7 @@ def _read_directory(
     """Прочитать файлы каталога по порядку имён и убедиться, что ни набор, ни каталог по пути не изменились."""
     if not valid_storage_path(path):
         fail_read(RouterReadFailure.UNSAFE)
-    with walk_directory(path, _fail_path) as directory:
+    with _walk(path) as directory:
         entries = _entries(directory, suffix, count_limit)
         values = {name: read(directory, name) for name in entries}
         if _entries(directory, suffix, count_limit) != entries:
@@ -275,13 +319,14 @@ def digest_files(path: str, suffix: str, *, file_limit: int, count_limit: int) -
 
 
 def regular_file_exists(path: str) -> bool:
-    """Есть ли обычный файл по пути; отсутствие файла или каталога — `False`, ссылка — отказ."""
+    """Есть ли обычный файл по пути; подтверждённое отсутствие файла или каталога — `False`, ссылка — отказ."""
     parent, name = _split(path)
     try:
-        with walk_directory(parent, _fail_path) as directory:
+        with _walk(parent) as directory:
             try:
                 info = os.stat(name, dir_fd=directory, follow_symlinks=False)
             except FileNotFoundError:
+                _confirm_path(parent, directory)
                 return False
             except PermissionError:
                 fail_read(RouterReadFailure.PERMISSION_DENIED)

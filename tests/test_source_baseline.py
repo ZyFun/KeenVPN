@@ -1,4 +1,4 @@
-"""Исходные отпечатки источников: канонический хеш native-настроек, модель отпечатка и строгий раздел формата."""
+"""Исходные отпечатки источников: канонический хеш native-настроек, модель и сравнение отпечатков, строгий раздел формата."""
 
 from dataclasses import FrozenInstanceError
 import hashlib
@@ -13,7 +13,7 @@ from keenvpn.domain.manager_metadata import UnknownFields
 from keenvpn.domain.source_baseline import (
     MAX_BASELINE_PARTS, BaselineSource, FingerprintState, SourceBaseline, SourceBaselineError,
     SourceBaselineErrorCode as Code, SourceFingerprint, export_source_baseline, native_fingerprint,
-    parse_source_baseline, rebuild_source_baseline, valid_part_name, validate_source_fingerprint,
+    parse_source_baseline, rebuild_source_baseline, same_fingerprint, valid_part_name, validate_source_fingerprint,
 )
 from tests.support.snapshot import load_keenetic_snapshot
 
@@ -177,6 +177,42 @@ class SourceFingerprintTests(ErrorAssertions):
         object.__delattr__(broken, "sha256")
         self.assert_error(lambda: validate_source_fingerprint(broken), Code.ENTRY)
         self.assert_error(lambda: validate_source_fingerprint({"source": "xkeen_settings"}), Code.ENTRY)
+
+
+class SameFingerprintTests(unittest.TestCase):
+    def test_same_state_and_hashes_match_and_absent_matches_only_absent(self):
+        absent = SourceFingerprint(BaselineSource.XKEEN_SETTINGS, ABSENT)
+        self.assertTrue(same_fingerprint(file_fingerprint(), file_fingerprint()))
+        self.assertTrue(same_fingerprint(absent, SourceFingerprint(BaselineSource.XKEEN_SETTINGS, ABSENT)))
+        self.assertTrue(same_fingerprint(xray("01_log.json", "02_dns.json"), xray("01_log.json", "02_dns.json")))
+        self.assertFalse(same_fingerprint(file_fingerprint(), absent))
+        self.assertFalse(same_fingerprint(absent, file_fingerprint()))
+        # Пустой файл — не отсутствующий, другой хеш — другой файл.
+        self.assertFalse(same_fingerprint(file_fingerprint(), file_fingerprint(value=digest(1))))
+        self.assertFalse(same_fingerprint(file_fingerprint(), file_fingerprint(BaselineSource.XKEEN_INIT)))
+
+    def test_any_change_of_xray_part_set_differs(self):
+        recorded = xray("01_log.json", "02_dns.json")
+        renamed = SourceFingerprint(
+            BaselineSource.XRAY_CONFIGS, PRESENT, parts=(("01_log.json", digest(0)), ("03_dns.json", digest(1))),
+        )
+        changed = SourceFingerprint(
+            BaselineSource.XRAY_CONFIGS, PRESENT, parts=(("01_log.json", digest(0)), ("02_dns.json", digest(7))),
+        )
+        empty = SourceFingerprint(BaselineSource.XRAY_CONFIGS, PRESENT, parts=())
+        for other in (xray("01_log.json"), xray("01_log.json", "02_dns.json", "03_TEST.json"), renamed, changed, empty):
+            with self.subTest(parts=len(other.parts)):
+                self.assertFalse(same_fingerprint(recorded, other))
+                self.assertFalse(same_fingerprint(other, recorded))
+        self.assertTrue(same_fingerprint(empty, SourceFingerprint(BaselineSource.XRAY_CONFIGS, PRESENT, parts=())))
+
+    def test_only_models_are_compared(self):
+        for first, second in (
+            (file_fingerprint(), file_fingerprint().to_diagnostic()), ({"source": "xkeen_settings"}, file_fingerprint()),
+            (None, None),
+        ):
+            with self.subTest(first=type(first).__name__, second=type(second).__name__), self.assertRaises(TypeError):
+                same_fingerprint(first, second)
 
 
 class SourceBaselineTests(ErrorAssertions):

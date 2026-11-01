@@ -9,10 +9,11 @@ SHA-256 каждой части, native-настройки — SHA-256 кано�
 пустого каталога (`present`). Недоступный источник здесь не моделируется:
 его отказ передаёт порт чтения, а сценарий не создаёт черновик.
 
-Модуль ничего не читает и не записывает: он проверяет модели и переводит
-раздел `baseline` в JSON и обратно. Хеши — данные доверенного кода: `repr`
-и диагностика показывают только источник и состояние. Сравнение с текущим
-состоянием и блокировка устаревшего черновика — не этого модуля.
+Модуль ничего не читает и не записывает: он проверяет модели, сравнивает
+два отпечатка одного источника и переводит раздел `baseline` в JSON и
+обратно. Хеши — данные доверенного кода: `repr` и диагностика показывают
+только источник и состояние. Повторное чтение источников и блокировка
+устаревшего черновика — не этого модуля.
 """
 
 from dataclasses import dataclass, field
@@ -182,6 +183,22 @@ class SourceFingerprint:
     def to_diagnostic(self) -> dict[str, str]:
         """Источник и состояние без хешей и имён частей."""
         return {"source": self.source.value, "state": self.state.value}
+
+
+def same_fingerprint(first: SourceFingerprint, second: SourceFingerprint) -> bool:
+    """Совпадают ли два отпечатка: тот же источник, то же состояние и те же хеши.
+
+    `absent` совпадает только с `absent`. У каталога частей Xray сравнивается
+    набор имён вместе с хешами: новая, удалённая или переименованная часть —
+    расхождение. Поля сравниваются по точным типам, а не равенством моделей,
+    поэтому перечисление не сравнивается со строкой.
+    """
+    if type(first) is not SourceFingerprint or type(second) is not SourceFingerprint:
+        raise TypeError("Сравниваются отпечатки SourceFingerprint.")
+    return (
+        first.source is second.source and first.state is second.state
+        and first.sha256 == second.sha256 and first.parts == second.parts
+    )
 
 
 def _no_fields() -> UnknownFields:

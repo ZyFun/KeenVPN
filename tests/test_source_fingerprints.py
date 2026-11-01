@@ -1,4 +1,4 @@
-"""Исходные отпечатки управляемых источников роутера и их фиксация при создании черновика.
+"""Исходные отпечатки управляемых источников роутера, их фиксация при создании черновика и проверка его актуальности.
 
 Файлы читаются из обезличенного снимка во временном корне, RCI — через
 подставное соединение. Роутер, сеть и процессы не используются.
@@ -20,7 +20,7 @@ from keenvpn.adapters.draft_session_files import DRAFT_FILE_NAME, DraftSessionFi
 from keenvpn.adapters.keenetic_rci_http import RciResource
 from keenvpn.adapters.router_sources import XKEEN_INIT_LIMIT, XRAY_PART_COUNT_LIMIT, XRAY_PART_LIMIT, SourceFingerprints
 from keenvpn.application.contract import ErrorCategory, NextStepCode
-from keenvpn.application.draft_session import CreateDraft, CreateDraftHandler
+from keenvpn.application.draft_session import CheckDraftBaseline, CheckDraftBaselineHandler, CreateDraft, CreateDraftHandler
 from keenvpn.application.ports import RouterReadError, RouterReadFailure
 from keenvpn.domain.draft_session import decode_draft_session
 from keenvpn.domain.source_baseline import (
@@ -335,6 +335,77 @@ class CreateDraftOverRouterSourcesTests(FingerprintsCase):
         result = self.handler.execute(CreateDraft())
         self.assertEqual((result.error.code, result.error.reason), ("invalid_draft_baseline_source", "invalid_baseline_parts"))
         self.assertFalse((self.directory / DRAFT_FILE_NAME).exists())
+
+
+class CheckDraftOverRouterSourcesTests(FingerprintsCase):
+    """Черновик, созданный по файлам снимка, проверяется на актуальность после внешних правок тех же файлов."""
+
+    def setUp(self):
+        super().setUp()
+        self.data = Path(os.path.realpath(tempfile.mkdtemp(prefix="keenvpn-baseline-data-")))
+        self.addCleanup(shutil.rmtree, self.data)
+        self.directory = self.data / "draft"
+        create = CreateDraftHandler(DraftSessionFiles(str(self.directory)), self.reader, operation_ids=lambda: "test-operation")
+        created = create.execute(CreateDraft())
+        self.assertTrue(created.succeeded)
+        self.command = CheckDraftBaseline(draft_id=created.data.draft_id, expected_revision=created.data.revision)
+        self.check = CheckDraftBaselineHandler(
+            DraftSessionFiles(str(self.directory)), self.reader, operation_ids=lambda: "test-operation",
+        )
+        self.draft = (self.directory / DRAFT_FILE_NAME).read_bytes()
+
+    def run_check(self):
+        before = self.files()
+        result = self.check.execute(self.command)
+        # Проверка ничего не пишет: ни файлы роутера, ни файл черновика не меняются.
+        self.assertEqual(self.files(), before)
+        self.assertEqual((self.directory / DRAFT_FILE_NAME).read_bytes(), self.draft)
+        text = json.dumps(result.to_dict(), ensure_ascii=False)
+        for value in (self.base, str(self.data), "01_log.json", self.command.expected_revision):
+            self.assertNotIn(value, text)
+        return result
+
+    def conflicts(self, result):
+        return [(item["source"], item["expected"], item["found"]) for item in result.to_dict()["error"]["conflicts"]]
+
+    def test_unchanged_files_and_settings_keep_the_draft_current(self):
+        result = self.run_check()
+        self.assertEqual(result.to_dict()["data"], {"outcome": "current", "draft_id": self.command.draft_id})
+        # Два ресурса RCI на создание и два на проверку: реестр регистраций и runtime не читаются.
+        self.assertEqual(self.script.paths, FINGERPRINT_PATHS * 2)
+
+    def test_external_file_edits_make_the_draft_stale(self):
+        (self.root / XKEEN / "port_exclude.lst").write_bytes(b"TEST_port\n")
+        (self.root / XRAY_CONFIGS / "99_TEST_extra.json").write_bytes(b"{}")
+        (self.root / INIT).unlink()
+        result = self.run_check()
+        self.assertEqual((result.error.code, result.error.next_step.code), ("draft_baseline_changed", NextStepCode.RECREATE_DRAFT))
+        self.assertEqual(self.conflicts(result), [
+            ("xray_configs", "present", "changed"), ("xkeen_init", "present", "absent"),
+            ("xkeen_port_exclude", "present", "changed"),
+        ])
+        self.assertNotIn("99_TEST_extra.json", json.dumps(result.to_dict(), ensure_ascii=False))
+
+    def test_changed_native_setting_makes_the_draft_stale(self):
+        policies = load_keenetic_snapshot()["ip/policy"]
+        policies["TEST_policy"] = {"description": "TEST_private"}
+        self.script.replies[RciResource.POLICIES.path] = RciReply(body=json.dumps(policies).encode("utf-8"))
+        result = self.run_check()
+        self.assertEqual(result.error.code, "draft_baseline_changed")
+        self.assertEqual(self.conflicts(result), [("keenetic_policies", "present", "changed")])
+        self.assertNotIn("TEST_private", json.dumps(result.to_dict(), ensure_ascii=False))
+
+    def test_unreachable_rci_is_not_a_match(self):
+        self.script.failures["connect"] = ConnectionRefusedError("TEST_private")
+        result = self.run_check()
+        self.assertEqual(
+            (result.error.code, result.error.reason, result.error.next_step.code),
+            ("draft_baseline_unavailable", "connection_failed", NextStepCode.CHECK_SOURCE),
+        )
+        self.assertEqual(self.conflicts(result), [
+            ("keenetic_policies", "present", "unknown"), ("keenetic_hotspot_settings", "present", "unknown"),
+        ])
+        self.assertNotIn("TEST_private", json.dumps(result.to_dict(), ensure_ascii=False))
 
 
 def stat_mode(path: Path) -> int:

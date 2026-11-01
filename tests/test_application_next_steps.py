@@ -71,6 +71,7 @@ EXPECTED_CODE_STEPS = {
     (ErrorCategory.INVALID_SOURCE_DATA, "invalid_stored_draft"): NextStepCode.PRESERVE_FILE,
     (ErrorCategory.UNSUPPORTED, "draft_exists"): NextStepCode.OPEN_VIEW,
     (ErrorCategory.UNSUPPORTED, "draft_mismatch"): NextStepCode.OPEN_VIEW,
+    (ErrorCategory.SOURCE_FAILED, "draft_baseline_changed"): NextStepCode.RECREATE_DRAFT,
 }
 EXPECTED_STORE_STEPS = {
     MetadataStoreFailure.UNAVAILABLE: NextStepCode.CHECK_SOURCE,
@@ -160,6 +161,7 @@ LITERAL_PAIRS = sorted({
     ("source_failed", "draft_write_unconfirmed"),
     ("source_failed", "draft_baseline_unavailable"),
     ("invalid_source_data", "invalid_draft_baseline_source"),
+    ("source_failed", "draft_baseline_changed"),
 })
 """Пары «категория, код», которые сценарии задают литералами; снимок неизменности кодов и категорий."""
 
@@ -529,7 +531,7 @@ class ContractVersionSnapshotTests(unittest.TestCase):
             [code.value for code in NextStepCode],
             [
                 "retry_input", "consult_documentation", "check_source", "inspect_source_data", "retry_later", "open_view",
-                "preserve_file", "update_interface",
+                "preserve_file", "update_interface", "recreate_draft",
             ],
         )
         self.assertEqual([status.value for status in OperationStatus], ["succeeded", "failed"])

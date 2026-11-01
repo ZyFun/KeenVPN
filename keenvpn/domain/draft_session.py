@@ -3,13 +3,15 @@
 Одна редактируемая сессия менеджера хранится отдельно от active configs
 Xray и XKeen. Модуль ничего не читает с диска и не записывает: он разбирает
 и собирает байты файла, ревизия — SHA-256 этих байтов, как у метаданных
-менеджера. Версия схемы 1 содержит идентификатор черновика и время его
-создания; изменений, исходных хешей и состояния в ней нет: наличие файла
-означает открытую сессию. Будущие разделы добавляются как необязательные
-поля верхнего уровня; неизвестные поля сохраняются и записываются обратно
-после известных. Разбор строгий: UTF-8, без комментариев, дублей ключей,
-NaN и Infinity, с ограничением размера и глубины. Неподдерживаемая версия
-схемы не угадывается и не мигрирует. Черновик ничего не применяет.
+менеджера. Версия схемы 1 содержит идентификатор черновика, время его
+создания и необязательный раздел `baseline` — исходные отпечатки управляемых
+источников (`source_baseline`); изменений и состояния в ней нет: наличие
+файла означает открытую сессию. Будущие разделы добавляются как
+необязательные поля верхнего уровня; неизвестные поля сохраняются
+и записываются обратно после известных. Разбор строгий: UTF-8, без
+комментариев, дублей ключей, NaN и Infinity, с ограничением размера
+и глубины. Неподдерживаемая версия схемы не угадывается и не мигрирует.
+Черновик ничего не применяет.
 """
 
 from dataclasses import dataclass, field
@@ -19,9 +21,12 @@ import json
 import re
 from typing import NoReturn
 
-from keenvpn.domain.config_document import ConfigDocumentError, parse_strict_json_object
+from keenvpn.domain.config_document import ConfigDocumentError, parse_strict_json_object, valid_json_tree
 from keenvpn.domain.manager_metadata import (
     ManagerMetadataError, UnknownFields, metadata_revision, rebuild_unknown_fields, valid_metadata_revision,
+)
+from keenvpn.domain.source_baseline import (
+    SourceBaseline, SourceBaselineError, export_source_baseline, parse_source_baseline, rebuild_source_baseline,
 )
 
 
@@ -34,7 +39,7 @@ MAX_DRAFT_SIZE = 1024 * 1024
 
 _DRAFT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _CREATED_AT = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z")
-_TOP_KEYS = ("format", "schema_version", "draft_id", "created_at")
+_TOP_KEYS = ("format", "schema_version", "draft_id", "created_at", "baseline")
 
 
 class DraftSessionErrorCode(StrEnum):
@@ -47,6 +52,7 @@ class DraftSessionErrorCode(StrEnum):
     DRAFT_ID = "invalid_draft_id"
     CREATED_AT = "invalid_draft_created_at"
     UNKNOWN_FIELDS = "invalid_unknown_fields"
+    BASELINE = "invalid_draft_baseline"
     REVISION = "invalid_draft_revision"
     SESSION = "invalid_draft_session"
 
@@ -59,6 +65,7 @@ _MESSAGES = {
     DraftSessionErrorCode.DRAFT_ID: "Идентификатор черновика должен быть UUID в нижнем регистре.",
     DraftSessionErrorCode.CREATED_AT: "Время создания черновика должно быть моментом UTC с точностью до секунды.",
     DraftSessionErrorCode.UNKNOWN_FIELDS: "Неизвестные поля черновика нельзя сохранить без изменения.",
+    DraftSessionErrorCode.BASELINE: "Раздел исходных отпечатков черновика повреждён.",
     DraftSessionErrorCode.REVISION: "Ревизия черновика должна быть SHA-256 в нижнем регистре.",
     DraftSessionErrorCode.SESSION: "Сессия черновика повреждена.",
 }
@@ -137,19 +144,33 @@ def _no_fields() -> UnknownFields:
     return UnknownFields()
 
 
+def _baseline(value: object) -> SourceBaseline:
+    """Разобрать раздел `baseline`; код ошибки отпечатка в ошибку черновика не переносится."""
+    baseline = None
+    try:
+        baseline = parse_source_baseline(value)
+    except SourceBaselineError:
+        pass
+    if baseline is None:
+        _fail(DraftSessionErrorCode.BASELINE, "baseline")
+    return baseline
+
+
 @dataclass(frozen=True, slots=True)
 class DraftSession:
     """Сессия черновика текущей версии схемы.
 
     `draft_id` — случайный UUID, выданный при создании; `created_at` — момент
-    создания в UTC. Значения неизвестных полей — данные другой версии
-    менеджера: `repr` показывает только их число. Будущая полезная нагрузка
-    изменений не должна попадать в `repr` и диагностику.
+    создания в UTC; `baseline` — исходные отпечатки источников либо None,
+    если их в файле нет. Значения неизвестных полей — данные другой версии
+    менеджера: `repr` показывает только их число. Хеши, будущая полезная
+    нагрузка изменений не должны попадать в `repr` и диагностику.
     """
 
     draft_id: str
     created_at: datetime
     extra: UnknownFields = field(default_factory=_no_fields)
+    baseline: SourceBaseline | None = None
 
     def __post_init__(self) -> None:
         if not valid_draft_id(self.draft_id):
@@ -158,12 +179,18 @@ class DraftSession:
             _fail(DraftSessionErrorCode.CREATED_AT, "created_at")
         if type(self.extra) is not UnknownFields or any(name in _TOP_KEYS for name in self.extra.names):
             _fail(DraftSessionErrorCode.UNKNOWN_FIELDS)
+        if self.baseline is not None and type(self.baseline) is not SourceBaseline:
+            _fail(DraftSessionErrorCode.BASELINE, "baseline")
 
     def to_diagnostic(self) -> dict[str, object]:
-        """Версия схемы, идентификатор, время создания и число неизвестных полей без их имён и значений."""
+        """Версия схемы, идентификатор, время создания, число неизвестных полей и состояния источников.
+
+        Имена и значения неизвестных полей, хеши и имена частей Xray сюда не входят.
+        """
         return {
             "schema_version": DRAFT_SCHEMA_VERSION, "draft_id": self.draft_id,
             "created_at": format_created_at(self.created_at), "unknown_field_count": len(self.extra),
+            "baseline": None if self.baseline is None else self.baseline.to_diagnostic(),
         }
 
 
@@ -223,27 +250,34 @@ def decode_draft_session(content: bytes) -> StoredDraftSession:
     if not valid_draft_id(document["draft_id"]):
         _fail(DraftSessionErrorCode.DRAFT_ID, "draft_id")
     created_at = _parse_created_at(document["created_at"])
+    baseline = _baseline(document["baseline"]) if "baseline" in document else None
     extra = _unknown_fields({key: value for key, value in document.items() if key not in _TOP_KEYS})
-    session = DraftSession(document["draft_id"], created_at, extra)
+    session = DraftSession(document["draft_id"], created_at, extra, baseline)
     return StoredDraftSession(session, draft_revision(content))
 
 
 def validate_draft_session(session: DraftSession) -> None:
     """Проверить готовую модель заново, пересобрав её из собственных полей.
 
-    Конструктор требует точных типов, поэтому подкласс `str` или `datetime`
-    и испорченный снимок неизвестных полей не проходят. Код ошибки поля
-    сохраняется.
+    Конструктор требует точных типов, поэтому подкласс `str` или `datetime`,
+    испорченный снимок неизвестных полей и подменённые отпечатки не проходят.
+    Код ошибки поля сохраняется.
     """
     code = name = None
     try:
         if type(session) is not DraftSession:
             _fail(DraftSessionErrorCode.SESSION)
-        DraftSession(session.draft_id, session.created_at, rebuild_unknown_fields(session.extra))
+        baseline = session.baseline
+        DraftSession(
+            session.draft_id, session.created_at, rebuild_unknown_fields(session.extra),
+            None if baseline is None else rebuild_source_baseline(baseline),
+        )
     except DraftSessionError as error:
         code, name = error.code, error.field
     except ManagerMetadataError:
         code = DraftSessionErrorCode.UNKNOWN_FIELDS
+    except SourceBaselineError:
+        code, name = DraftSessionErrorCode.BASELINE, "baseline"
     except Exception:
         # Повреждённая модель: атрибут не того типа, испорченный снимок и подобное.
         code = DraftSessionErrorCode.SESSION
@@ -262,8 +296,14 @@ def encode_draft_session(session: DraftSession) -> bytes:
         "format": DRAFT_FORMAT, "schema_version": DRAFT_SCHEMA_VERSION,
         "draft_id": session.draft_id, "created_at": format_created_at(session.created_at),
     }
-    # Неизвестные поля лежат только на верхнем уровне: глубина документа равна их
-    # собственной, которую уже проверил снимок `UnknownFields`.
+    if session.baseline is not None:
+        baseline = export_source_baseline(session.baseline)
+        # Неизвестные записи раздела лежат на уровень глубже собственной проверки
+        # снимка: документ с ними должен остаться читаемым строгим разбором.
+        if not valid_json_tree({"baseline": baseline}):
+            _fail(DraftSessionErrorCode.BASELINE, "baseline")
+        document["baseline"] = baseline
+    # Неизвестные поля верхнего уровня: их глубину уже проверил снимок `UnknownFields`.
     document.update(session.extra.export())
     content = (json.dumps(document, ensure_ascii=True, allow_nan=False, indent=2) + "\n").encode("ascii")
     if len(content) > MAX_DRAFT_SIZE:

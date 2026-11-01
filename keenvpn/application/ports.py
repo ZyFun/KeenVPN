@@ -18,6 +18,7 @@ from keenvpn.domain.profile import ConnectionProfile
 from keenvpn.domain.routing import GeoIPCondition, GeoSiteCondition
 from keenvpn.domain.routing_explanation import GeoMatch
 from keenvpn.domain.routing_policy import RoutingPolicy
+from keenvpn.domain.source_baseline import BaselineSource, SourceFingerprint
 from keenvpn.domain.xkeen_config import XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings
 from keenvpn.domain.xray_config import XrayConfigSet
 from keenvpn.domain.xray_process import XrayProcessObservation
@@ -144,6 +145,19 @@ class XrayProcessSource(Protocol):
 
     def current_xray_process(self) -> XrayProcessObservation:
         """Вернуть наблюдение на момент вызова; при сбое — вызвать исключение."""
+        ...
+
+
+class SourceFingerprintSource(Protocol):
+    """Чтение исходного отпечатка управляемого источника без разбора содержимого и без изменения.
+
+    Файлы и каталоги читаются без перехода по ссылкам и с проверкой
+    неизменности во время чтения, native-настройки — тем же транспортом,
+    что и при разборе. Отпечаток считается по прочитанным байтам или объекту.
+    """
+
+    def current_fingerprint(self, source: BaselineSource) -> SourceFingerprint:
+        """Вернуть `present` с отпечатком или `absent` этого источника; при недоступности — RouterReadError."""
         ...
 
 

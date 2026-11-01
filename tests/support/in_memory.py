@@ -15,8 +15,8 @@ from keenvpn.application.ports import (
     ConnectionLinkParser, ConnectionProfileSource, DraftSessionStore, DraftSessionStoreError, DraftStoreFailure,
     GeoDatabaseSource, GeoDataSource, KeeneticHotspotRuntimeSource, KeeneticHotspotSettingsSource,
     KeeneticPolicySource, KeeneticRegistrationSource, ManagerMetadataStore, ManagerMetadataStoreError,
-    MetadataStoreFailure, RoutingPolicySource, StoragePlacementSource, XKeenInitSource, XKeenListSource,
-    XKeenSettingsSource, XrayConfigSource, XrayProcessSource,
+    MetadataStoreFailure, RoutingPolicySource, SourceFingerprintSource, StoragePlacementSource, XKeenInitSource,
+    XKeenListSource, XKeenSettingsSource, XrayConfigSource, XrayProcessSource,
 )
 from keenvpn.domain.connection import TrojanConnection
 from keenvpn.domain.draft_session import (
@@ -34,6 +34,7 @@ from keenvpn.domain.profile import ConnectionProfile
 from keenvpn.domain.routing import DomainCondition, GeoIPCondition, GeoSiteCondition
 from keenvpn.domain.routing_explanation import GeoMatch, IPSource, RoutingContext
 from keenvpn.domain.routing_policy import RoutingPolicy
+from keenvpn.domain.source_baseline import BaselineSource, SourceFingerprint
 from keenvpn.domain.xkeen_config import XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings
 from keenvpn.domain.xray_config import XrayConfigSet
 from keenvpn.domain.xray_process import XrayProcessObservation
@@ -505,6 +506,37 @@ class InMemoryXKeenListSource(XKeenListSource):
 
     def __repr__(self) -> str:
         return f"InMemoryXKeenListSource(calls={len(self._calls)}, responses={len(self._responses)})"
+
+
+class InMemorySourceFingerprints(SourceFingerprintSource):
+    """Отпечатки по точному источнику; незаданный источник — ошибка подготовки теста.
+
+    Хеши не вычисляются: тест задаёт готовые `SourceFingerprint` или отказы.
+    `calls` — история запрошенных источников, включая отклонённые.
+    """
+
+    def __init__(self) -> None:
+        self._responses: dict[BaselineSource, Any] = {}
+        self._calls: list[Any] = []
+
+    @property
+    def calls(self) -> tuple[Any, ...]:
+        """Неизменяемая история запрошенных источников."""
+        return tuple(self._calls)
+
+    def set_response(self, source: BaselineSource, outcome: Any) -> None:
+        """Настроить ответ одного источника, освобождая кадры прежнего отказа."""
+        if type(source) is not BaselineSource:
+            raise AdapterSetupError("Ответ отпечатка требует источник BaselineSource.")
+        _release(self._responses.get(source))
+        self._responses[source] = outcome
+
+    def current_fingerprint(self, source: BaselineSource) -> SourceFingerprint:
+        self._calls.append(source)
+        return _resolve(self._responses.get(source, _UNSET) if type(source) is BaselineSource else _UNSET)
+
+    def __repr__(self) -> str:
+        return f"InMemorySourceFingerprints(calls={len(self._calls)}, responses={len(self._responses)})"
 
 
 class InMemoryConnectionLinkParser(_ScriptedPort, ConnectionLinkParser):

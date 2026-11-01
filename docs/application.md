@@ -23,8 +23,8 @@
 | `ImportRoutingScheme` | `ImportRoutingSchemeHandler` | Переводит действующие [правила Xray в модель маршрутизации](routing-import.md) поверх `InspectProxyConfigHandler.read()`: группы условий в порядке файла, явные действия, неизвестные значения и поля только для просмотра, политика без выдуманного финального правила |
 | `InspectManagerMetadata` | `InspectManagerMetadataHandler` | Читает [метаданные менеджера](manager-metadata.md) из хранилища и показывает вариант хранения, состояния ролей и лимиты истории без путей, идентификаторов хранилищ и ревизии |
 | `ImportStoragePlacement` | `ImportStoragePlacementHandler` | Сохраняет обнаруженное размещение хранилищ и лимиты истории в метаданных менеджера как есть: создаёт или дописывает раздел размещения, совпадение не записывает, расхождение отклоняет без перезаписи; раздел записей правил и неизвестные поля файла сохраняет |
-| `InspectDraft` | `InspectDraftHandler` | Читает [сессию черновика](draft-session.md) из хранилища и показывает её идентификатор, время создания и число неизвестных полей без пути и ревизии; отсутствие черновика — успех с `present=False` |
-| `CreateDraft` | `CreateDraftHandler` | Создаёт одну [сессию черновика](draft-session.md) с новым идентификатором и временем создания UTC; существующий черновик не перезаписывается. Черновик ничего не применяет |
+| `InspectDraft` | `InspectDraftHandler` | Читает [сессию черновика](draft-session.md) из хранилища и показывает её идентификатор, время создания, число неизвестных полей и состояния зафиксированных источников без пути, ревизии и хешей; отсутствие черновика — успех с `present=False` |
+| `CreateDraft` | `CreateDraftHandler` | Создаёт одну [сессию черновика](draft-session.md) с новым идентификатором, временем создания UTC и [исходными отпечатками](draft-session.md#исходные-отпечатки) управляемых источников; существующий черновик не перезаписывается, недоступный источник — отказ без записи. Черновик ничего не применяет |
 | `DiscardDraft` | `DiscardDraftHandler` | Отменяет черновик с идентификатором из команды: удаляет только файл сессии по ревизии из чтения, ничего не применяя; повторная отмена — успех `already_absent` после закрепления отсутствия на диске |
 | `InspectRoutingRules` | `InspectRoutingRulesHandler` | Показывает [правила с названиями и идентификаторами](routing-import.md#названия-и-идентификаторы-правил) из метаданных менеджера поверх `ImportRoutingSchemeHandler.read()` и порта хранилища: привязка по семантическому ключу, позиции, признак и длина названия, причины отсутствия привязки; ничего не записывает |
 | `AssignRuleIdentifiers` | `AssignRuleIdentifiersHandler` | Присваивает идентификаторы правилам без записи в метаданных: генерирует их подставляемой фабрикой `uuid4`, дописывает записи без названия и записывает раздел `rules` один раз только при изменениях |
@@ -151,7 +151,8 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 | `unsupported` / `draft_exists`, `draft_mismatch` | `open_view` |
 
 Остальные коды, включая `metadata_store_unavailable`, `metadata_write_failed`,
-`draft_store_unavailable`, `draft_write_failed`,
+`draft_store_unavailable`, `draft_write_failed`, `draft_baseline_unavailable`,
+`invalid_draft_baseline_source`,
 `manager_metadata_inconsistent`, `invalid_storage_placement`
 и `storage_placement_unavailable`, получают шаг своей категории. Ни один шаг
 отказа хранилищ метаданных и черновика не предлагает перезаписать или удалить файл.
@@ -199,7 +200,9 @@ RCI на роутере, сообщает об отказе исключение
 запись RCI неверной структуры), — код `invalid_*` этого источника с кодом
 домена в `reason`. Любое другое
 исключение — `*_unavailable` без уточнения. Следующий шаг по-прежнему
-выбирается по категории и коду, а не по уточнению. Источники, которые
+выбирается по категории и коду, а не по уточнению. Исходные отпечатки
+черновика читаются так же: отказ — `draft_baseline_unavailable`, ошибка
+модели — `invalid_draft_baseline_source`. Источники, которые
 бросают такие отказы, описаны в [источниках чтения роутера](router-sources.md).
 
 ### Статусы проверок
@@ -891,20 +894,29 @@ outbound и балансировщиков показываются только
 
 ## Сессия черновика
 
-Три сценария модуля `keenvpn.application.draft_session` работают только
-с портом `DraftSessionStore` — одной [сессией черновика](draft-session.md),
-например через файловое хранилище `DraftSessionFiles`. Конфигурация Xray
-и XKeen, настройки Keenetic и службы не читаются и не меняются: черновик
-ничего не применяет. Каждый сценарий один раз читает хранилище и выполняет
-не больше одной записи или удаления.
+Три сценария модуля `keenvpn.application.draft_session` работают с портом
+`DraftSessionStore` — одной [сессией черновика](draft-session.md), например
+через файловое хранилище `DraftSessionFiles`. Создание, кроме того, читает
+[исходные отпечатки](draft-session.md#исходные-отпечатки) управляемых
+источников через порт `SourceFingerprintSource`. Конфигурация Xray и XKeen,
+настройки Keenetic и службы не меняются и не разбираются: черновик ничего не
+применяет. Каждый сценарий один раз читает хранилище и выполняет не больше
+одной записи или удаления.
 
 - `InspectDraftHandler(store)` только читает: файл и каталог не создаются.
   Результат `DraftStatusView` — `present` и `draft` (`DraftView`: `draft_id`,
-  `created_at` в виде `YYYY-MM-DDTHH:MM:SSZ`, `unknown_field_count`).
-- `CreateDraftHandler(store, *, draft_ids=new_draft_id, clock=utc_now)` создаёт
-  сессию с новым UUID и текущим временем UTC с точностью до секунды и
-  возвращает её `DraftView`. Черновик, появившийся после чтения, хранилище
-  отклоняет конфликтом ревизии.
+  `created_at` в виде `YYYY-MM-DDTHH:MM:SSZ`, `unknown_field_count` и
+  `baseline` — источники с состояниями `present` или `absent` и число
+  неизвестных записей либо `None`, если раздела в файле нет).
+- `CreateDraftHandler(store, fingerprints, *, draft_ids=new_draft_id,
+  clock=utc_now)` при существующем черновике отказывает, не читая источников.
+  Иначе функцией `capture_baseline` из `keenvpn.application.source_baseline`
+  по одному разу читает отпечаток каждого источника перечня `BaselineSource`
+  по порядку и проверяет ответ (`read_fingerprint`). Первый отказ
+  останавливает чтение, и черновик не создаётся. Затем сценарий создаёт
+  сессию с новым UUID, текущим временем UTC с точностью до секунды и
+  разделом `baseline` и возвращает её `DraftView`. Черновик, появившийся после
+  чтения, хранилище отклоняет конфликтом ревизии.
 - `DiscardDraftHandler(store)` получает `DiscardDraft(draft_id=...)` с
   идентификатором из представления черновика. Если черновика нет, хранилище
   закрепляет его отсутствие на диске, и результат —
@@ -913,12 +925,15 @@ outbound и балансировщиков показываются только
   удаляется по прочитанной ревизии — `outcome="discarded"`. Удаляется только
   файл сессии, собственный каталог остаётся.
 
-Путь, ревизия, имена и значения неизвестных полей в результаты не попадают.
+Путь, ревизия, хеши, имена частей Xray, имена и значения неизвестных полей
+в результаты не попадают.
 
 | Ситуация | Категория и код |
 | --- | --- |
 | Неверный тип команды, идентификатор не UUID в нижнем регистре, версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
 | Создание при существующем черновике | `unsupported` / `draft_exists`; черновик не перезаписывается |
+| Источник отпечатка недоступен при создании | `source_failed` / `draft_baseline_unavailable` с [кодом отказа чтения](#отказ-чтения-роутера) в `reason`; непредвиденное исключение источника — тот же код без `reason`; остальные источники не читаются, черновик не создаётся |
+| Источник вернул некорректный отпечаток, отпечаток другого источника или ответ не по контракту | `invalid_source_data` / `invalid_draft_baseline_source`; ошибка модели, поднятая внутри источника, — с её кодом в `reason`, например `invalid_baseline_parts` |
 | Отмена черновика с другим идентификатором | `unsupported` / `draft_mismatch`; черновик не удаляется |
 | Отказ хранилища | код `DraftStoreFailure` без изменения: `source_failed` / `draft_store_unavailable`, `draft_store_unsafe`, `draft_store_busy`, `draft_revision_conflict`, `draft_write_failed`, `draft_write_unconfirmed`; `invalid_source_data` / `invalid_stored_draft` |
 | Непредвиденное исключение хранилища | `source_failed` / `draft_store_failed` |
@@ -1008,6 +1023,7 @@ application получает их через конструкторы обраб
 | `InMemoryStoragePlacementSource` | `outcome` — обнаруженное размещение, `calls` — число обращений; монтирования, UUID и файлы не читаются |
 | `InMemoryManagerMetadataStore` | `content` — байты файла метаданных или `None`; `read_failure`, `write_failure`, `publish_before_failure` и `before_revision_check` — отказы и внешняя правка; `read_calls`, `write_calls` (tuple `MetadataWriteCall`) и `publications` — наблюдение |
 | `InMemoryDraftSessionStore` | `content` — байты файла черновика или `None`; `read_failure`, `write_failure`, `publish_before_failure` и `before_revision_check` — отказы и внешняя правка; `read_calls`, `create_calls`, `remove_calls` и `changes` — наблюдение |
+| `InMemorySourceFingerprints` | `set_response(source, outcome)` — отпечаток или отказ по точному `BaselineSource`; `calls` — tuple запрошенных источников; хеши не вычисляются, другой тип при настройке — `AdapterSetupError` |
 
 Ответы повторяются до явной замены. `outcome` возвращается как есть, а экземпляр
 `BaseException` вызывается как отказ, включая `KeyboardInterrupt`/`SystemExit`.

@@ -23,9 +23,9 @@
 | `ImportRoutingScheme` | `ImportRoutingSchemeHandler` | Переводит действующие [правила Xray в модель маршрутизации](routing-import.md) поверх `InspectProxyConfigHandler.read()`: группы условий в порядке файла, явные действия, неизвестные значения и поля только для просмотра, политика без выдуманного финального правила |
 | `InspectManagerMetadata` | `InspectManagerMetadataHandler` | Читает [метаданные менеджера](manager-metadata.md) из хранилища и показывает вариант хранения, состояния ролей и лимиты истории без путей, идентификаторов хранилищ и ревизии |
 | `ImportStoragePlacement` | `ImportStoragePlacementHandler` | Сохраняет обнаруженное размещение хранилищ и лимиты истории в метаданных менеджера как есть: создаёт или дописывает раздел размещения, совпадение не записывает, расхождение отклоняет без перезаписи; раздел записей правил и неизвестные поля файла сохраняет |
-| `InspectDraft` | `InspectDraftHandler` | Читает [сессию черновика](draft-session.md) из хранилища и показывает её идентификатор, время создания, число неизвестных полей и состояния зафиксированных источников без пути, ревизии и хешей; отсутствие черновика — успех с `present=False` |
+| `InspectDraft` | `InspectDraftHandler` | Читает [сессию черновика](draft-session.md) из хранилища и показывает её идентификатор, [токен ревизии](#сессия-черновика), время создания, число неизвестных полей и состояния зафиксированных источников без пути, ревизии файла и хешей; отсутствие черновика — успех с `present=False` |
 | `CreateDraft` | `CreateDraftHandler` | Создаёт одну [сессию черновика](draft-session.md) с новым идентификатором, временем создания UTC и [исходными отпечатками](draft-session.md#исходные-отпечатки) управляемых источников; существующий черновик не перезаписывается, недоступный источник — отказ без записи. Черновик ничего не применяет |
-| `DiscardDraft` | `DiscardDraftHandler` | Отменяет черновик с идентификатором из команды: удаляет только файл сессии по ревизии из чтения, ничего не применяя; повторная отмена — успех `already_absent` после закрепления отсутствия на диске |
+| `DiscardDraft` | `DiscardDraftHandler` | Отменяет черновик с идентификатором и токеном ревизии из команды: удаляет только файл сессии по ревизии из чтения, ничего не применяя; другой черновик или токен — [конфликт](#конфликт-ревизий) без удаления; повторная отмена — успех `already_absent` после закрепления отсутствия на диске |
 | `InspectRoutingRules` | `InspectRoutingRulesHandler` | Показывает [правила с названиями и идентификаторами](routing-import.md#названия-и-идентификаторы-правил) из метаданных менеджера поверх `ImportRoutingSchemeHandler.read()` и порта хранилища: привязка по семантическому ключу, позиции, признак и длина названия, причины отсутствия привязки; ничего не записывает |
 | `AssignRuleIdentifiers` | `AssignRuleIdentifiersHandler` | Присваивает идентификаторы правилам без записи в метаданных: генерирует их подставляемой фабрикой `uuid4`, дописывает записи без названия и записывает раздел `rules` один раз только при изменениях |
 | `ListRoutingRules` | `ListRoutingRulesHandler` | Показывает [группы правил для меню](routing-import.md#список-правил-для-меню) в фактическом порядке вместе с названиями и идентификаторами из метаданных, когда хранилище подключено и прочитано: отказ или отсутствие хранилища не отказывает списку, позиции назначений берутся из структурной сводки; ничего не записывает |
@@ -77,7 +77,7 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 | --- | --- |
 | `contract_version` | Версия формата команд и результатов, сейчас `1` (`CONTRACT_VERSION`) |
 | `operation_id` | Идентификатор вызова; по умолчанию случайная hex-строка |
-| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_connections`, `inspect_installation`, `inspect_status_summary`, `quick_check`, `import_routing_scheme`, `inspect_manager_metadata`, `import_storage_placement`, `inspect_routing_rules`, `assign_rule_identifiers`, `list_routing_rules` или `list_keenetic_devices` |
+| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_connections`, `inspect_installation`, `inspect_status_summary`, `quick_check`, `import_routing_scheme`, `inspect_manager_metadata`, `import_storage_placement`, `inspect_draft`, `create_draft`, `discard_draft`, `inspect_routing_rules`, `assign_rule_identifiers`, `list_routing_rules` или `list_keenetic_devices` |
 | `status` | `OperationStatus.SUCCEEDED` или `OperationStatus.FAILED` |
 | `data` | Безопасное представление при успехе, иначе `None` |
 | `error` | `ErrorDetail` при отказе, иначе `None` |
@@ -88,8 +88,9 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 представления неизменяемы.
 
 `ErrorDetail` содержит `category`, стабильный английский `code`, необязательное
-уточнение `reason`, русский текст `message` и безопасный следующий шаг
-`next_step`. Текст задан заранее и не содержит
+уточнение `reason`, русский текст `message`, безопасный следующий шаг
+`next_step` и записи [конфликта ревизий](#конфликт-ревизий) `conflicts`.
+Текст задан заранее и не содержит
 входных значений, фрагментов ссылки или сообщений внешних исключений.
 Для обработки ошибки используйте `category` и `code`, а не текст.
 
@@ -158,12 +159,71 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 отказа хранилищ метаданных и черновика не предлагает перезаписать или удалить файл.
 
 В `to_dict()` шаг — ключ `next_step` внутри `error`: словарь `{"code", "message"}`
-либо `null`. Ключ добавлен в версии контракта 1 как совместимое расширение:
-клиент версии 1 игнорирует неизвестные ключи, а отсутствие ключа у более
-старого менеджера означает, что шага нет. Версия 2 потребуется только при
-несовместимом изменении — новой категории, переименовании или удалении
-ключей; тест-снимок контракта фиксирует набор ключей, категорий и кодов
-шагов вместе с номером версии.
+либо `null`. Ключ добавлен в версии контракта 1 как
+[совместимое расширение](#версия-контракта-и-совместимость): отсутствие ключа
+у более старого менеджера означает, что шага нет.
+
+### Конфликт ревизий
+
+Отказ из-за того, что состояние объекта разошлось с ожидаемым командой,
+несёт в `error.conflicts` кортеж записей `Conflict(subject, expected, found,
+source=None)`. Пустой кортеж — отказ не вызван конфликтом. Записи — только
+стабильные коды: хешей, ревизий, токенов, путей, идентификаторов и значений
+в них нет. Каждый объект встречается не больше одного раза, порядок задаёт
+сценарий. Категории, коды и шаги отказов при этом не меняются: у всех
+отказов с записями конфликта шаг `open_view`.
+
+| Поле | Значения |
+| --- | --- |
+| `subject` (`ConflictSubject`) | `draft` — сессия черновика; `metadata` — метаданные менеджера; `source` — управляемый источник исходных отпечатков |
+| `source` | Значение [`BaselineSource`](draft-session.md#исходные-отпечатки) у записи `source` либо `null` для источника, неизвестного этой версии; у `draft` и `metadata` всегда `null` |
+| `expected` (`ConflictState`) | Что ожидала команда: `present` — объект в известной ей ревизии, `absent` — объекта быть не должно, `unknown` — состояние не зафиксировано |
+| `found` (`ConflictState`) | Что найдено: `present`, `absent`, `changed` — объект другой или другой ревизии (только при ожидаемом `present`), `unknown` — состояние не установлено |
+
+Совпадения `present`/`present` и `absent`/`absent` записью конфликта не бывают.
+Конструктор требует точных типов: строка или другое перечисление с теми же
+значениями отклоняются. В `to_dict()` записи — список `conflicts` внутри
+`error` со словарями `{"subject", "source", "expected", "found"}`; у отказа
+без конфликта — пустой список. Русские подписи объектов и состояний для
+интерфейсов — `CONFLICT_SUBJECT_LABELS`, `CONFLICT_STATE_LABELS` и
+`UNKNOWN_SOURCE_LABEL`.
+
+| Отказ | Запись конфликта |
+| --- | --- |
+| `unsupported` / `draft_exists` | `draft`: ожидалось `absent`, найдено `present` |
+| `unsupported` / `draft_mismatch` | `draft`: ожидалось `present`, найдено `changed` |
+| `source_failed` / `draft_revision_conflict` — токен ревизии команды устарел | `draft`: ожидалось `present`, найдено `changed` |
+| `source_failed` / `draft_revision_conflict`, `metadata_revision_conflict` от хранилища при изменении | ожидалось `absent` — найдено `present`; ожидалась прочитанная ревизия — `present`, найдено `unknown`: хранилище сообщает только несовпадение ревизии |
+
+Отказ хранилища с кодом конфликта при чтении записей не содержит: у чтения
+нет ожидаемого состояния. Записи `source` сценарии этой версии не возвращают.
+Конфликт хранилища сценарий переводит общей функцией
+`revision_conflict(subject, expected)`.
+
+### Версия контракта и совместимость
+
+`contract_version` каждого результата — `CONTRACT_VERSION`, сейчас `1`.
+Команда другой версии отклоняется отказом `invalid_request` /
+`unsupported_contract_version` со шагом `update_interface`: интерфейс узнаёт
+о несовместимости по номеру в результате или по этому отказу.
+
+Совместимы и номер версии не меняют:
+
+- новые необязательные ключи результатов, данных и ошибок, например `next_step`, `conflicts` и `DraftView.revision`;
+- новые команды и сценарии;
+- новые коды отказов внутри существующих категорий и новые коды шагов;
+- новые значения `ConflictSubject`, `ConflictState` и `BaselineSource` в записях конфликта.
+
+Клиент версии 1 игнорирует неизвестные ключи, а неизвестный код или значение
+обрабатывает по `category`, показывает `message` и `next_step` и считает
+отказ с непустым `conflicts` конфликтом.
+
+Несовместимы и требуют версии 2: новая категория; переименование или удаление
+ключа, кода или значения перечисления; смена категории кода; смена типа,
+формата или смысла поля, в том числе формата токена ревизии; новое
+обязательное поле существующей команды. Тест-снимок контракта фиксирует набор
+ключей результата, ошибки и записи конфликта, категории, коды шагов, значения
+перечислений конфликта и номер версии.
 
 ### Отказ чтения роутера
 
@@ -882,7 +942,7 @@ outbound и балансировщиков показываются только
 | Неверный тип команды или версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
 | Источник размещения вызвал исключение | `source_failed` / `storage_placement_unavailable` |
 | Источник вернул не `StoragePlacement`, повреждённую модель или модель с неизвестными полями | `invalid_source_data` / `invalid_storage_placement`; доменная причина в `reason` |
-| Отказ хранилища | код `MetadataStoreFailure` без изменения: `source_failed` / `metadata_store_unavailable`, `metadata_store_unsafe`, `metadata_store_busy`, `metadata_revision_conflict`, `metadata_write_failed`, `metadata_write_unconfirmed`; `invalid_source_data` / `invalid_stored_metadata` |
+| Отказ хранилища | код `MetadataStoreFailure` без изменения: `source_failed` / `metadata_store_unavailable`, `metadata_store_unsafe`, `metadata_store_busy`, `metadata_revision_conflict` (при записи — с [записью конфликта](#конфликт-ревизий) `metadata`), `metadata_write_failed`, `metadata_write_unconfirmed`; `invalid_source_data` / `invalid_stored_metadata` |
 | Непредвиденное исключение хранилища | `source_failed` / `metadata_store_failed` |
 | Хранилище вернуло ответ не по контракту | `invalid_source_data` / `invalid_metadata_store_result` |
 | Размещение не удалось объединить с прочитанными метаданными | `invalid_source_data` / `manager_metadata_inconsistent`; доменная причина в `reason` |
@@ -905,9 +965,9 @@ outbound и балансировщиков показываются только
 
 - `InspectDraftHandler(store)` только читает: файл и каталог не создаются.
   Результат `DraftStatusView` — `present` и `draft` (`DraftView`: `draft_id`,
-  `created_at` в виде `YYYY-MM-DDTHH:MM:SSZ`, `unknown_field_count` и
-  `baseline` — источники с состояниями `present` или `absent` и число
-  неизвестных записей либо `None`, если раздела в файле нет).
+  `revision` — токен ревизии, `created_at` в виде `YYYY-MM-DDTHH:MM:SSZ`,
+  `unknown_field_count` и `baseline` — источники с состояниями `present` или
+  `absent` и число неизвестных записей либо `None`, если раздела в файле нет).
 - `CreateDraftHandler(store, fingerprints, *, draft_ids=new_draft_id,
   clock=utc_now)` при существующем черновике отказывает, не читая источников.
   Иначе функцией `capture_baseline` из `keenvpn.application.source_baseline`
@@ -915,27 +975,42 @@ outbound и балансировщиков показываются только
   по порядку и проверяет ответ (`read_fingerprint`). Первый отказ
   останавливает чтение, и черновик не создаётся. Затем сценарий создаёт
   сессию с новым UUID, текущим временем UTC с точностью до секунды и
-  разделом `baseline` и возвращает её `DraftView`. Черновик, появившийся после
-  чтения, хранилище отклоняет конфликтом ревизии.
-- `DiscardDraftHandler(store)` получает `DiscardDraft(draft_id=...)` с
-  идентификатором из представления черновика. Если черновика нет, хранилище
-  закрепляет его отсутствие на диске, и результат —
-  `DraftDiscardView(outcome="already_absent")`; отказ подтверждения, например
-  повторный `draft_write_unconfirmed`, не считается успехом. Совпадающий
-  удаляется по прочитанной ревизии — `outcome="discarded"`. Удаляется только
-  файл сессии, собственный каталог остаётся.
+  разделом `baseline` и возвращает её `DraftView` с токеном ревизии
+  записанных байтов. Черновик, появившийся после чтения, хранилище отклоняет
+  конфликтом ревизии.
+- `DiscardDraftHandler(store)` получает `DiscardDraft(draft_id=...,
+  expected_revision=...)` — идентификатор и токен ревизии из представления
+  черновика; оба поля обязательны, их формат проверяется до чтения хранилища.
+  Если черновика нет, хранилище закрепляет его отсутствие на диске, и
+  результат — `DraftDiscardView(outcome="already_absent")`; отказ
+  подтверждения, например повторный `draft_write_unconfirmed`, не считается
+  успехом. Другой идентификатор — отказ `draft_mismatch`, другой токен —
+  `draft_revision_conflict`; черновик в обоих случаях не удаляется.
+  Совпадающий удаляется по прочитанной ревизии — `outcome="discarded"`.
+  Удаляется только файл сессии, собственный каталог остаётся.
 
-Путь, ревизия, хеши, имена частей Xray, имена и значения неизвестных полей
-в результаты не попадают.
+Токен ревизии (`draft_revision_token`) — 32 шестнадцатеричные цифры
+в нижнем регистре: первые 128 бит SHA-256 от метки домена и ревизии файла.
+Он меняется вместе с любым байтом файла, но не совпадает ни с ревизией, ни
+с хешами источников и не позволяет их получить; сырую ревизию из 64 цифр
+команда отклоняет как `invalid_command`. Токен не секрет, но интерфейс
+передаёт его только обратно в команды: в ошибки, записи конфликта и вывод меню
+он не входит. Общие помощники команд, меняющих черновик, —
+`valid_revision_token`, `valid_expected_draft(draft_id, expected_revision)`
+и `check_expected_draft(stored, draft_id, expected_revision)`.
+
+Путь, ревизия файла, хеши, имена частей Xray, имена и значения неизвестных
+полей в результаты не попадают.
 
 | Ситуация | Категория и код |
 | --- | --- |
-| Неверный тип команды, идентификатор не UUID в нижнем регистре, версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
-| Создание при существующем черновике | `unsupported` / `draft_exists`; черновик не перезаписывается |
+| Неверный тип команды, идентификатор не UUID в нижнем регистре, токен ревизии не из 32 шестнадцатеричных цифр в нижнем регистре, версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
+| Создание при существующем черновике | `unsupported` / `draft_exists` с [записью конфликта](#конфликт-ревизий); черновик не перезаписывается |
 | Источник отпечатка недоступен при создании | `source_failed` / `draft_baseline_unavailable` с [кодом отказа чтения](#отказ-чтения-роутера) в `reason`; непредвиденное исключение источника — тот же код без `reason`; остальные источники не читаются, черновик не создаётся |
 | Источник вернул некорректный отпечаток, отпечаток другого источника или ответ не по контракту | `invalid_source_data` / `invalid_draft_baseline_source`; ошибка модели, поднятая внутри источника, — с её кодом в `reason`, например `invalid_baseline_parts` |
-| Отмена черновика с другим идентификатором | `unsupported` / `draft_mismatch`; черновик не удаляется |
-| Отказ хранилища | код `DraftStoreFailure` без изменения: `source_failed` / `draft_store_unavailable`, `draft_store_unsafe`, `draft_store_busy`, `draft_revision_conflict`, `draft_write_failed`, `draft_write_unconfirmed`; `invalid_source_data` / `invalid_stored_draft` |
+| Отмена черновика с другим идентификатором | `unsupported` / `draft_mismatch` с записью конфликта; черновик не удаляется |
+| Отмена с устаревшим токеном ревизии: черновик изменился после чтения интерфейсом | `source_failed` / `draft_revision_conflict` с записью конфликта; черновик не удаляется |
+| Отказ хранилища | код `DraftStoreFailure` без изменения: `source_failed` / `draft_store_unavailable`, `draft_store_unsafe`, `draft_store_busy`, `draft_revision_conflict` (при создании и удалении — с записью конфликта), `draft_write_failed`, `draft_write_unconfirmed`; `invalid_source_data` / `invalid_stored_draft` |
 | Непредвиденное исключение хранилища | `source_failed` / `draft_store_failed` |
 | Хранилище вернуло ответ не по контракту | `invalid_source_data` / `invalid_draft_store_result` |
 
@@ -1193,7 +1268,16 @@ ANSI-последовательности в строках и байтах, а 
 (собирается из исходников application, а не вручную), присутствие шага в
 результатах настоящих сценариев, включая каждый отказ хранилища метаданных,
 отсутствие приватных значений в `to_dict()` и `repr`, а также снимок контракта
-версии 1.
+версии 1: ключи результата, ошибки и записи конфликта, категории, коды шагов
+и значения перечислений конфликта.
+
+`test_application_conflicts.py` проверяет записи конфликта: допустимые
+сочетания ожидаемого и найденного состояния, в том числе для каждого
+источника и неизвестного источника, отказ совпадений, «другой ревизии» без
+ожидаемого объекта и источника у черновика и метаданных, точные типы вместо
+строки или другого перечисления с теми же значениями, запрет повторов объекта,
+порядок и JSON-обход `to_dict()`, неизменность равенства прежних ошибок,
+отсутствие значений, ревизий и путей и подписи только для чтения.
 
 `test_application_checks.py` проверяет словарь статусов проверок: четыре значения
 и их подписи, отличие от `OperationStatus` и отказ строки или другого перечисления

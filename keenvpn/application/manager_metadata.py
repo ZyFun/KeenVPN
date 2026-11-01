@@ -19,8 +19,8 @@ from enum import StrEnum
 from typing import ClassVar
 
 from keenvpn.application.contract import (
-    CONTRACT_VERSION, ErrorCategory, ErrorDetail, OperationIdFactory, Result,
-    check_contract_version, failed, invalid_command, new_operation_id, succeeded,
+    CONTRACT_VERSION, ConflictState, ConflictSubject, ErrorCategory, ErrorDetail, OperationIdFactory, Result,
+    check_contract_version, failed, invalid_command, new_operation_id, revision_conflict, succeeded,
 )
 from keenvpn.application.ports import (
     ManagerMetadataStore, ManagerMetadataStoreError, MetadataStoreFailure, StoreReason,
@@ -238,12 +238,15 @@ def _reason(failure: MetadataStoreFailure, value: object) -> str | None:
     return (_DOMAIN_REASONS if failure is MetadataStoreFailure.INVALID else _STORE_REASONS).get(value)
 
 
-def store_error_detail(error: Exception) -> ErrorDetail:
+def store_error_detail(error: Exception, expected: ConflictState | None = None) -> ErrorDetail:
     """Перевести отказ хранилища в ErrorDetail без текста и цепочки исключения.
 
     Только точный тип `ManagerMetadataStoreError` с известным видом отказа
     сохраняет свой код; подкласс и любое другое исключение — непредвиденный
-    отказ, а не конфликт или подмена.
+    отказ, а не конфликт или подмена. `expected` — состояние метаданных,
+    которое сценарий передал записи (`present` — прочитанная ревизия,
+    `absent` — метаданных быть не должно): конфликт ревизии получает по нему
+    запись конфликта. У чтения ожидаемого состояния нет.
     """
     if type(error) is not ManagerMetadataStoreError:
         return _STORE_FAILED
@@ -251,7 +254,17 @@ def store_error_detail(error: Exception) -> ErrorDetail:
     if type(failure) is not MetadataStoreFailure:
         return _STORE_FAILED
     category, message = _STORE_FAILURES[failure]
-    return ErrorDetail(category, failure.value, message, reason=_reason(failure, getattr(error, "reason", None)))
+    conflicts = ()
+    if failure is MetadataStoreFailure.CONFLICT and expected is not None:
+        conflicts = (revision_conflict(ConflictSubject.METADATA, expected),)
+    return ErrorDetail(
+        category, failure.value, message, reason=_reason(failure, getattr(error, "reason", None)), conflicts=conflicts,
+    )
+
+
+def write_expectation(stored: StoredManagerMetadata | None) -> ConflictState:
+    """Ожидаемое состояние метаданных для записи по результату чтения: есть с прочитанной ревизией или нет."""
+    return ConflictState.ABSENT if stored is None else ConflictState.PRESENT
 
 
 def read_stored_metadata(store: ManagerMetadataStore) -> StoredManagerMetadata | None | ErrorDetail:
@@ -384,7 +397,7 @@ class ImportStoragePlacementHandler:
         try:
             revision = self._store.write_metadata(candidate, None if stored is None else stored.revision)
         except Exception as error:
-            return failed(operation_id, name, store_error_detail(error))
+            return failed(operation_id, name, store_error_detail(error, write_expectation(stored)))
         if type(revision) is not str or revision != metadata_revision(content):
             return failed(operation_id, name, INVALID_STORE_RESULT)
         view = StoragePlacementImportView(

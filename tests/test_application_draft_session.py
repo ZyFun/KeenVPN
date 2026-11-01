@@ -22,10 +22,11 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.adapters.draft_session_files import DRAFT_FILE_NAME, DraftSessionFiles
 from keenvpn.adapters.manager_metadata_files import METADATA_FILE_NAME, ManagerMetadataFiles
-from keenvpn.application.contract import CONTRACT_VERSION, ErrorCategory, NextStepCode
+from keenvpn.application.contract import CONTRACT_VERSION, ConflictState as State, ErrorCategory, NextStepCode
 from keenvpn.application.draft_session import (
-    BaselineSourceView, CreateDraft, CreateDraftHandler, DiscardDraft, DiscardDraftHandler, DraftBaselineView,
-    DraftDiscardView, DraftStatusView, DraftView, InspectDraft, InspectDraftHandler, new_draft_id, utc_now,
+    REVISION_TOKEN_LENGTH, BaselineSourceView, CreateDraft, CreateDraftHandler, DiscardDraft, DiscardDraftHandler,
+    DraftBaselineView, DraftDiscardView, DraftStatusView, DraftView, InspectDraft, InspectDraftHandler,
+    draft_revision_token, new_draft_id, utc_now, valid_expected_draft, valid_revision_token,
 )
 from keenvpn.application.ports import (
     DraftSessionStoreError, DraftStoreFailure as Failure, RouterReadError, RouterReadFailure, StoreReason as Reason,
@@ -124,6 +125,19 @@ def created_content(draft_id: str = FIRST_ID) -> bytes:
     return encode_draft_session(DraftSession(draft_id, CREATED_AT, baseline=BASELINE))
 
 
+def token(raw: bytes) -> str:
+    """Токен ревизии, который интерфейс получает в представлении черновика с этими байтами."""
+    return draft_revision_token(draft_revision(raw))
+
+
+CONTENT_TOKEN = token(content())
+CREATED_TOKEN = token(created_content())
+DISCARD = DiscardDraft(draft_id=FIRST_ID, expected_revision=CONTENT_TOKEN)
+"""Отмена черновика `content()` с токеном из его представления."""
+DISCARD_CREATED = DiscardDraft(draft_id=FIRST_ID, expected_revision=CREATED_TOKEN)
+"""Отмена черновика, созданного сценарием, с токеном из его представления."""
+
+
 class Text(str):
     pass
 
@@ -157,6 +171,19 @@ class ScenarioCase(unittest.TestCase):
         self.assertEqual(None if result.error.next_step is None else result.error.next_step.code, step)
         self.assert_private(result)
 
+    def assert_draft_conflict(self, result, expected, found):
+        """Отказ несёт одну запись конфликта черновика, а токены и ревизии в ошибку не попадают."""
+        self.assertEqual(result.to_dict()["error"]["conflicts"], [
+            {"subject": "draft", "source": None, "expected": expected.value, "found": found.value},
+        ])
+        conflict = result.error.conflicts[0]
+        self.assertIs(type(conflict.expected), State)
+        self.assertIs(conflict.expected, expected)
+        self.assertIs(conflict.found, found)
+        text = json.dumps(result.to_dict()["error"], ensure_ascii=False) + repr(result.error)
+        for value in (CONTENT_TOKEN, CREATED_TOKEN, token(content(SECOND_ID)), draft_revision(content())):
+            self.assertNotIn(value, text)
+
 
 class InspectDraftTests(ScenarioCase):
     def test_absent_draft_is_a_successful_state(self):
@@ -172,7 +199,8 @@ class InspectDraftTests(ScenarioCase):
         with forbid_external_effects():
             result = self.inspect.execute(InspectDraft())
         self.assertEqual(result.to_dict()["data"], {"present": True, "draft": {
-            "draft_id": FIRST_ID, "created_at": "2026-11-01T02:14:16Z", "unknown_field_count": 1, "baseline": None,
+            "draft_id": FIRST_ID, "revision": token(self.store.content), "created_at": "2026-11-01T02:14:16Z",
+            "unknown_field_count": 1, "baseline": None,
         }})
         self.assert_private(result)
         with self.assertRaises(FrozenInstanceError):
@@ -275,7 +303,7 @@ class CreateDraftTests(ScenarioCase):
         with forbid_external_effects():
             result = self.create.execute(CreateDraft())
         self.assertTrue(result.succeeded)
-        self.assertEqual(result.data, DraftView(FIRST_ID, "2026-11-01T02:14:16Z", 0, BASELINE_VIEW))
+        self.assertEqual(result.data, DraftView(FIRST_ID, CREATED_TOKEN, "2026-11-01T02:14:16Z", 0, BASELINE_VIEW))
         self.assertEqual(self.store.content, created_content())
         self.assertEqual(self.store.create_calls, (DraftSession(FIRST_ID, CREATED_AT, baseline=BASELINE),))
         self.assert_private(result)
@@ -299,6 +327,7 @@ class CreateDraftTests(ScenarioCase):
         with forbid_external_effects():
             result = self.create.execute(CreateDraft())
         self.assert_failed(result, ErrorCategory.UNSUPPORTED, "draft_exists", step=NextStepCode.OPEN_VIEW)
+        self.assert_draft_conflict(result, State.ABSENT, State.PRESENT)
         self.assertEqual((self.store.content, self.store.create_calls), (content(SECOND_ID), ()))
 
     def test_read_failure_and_damaged_file_prevent_creation(self):
@@ -318,6 +347,7 @@ class CreateDraftTests(ScenarioCase):
         with forbid_external_effects():
             result = self.create.execute(CreateDraft())
         self.assert_failed(result, ErrorCategory.SOURCE_FAILED, "draft_revision_conflict", step=NextStepCode.OPEN_VIEW)
+        self.assert_draft_conflict(result, State.ABSENT, State.PRESENT)
         self.assertEqual(self.store.content, content(SECOND_ID))
 
     def test_write_failures_are_not_success(self):
@@ -457,7 +487,7 @@ class DiscardDraftTests(ScenarioCase):
         self.store.content = content()
         revision = draft_revision(content())
         with forbid_external_effects():
-            result = self.discard.execute(DiscardDraft(draft_id=FIRST_ID))
+            result = self.discard.execute(DISCARD)
         self.assertEqual(result.data, DraftDiscardView("discarded", FIRST_ID))
         self.assertEqual(result.to_dict()["data"], {"outcome": "discarded", "draft_id": FIRST_ID})
         self.assertEqual((self.store.content, self.store.remove_calls), (None, (revision,)))
@@ -465,10 +495,10 @@ class DiscardDraftTests(ScenarioCase):
 
     def test_repeated_discard_confirms_absence_without_removal(self):
         self.store.content = content()
-        self.discard.execute(DiscardDraft(draft_id=FIRST_ID))
+        self.discard.execute(DISCARD)
         self.assertEqual(self.store.confirm_calls, 0)
         with forbid_external_effects():
-            result = self.discard.execute(DiscardDraft(draft_id=FIRST_ID))
+            result = self.discard.execute(DISCARD)
         self.assertEqual(result.data, DraftDiscardView("already_absent", FIRST_ID))
         self.assertEqual((len(self.store.remove_calls), self.store.confirm_calls), (1, 1))
         self.assert_private(result)
@@ -479,13 +509,13 @@ class DiscardDraftTests(ScenarioCase):
         self.store.write_failure = DraftSessionStoreError(Failure.WRITE_UNCONFIRMED, reason=Reason.IO_ERROR.value)
         for attempt in range(2):
             with self.subTest(attempt=attempt):
-                result = self.discard.execute(DiscardDraft(draft_id=FIRST_ID))
+                result = self.discard.execute(DISCARD)
                 self.assert_failed(result, ErrorCategory.SOURCE_FAILED, "draft_write_unconfirmed", "io_error",
                                    NextStepCode.OPEN_VIEW)
                 self.assertIsNone(self.store.content)
         self.assertEqual((len(self.store.remove_calls), self.store.confirm_calls), (1, 1))
         self.store.write_failure = None
-        result = self.discard.execute(DiscardDraft(draft_id=FIRST_ID))
+        result = self.discard.execute(DISCARD)
         self.assertEqual(result.data, DraftDiscardView("already_absent", FIRST_ID))
         self.assertEqual(self.store.confirm_calls, 2)
 
@@ -493,7 +523,7 @@ class DiscardDraftTests(ScenarioCase):
         for failure in (Failure.BUSY, Failure.UNAVAILABLE, Failure.UNSAFE, Failure.WRITE_UNCONFIRMED):
             with self.subTest(failure=failure.value):
                 self.store.write_failure = DraftSessionStoreError(failure, reason=REASONS[failure])
-                result = self.discard.execute(DiscardDraft(draft_id=FIRST_ID))
+                result = self.discard.execute(DISCARD)
                 self.assert_failed(result, CATEGORIES[failure], failure.value, REASONS[failure], STEPS[failure])
         self.assertEqual(self.store.remove_calls, ())
 
@@ -502,31 +532,35 @@ class DiscardDraftTests(ScenarioCase):
             self.store.content = content(SECOND_ID)
         self.store.before_revision_check = appear
         with forbid_external_effects():
-            result = self.discard.execute(DiscardDraft(draft_id=FIRST_ID))
+            result = self.discard.execute(DISCARD)
         self.assert_failed(result, ErrorCategory.SOURCE_FAILED, "draft_revision_conflict", step=NextStepCode.OPEN_VIEW)
+        self.assert_draft_conflict(result, State.ABSENT, State.PRESENT)
         self.assertEqual((self.store.content, self.store.remove_calls), (content(SECOND_ID), ()))
 
     def test_other_draft_is_not_removed(self):
         self.store.content = content(SECOND_ID)
         with forbid_external_effects():
-            result = self.discard.execute(DiscardDraft(draft_id=FIRST_ID))
+            result = self.discard.execute(DISCARD)
         self.assert_failed(result, ErrorCategory.UNSUPPORTED, "draft_mismatch", step=NextStepCode.OPEN_VIEW)
+        self.assert_draft_conflict(result, State.PRESENT, State.CHANGED)
         self.assertEqual((self.store.content, self.store.remove_calls), (content(SECOND_ID), ()))
 
     def test_invalid_draft_id_is_an_invalid_command_without_reading(self):
         for value in (FIRST_ID.upper(), Text(FIRST_ID), "", None, 1):
             with self.subTest(value=value):
-                result = self.discard.execute(DiscardDraft(draft_id=value))
+                result = self.discard.execute(DiscardDraft(draft_id=value, expected_revision=CONTENT_TOKEN))
                 self.assert_failed(result, ErrorCategory.INVALID_REQUEST, "invalid_command")
         self.assert_failed(self.discard.execute(object()), ErrorCategory.INVALID_REQUEST, "invalid_command")
-        result = self.discard.execute(DiscardDraft(draft_id=FIRST_ID, contract_version=CONTRACT_VERSION + 1))
+        result = self.discard.execute(DiscardDraft(
+            draft_id=FIRST_ID, expected_revision=CONTENT_TOKEN, contract_version=CONTRACT_VERSION + 1,
+        ))
         self.assert_failed(result, ErrorCategory.INVALID_REQUEST, "unsupported_contract_version",
                            step=NextStepCode.UPDATE_INTERFACE)
         self.assertEqual(self.store.read_calls, 0)
 
     def test_damaged_file_is_not_removed(self):
         self.store.content = b"{"
-        self.assert_failed(self.discard.execute(DiscardDraft(draft_id=FIRST_ID)), ErrorCategory.INVALID_SOURCE_DATA,
+        self.assert_failed(self.discard.execute(DISCARD), ErrorCategory.INVALID_SOURCE_DATA,
                            "invalid_stored_draft", "invalid_draft_json", NextStepCode.PRESERVE_FILE)
         self.assertEqual((self.store.content, self.store.remove_calls), (b"{", ()))
 
@@ -538,8 +572,10 @@ class DiscardDraftTests(ScenarioCase):
             self.store.content = changed
         self.store.before_revision_check = change
         with forbid_external_effects():
-            result = self.discard.execute(DiscardDraft(draft_id=FIRST_ID))
+            result = self.discard.execute(DISCARD)
         self.assert_failed(result, ErrorCategory.SOURCE_FAILED, "draft_revision_conflict", step=NextStepCode.OPEN_VIEW)
+        # Хранилище сообщает только несовпадение ревизии: исчез черновик или изменился — не установлено.
+        self.assert_draft_conflict(result, State.PRESENT, State.UNKNOWN)
         self.assertEqual(self.store.content, changed)
 
     def test_remove_failures_are_not_success(self):
@@ -548,7 +584,7 @@ class DiscardDraftTests(ScenarioCase):
                 self.store.content = content()
                 self.store.publish_before_failure = removed
                 self.store.write_failure = DraftSessionStoreError(failure, reason=REASONS[failure])
-                result = self.discard.execute(DiscardDraft(draft_id=FIRST_ID))
+                result = self.discard.execute(DISCARD)
                 self.assert_failed(result, CATEGORIES[failure], failure.value, REASONS[failure], STEPS[failure])
                 self.assertEqual(self.store.content, None if removed else content())
 
@@ -558,15 +594,127 @@ class DiscardDraftTests(ScenarioCase):
                 return "removed"
         stored = StoredDraftSession(session(), draft_revision(content()))
         handler = DiscardDraftHandler(Removing(stored), operation_ids=lambda: OPERATION)
-        self.assert_failed(handler.execute(DiscardDraft(draft_id=FIRST_ID)), ErrorCategory.INVALID_SOURCE_DATA,
+        self.assert_failed(handler.execute(DISCARD), ErrorCategory.INVALID_SOURCE_DATA,
                            "invalid_draft_store_result", step=NextStepCode.OPEN_VIEW)
 
         class Confirming(_Answering):
             def confirm_draft_absent(self):
                 return "confirmed"
         handler = DiscardDraftHandler(Confirming(None), operation_ids=lambda: OPERATION)
-        self.assert_failed(handler.execute(DiscardDraft(draft_id=FIRST_ID)), ErrorCategory.INVALID_SOURCE_DATA,
+        self.assert_failed(handler.execute(DISCARD), ErrorCategory.INVALID_SOURCE_DATA,
                            "invalid_draft_store_result", step=NextStepCode.OPEN_VIEW)
+
+
+class DraftRevisionTokenTests(ScenarioCase):
+    def test_token_is_opaque_short_and_follows_every_byte_of_the_file(self):
+        revision = draft_revision(content())
+        self.assertEqual(len(CONTENT_TOKEN), REVISION_TOKEN_LENGTH)
+        self.assertTrue(valid_revision_token(CONTENT_TOKEN))
+        self.assertEqual(draft_revision_token(revision), CONTENT_TOKEN)
+        # Токен — не ревизия и не её часть: по нему нельзя сверить ни файл, ни хеши источников.
+        self.assertNotIn(CONTENT_TOKEN, revision)
+        self.assertNotIn(CREATED_TOKEN, draft_revision(created_content()))
+        for value in DIGESTS:
+            self.assertNotIn(CREATED_TOKEN, value)
+        tokens = {token(raw) for raw in (content(), content(SECOND_ID), content(note="x"), content(note="y"),
+                                         created_content())}
+        self.assertEqual(len(tokens), 5)
+
+    def test_token_is_built_only_from_a_revision(self):
+        revision = draft_revision(content())
+        for value in (revision.upper(), Text(revision), CONTENT_TOKEN, revision[:-1], None, revision.encode()):
+            with self.subTest(value=repr(value)):
+                with self.assertRaises(TypeError):
+                    draft_revision_token(value)
+
+    def test_token_format_is_strict(self):
+        for value in (
+            draft_revision(content()), CONTENT_TOKEN.upper(), Text(CONTENT_TOKEN), CONTENT_TOKEN[:-1],
+            CONTENT_TOKEN + "0", f" {CONTENT_TOKEN}", "", None, 1, CONTENT_TOKEN.encode(),
+        ):
+            with self.subTest(value=repr(value)):
+                self.assertFalse(valid_revision_token(value))
+                self.assertFalse(valid_expected_draft(FIRST_ID, value))
+        self.assertTrue(valid_expected_draft(FIRST_ID, CONTENT_TOKEN))
+        self.assertFalse(valid_expected_draft(Text(FIRST_ID), CONTENT_TOKEN))
+
+    def test_views_give_the_token_of_the_stored_bytes(self):
+        with forbid_external_effects():
+            created = self.create.execute(CreateDraft())
+        self.assertEqual(created.data.revision, token(self.store.content))
+        self.assertEqual(list(created.to_dict()["data"]), [
+            "draft_id", "revision", "created_at", "unknown_field_count", "baseline",
+        ])
+        with forbid_external_effects():
+            inspected = self.inspect.execute(InspectDraft())
+        self.assertEqual(inspected.data.draft.revision, created.data.revision)
+        self.store.content = content(note="TEST_private-note")
+        changed = self.inspect.execute(InspectDraft())
+        self.assertEqual(changed.data.draft.revision, token(content(note="TEST_private-note")))
+        self.assertNotEqual(changed.data.draft.revision, created.data.revision)
+        self.assert_private(changed)
+
+    def test_read_failure_with_conflict_code_has_no_expectation_to_report(self):
+        self.store.read_failure = DraftSessionStoreError(Failure.CONFLICT)
+        result = self.inspect.execute(InspectDraft())
+        self.assert_failed(result, ErrorCategory.SOURCE_FAILED, "draft_revision_conflict", step=NextStepCode.OPEN_VIEW)
+        self.assertEqual(result.error.conflicts, ())
+
+
+class DiscardExpectedRevisionTests(ScenarioCase):
+    def test_stale_token_is_a_conflict_without_removal(self):
+        changed = content(note="TEST_private-note")
+        self.store.content = changed
+        with forbid_external_effects():
+            result = self.discard.execute(DISCARD)
+        self.assert_failed(result, ErrorCategory.SOURCE_FAILED, "draft_revision_conflict", step=NextStepCode.OPEN_VIEW)
+        self.assert_draft_conflict(result, State.PRESENT, State.CHANGED)
+        self.assertEqual((self.store.content, self.store.read_calls, self.store.remove_calls), (changed, 1, ()))
+
+    def test_token_of_another_draft_with_the_same_id_is_a_conflict(self):
+        self.store.content = content()
+        for revision in (token(content(SECOND_ID)), CREATED_TOKEN, "0" * REVISION_TOKEN_LENGTH):
+            with self.subTest(revision=revision):
+                result = self.discard.execute(DiscardDraft(draft_id=FIRST_ID, expected_revision=revision))
+                self.assert_failed(result, ErrorCategory.SOURCE_FAILED, "draft_revision_conflict",
+                                   step=NextStepCode.OPEN_VIEW)
+                self.assert_draft_conflict(result, State.PRESENT, State.CHANGED)
+        self.assertEqual((self.store.content, self.store.remove_calls), (content(), ()))
+
+    def test_other_draft_is_reported_before_its_token(self):
+        self.store.content = content(SECOND_ID)
+        command = DiscardDraft(draft_id=FIRST_ID, expected_revision=token(content(SECOND_ID)))
+        result = self.discard.execute(command)
+        self.assert_failed(result, ErrorCategory.UNSUPPORTED, "draft_mismatch", step=NextStepCode.OPEN_VIEW)
+        self.assert_draft_conflict(result, State.PRESENT, State.CHANGED)
+        self.assertEqual(self.store.remove_calls, ())
+
+    def test_malformed_or_missing_token_is_an_invalid_command_without_reading(self):
+        self.store.content = content()
+        for value in (
+            draft_revision(content()), CONTENT_TOKEN.upper(), Text(CONTENT_TOKEN), CONTENT_TOKEN[:-1], "", None, 1,
+            CONTENT_TOKEN.encode(),
+        ):
+            with self.subTest(value=repr(value)):
+                result = self.discard.execute(DiscardDraft(draft_id=FIRST_ID, expected_revision=value))
+                self.assert_failed(result, ErrorCategory.INVALID_REQUEST, "invalid_command")
+                self.assertEqual(result.error.conflicts, ())
+        with self.assertRaises(TypeError):
+            DiscardDraft(draft_id=FIRST_ID)
+        self.assertEqual((self.store.read_calls, self.store.remove_calls), (0, ()))
+
+    def test_matching_token_removes_by_the_read_revision(self):
+        self.store.content = content()
+        with forbid_external_effects():
+            result = self.discard.execute(DISCARD)
+        self.assertEqual(result.data, DraftDiscardView("discarded", FIRST_ID))
+        self.assertEqual(self.store.remove_calls, (draft_revision(content()),))
+        self.assertNotIn(CONTENT_TOKEN, json.dumps(result.to_dict()))
+
+    def test_absent_draft_is_already_absent_whatever_the_token(self):
+        result = self.discard.execute(DiscardDraft(draft_id=FIRST_ID, expected_revision="f" * REVISION_TOKEN_LENGTH))
+        self.assertEqual(result.data, DraftDiscardView("already_absent", FIRST_ID))
+        self.assertEqual(self.store.confirm_calls, 1)
 
 
 class InMemoryDoubleTests(unittest.TestCase):
@@ -623,19 +771,39 @@ class FileStoreIntegrationTests(unittest.TestCase):
         self.assertFalse(self.directory.exists())
 
         created = create.execute(CreateDraft())
-        self.assertEqual(created.data, DraftView(FIRST_ID, "2026-11-01T02:14:16Z", 0, BASELINE_VIEW))
+        self.assertEqual(created.data, DraftView(FIRST_ID, CREATED_TOKEN, "2026-11-01T02:14:16Z", 0, BASELINE_VIEW))
         self.assertEqual((self.directory / DRAFT_FILE_NAME).read_bytes(), created_content())
         self.assertEqual(create.execute(CreateDraft()).error.code, "draft_exists")
         self.assertEqual(inspect.execute(InspectDraft()).data, DraftStatusView(True, created.data))
-        self.assertEqual(discard.execute(DiscardDraft(draft_id=SECOND_ID)).error.code, "draft_mismatch")
+        other = DiscardDraft(draft_id=SECOND_ID, expected_revision=CREATED_TOKEN)
+        self.assertEqual(discard.execute(other).error.code, "draft_mismatch")
 
-        self.assertEqual(discard.execute(DiscardDraft(draft_id=FIRST_ID)).data.outcome, "discarded")
-        self.assertEqual(discard.execute(DiscardDraft(draft_id=FIRST_ID)).data.outcome, "already_absent")
+        self.assertEqual(discard.execute(DISCARD_CREATED).data.outcome, "discarded")
+        self.assertEqual(discard.execute(DISCARD_CREATED).data.outcome, "already_absent")
         after = self.snapshot()
         # Остался только пустой собственный каталог черновика; метаданные менеджера не тронуты.
         self.assertEqual(after, {**before, "data/draft": None})
         self.assertEqual(os.listdir(self.directory), [])
         self.assertIn(f"data/keenvpn/{METADATA_FILE_NAME}", after)
+
+    def test_external_edit_of_the_file_makes_the_viewed_token_stale(self):
+        create = CreateDraftHandler(self.store, fingerprints(), operation_ids=lambda: OPERATION,
+                                    draft_ids=lambda: FIRST_ID, clock=lambda: CREATED_AT)
+        viewed = create.execute(CreateDraft()).data
+        path = self.directory / DRAFT_FILE_NAME
+        edited = content(note="TEST_private-note")
+        path.write_bytes(edited)
+        discard = DiscardDraftHandler(self.store, operation_ids=lambda: OPERATION)
+        result = discard.execute(DiscardDraft(draft_id=viewed.draft_id, expected_revision=viewed.revision))
+        self.assertEqual((result.error.code, result.to_dict()["error"]["conflicts"]), ("draft_revision_conflict", [
+            {"subject": "draft", "source": None, "expected": "present", "found": "changed"},
+        ]))
+        self.assertEqual(path.read_bytes(), edited)
+        fresh = InspectDraftHandler(self.store, operation_ids=lambda: OPERATION).execute(InspectDraft()).data.draft
+        self.assertEqual(fresh.revision, token(edited))
+        result = discard.execute(DiscardDraft(draft_id=fresh.draft_id, expected_revision=fresh.revision))
+        self.assertEqual(result.data.outcome, "discarded")
+        self.assertFalse(path.exists())
 
     def test_repeated_discard_after_unconfirmed_removal_syncs_the_directory(self):
         CreateDraftHandler(self.store, fingerprints(), operation_ids=lambda: OPERATION, draft_ids=lambda: FIRST_ID,
@@ -653,11 +821,11 @@ class FileStoreIntegrationTests(unittest.TestCase):
         with patch.object(os, "fsync", failing_directory_fsync):
             for attempt in range(2):
                 with self.subTest(attempt=attempt):
-                    result = discard.execute(DiscardDraft(draft_id=FIRST_ID))
+                    result = discard.execute(DISCARD_CREATED)
                     self.assertEqual((result.error.code, result.error.reason), ("draft_write_unconfirmed", "io_error"))
         self.assertEqual(len(synced), 2)
         self.assertFalse((self.directory / DRAFT_FILE_NAME).exists())
-        self.assertEqual(discard.execute(DiscardDraft(draft_id=FIRST_ID)).data.outcome, "already_absent")
+        self.assertEqual(discard.execute(DISCARD_CREATED).data.outcome, "already_absent")
 
     def test_damaged_file_on_disk_is_preserved_by_all_scenarios(self):
         self.directory.mkdir(mode=0o700)
@@ -667,7 +835,7 @@ class FileStoreIntegrationTests(unittest.TestCase):
         for handler, command in (
             (InspectDraftHandler(self.store, operation_ids=lambda: OPERATION), InspectDraft()),
             (CreateDraftHandler(self.store, fingerprints(), operation_ids=lambda: OPERATION), CreateDraft()),
-            (DiscardDraftHandler(self.store, operation_ids=lambda: OPERATION), DiscardDraft(draft_id=FIRST_ID)),
+            (DiscardDraftHandler(self.store, operation_ids=lambda: OPERATION), DISCARD_CREATED),
         ):
             with self.subTest(command=command.name):
                 result = handler.execute(command)

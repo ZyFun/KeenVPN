@@ -6,10 +6,11 @@
 не применяет: конфигурация Xray и XKeen, настройки Keenetic и службы не
 меняются и не разбираются. Сессия одна: создание при существующем черновике
 — отказ без перезаписи. Отмена удаляет только файл сессии с идентификатором
-из команды и ревизией из чтения. Результаты содержат идентификатор, время
-создания, число неизвестных полей и состояния источников, без путей,
-ревизии, хешей и значений неизвестных полей. Ревизии и конфликты для будущих
-интерфейсов, сравнение с исходными отпечатками, блокировка устаревшего
+и токеном ревизии из команды. Результаты содержат идентификатор, непрозрачный
+токен ревизии, время создания, число неизвестных полей и состояния
+источников, без путей, ревизии файла, хешей и значений неизвестных полей.
+Расхождение черновика с ожидаемым командой возвращается с записью конфликта
+контракта. Сравнение с исходными отпечатками, блокировка устаревшего
 черновика и применение — не этого модуля.
 """
 
@@ -17,12 +18,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
+import hashlib
+import re
 from typing import ClassVar
 import uuid
 
 from keenvpn.application.contract import (
-    CONTRACT_VERSION, ErrorCategory, ErrorDetail, OperationIdFactory, Result, check_contract_version, failed,
-    invalid_command, new_operation_id, succeeded,
+    CONTRACT_VERSION, Conflict, ConflictState, ConflictSubject, ErrorCategory, ErrorDetail, OperationIdFactory, Result,
+    check_contract_version, failed, invalid_command, new_operation_id, revision_conflict, succeeded,
 )
 from keenvpn.application.ports import (
     DraftSessionStore, DraftSessionStoreError, DraftStoreFailure, SourceFingerprintSource, StoreReason,
@@ -38,6 +41,34 @@ from keenvpn.domain.manager_metadata import valid_metadata_revision
 
 DraftIdFactory = Callable[[], str]
 Clock = Callable[[], datetime]
+
+REVISION_TOKEN_LENGTH = 32
+"""Длина токена ревизии черновика в шестнадцатеричных цифрах: 128 бит."""
+_REVISION_TOKEN = re.compile(f"[0-9a-f]{{{REVISION_TOKEN_LENGTH}}}")
+_REVISION_TOKEN_DOMAIN = b"keenvpn-draft-revision-token-v1\n"
+
+
+def draft_revision_token(revision: str) -> str:
+    """Непрозрачный токен ревизии черновика для интерфейсов.
+
+    Первые 128 бит SHA-256 от метки домена и ревизии файла: токен меняется
+    вместе с любым байтом файла, но не совпадает ни с ревизией, ни с хешами
+    источников и не позволяет их получить. Формат — 32 шестнадцатеричные
+    цифры, поэтому сырую ревизию из 64 цифр с токеном не спутать.
+    """
+    if not valid_metadata_revision(revision):
+        raise TypeError("Токен строится из ревизии черновика.")
+    return hashlib.sha256(_REVISION_TOKEN_DOMAIN + revision.encode("ascii")).hexdigest()[:REVISION_TOKEN_LENGTH]
+
+
+def valid_revision_token(value: object) -> bool:
+    """Проверить формат токена ревизии: 32 шестнадцатеричные цифры в нижнем регистре, точный `str`."""
+    return type(value) is str and _REVISION_TOKEN.fullmatch(value) is not None
+
+
+def valid_expected_draft(draft_id: object, expected_revision: object) -> bool:
+    """Проверить формат идентификатора и токена ревизии, которые команда взяла из представления черновика."""
+    return valid_draft_id(draft_id) and valid_revision_token(expected_revision)
 
 
 def new_draft_id() -> str:
@@ -70,11 +101,16 @@ class InspectDraft:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DiscardDraft:
-    """Отменить черновик с этим идентификатором: удалить файл сессии, ничего не применяя."""
+    """Отменить черновик с этим идентификатором и токеном ревизии: удалить файл сессии, ничего не применяя.
+
+    `draft_id` и `expected_revision` берутся из `DraftView`, а не вводятся
+    пользователем: устаревшее представление не удалит изменённый черновик.
+    """
 
     name: ClassVar[str] = "discard_draft"
 
     draft_id: str
+    expected_revision: str
     contract_version: int = CONTRACT_VERSION
 
 
@@ -118,21 +154,24 @@ class DraftBaselineView:
 
 @dataclass(frozen=True, slots=True)
 class DraftView:
-    """Безопасное представление сессии: идентификатор, время создания UTC, число неизвестных полей и источники.
+    """Безопасное представление сессии: идентификатор, токен ревизии, время создания UTC, неизвестные поля и источники.
 
-    `baseline` — состояния зафиксированных источников либо None, если раздела
-    в файле нет. Путь, ревизия, хеши, имена и значения неизвестных полей сюда не входят.
+    `revision` — непрозрачный токен ревизии (`draft_revision_token`): интерфейс
+    передаёт его в команды, меняющие черновик, вместе с `draft_id`. `baseline`
+    — состояния зафиксированных источников либо None, если раздела в файле
+    нет. Путь, ревизия файла, хеши, имена и значения неизвестных полей сюда не входят.
     """
 
     draft_id: str
+    revision: str
     created_at: str
     unknown_field_count: int
     baseline: DraftBaselineView | None
 
     @classmethod
-    def from_session(cls, session: DraftSession) -> "DraftView":
-        """Построить представление из безопасной диагностики домена."""
-        fields = view_fields(cls, session.to_diagnostic())
+    def from_session(cls, session: DraftSession, revision: str) -> "DraftView":
+        """Построить представление из безопасной диагностики домена и ревизии файла."""
+        fields = view_fields(cls, {**session.to_diagnostic(), "revision": draft_revision_token(revision)})
         if fields["baseline"] is not None:
             fields["baseline"] = DraftBaselineView.from_diagnostic(fields["baseline"])
         return cls(**fields)
@@ -183,11 +222,13 @@ class DraftDiscardView:
 DRAFT_EXISTS = ErrorDetail(
     ErrorCategory.UNSUPPORTED, "draft_exists",
     "Черновик уже открыт: поддерживается одна сессия, существующий черновик не перезаписывается.",
+    conflicts=(Conflict(ConflictSubject.DRAFT, ConflictState.ABSENT, ConflictState.PRESENT),),
 )
 """Отказ создания: черновик уже есть; его нужно открыть или отменить."""
 DRAFT_MISMATCH = ErrorDetail(
     ErrorCategory.UNSUPPORTED, "draft_mismatch",
     "Открыт другой черновик: отмена отклонена, черновик не удалён.",
+    conflicts=(Conflict(ConflictSubject.DRAFT, ConflictState.PRESENT, ConflictState.CHANGED),),
 )
 """Отказ отмены: идентификатор команды не совпал с идентификатором существующего черновика."""
 INVALID_STORE_RESULT = ErrorDetail(
@@ -220,6 +261,12 @@ _STORE_FAILURES = {
         ErrorCategory.SOURCE_FAILED, "Черновик изменён, но сохранность на диске не подтверждена: перечитайте его.",
     ),
 }
+_CONFLICT_CATEGORY, _CONFLICT_MESSAGE = _STORE_FAILURES[DraftStoreFailure.CONFLICT]
+DRAFT_CHANGED = ErrorDetail(
+    _CONFLICT_CATEGORY, DraftStoreFailure.CONFLICT.value, _CONFLICT_MESSAGE,
+    conflicts=(Conflict(ConflictSubject.DRAFT, ConflictState.PRESENT, ConflictState.CHANGED),),
+)
+"""Отказ изменения: токен ревизии команды не совпал с текущим — черновик изменился после чтения интерфейсом."""
 _STORE_REASONS = {reason.value: reason.value for reason in StoreReason}
 _DOMAIN_REASONS = {code.value: code.value for code in DraftSessionErrorCode}
 
@@ -233,12 +280,15 @@ def _reason(failure: DraftStoreFailure, value: object) -> str | None:
     return (_DOMAIN_REASONS if failure is DraftStoreFailure.INVALID else _STORE_REASONS).get(value)
 
 
-def store_error_detail(error: Exception) -> ErrorDetail:
+def store_error_detail(error: Exception, expected: ConflictState | None = None) -> ErrorDetail:
     """Перевести отказ хранилища черновика в ErrorDetail без текста и цепочки исключения.
 
     Только точный тип `DraftSessionStoreError` с известным видом отказа
     сохраняет свой код; подкласс и любое другое исключение — непредвиденный
-    отказ, а не конфликт или подмена.
+    отказ, а не конфликт или подмена. `expected` — состояние черновика,
+    которое сценарий передал хранилищу при изменении (`present` — прочитанная
+    ревизия, `absent` — черновика быть не должно): конфликт ревизии получает
+    по нему запись конфликта. У чтения ожидаемого состояния нет.
     """
     if type(error) is not DraftSessionStoreError:
         return _STORE_FAILED
@@ -246,7 +296,27 @@ def store_error_detail(error: Exception) -> ErrorDetail:
     if type(failure) is not DraftStoreFailure:
         return _STORE_FAILED
     category, message = _STORE_FAILURES[failure]
-    return ErrorDetail(category, failure.value, message, reason=_reason(failure, getattr(error, "reason", None)))
+    conflicts = ()
+    if failure is DraftStoreFailure.CONFLICT and expected is not None:
+        conflicts = (revision_conflict(ConflictSubject.DRAFT, expected),)
+    return ErrorDetail(
+        category, failure.value, message, reason=_reason(failure, getattr(error, "reason", None)), conflicts=conflicts,
+    )
+
+
+def check_expected_draft(stored: StoredDraftSession, draft_id: str, expected_revision: str) -> ErrorDetail | None:
+    """Сверить прочитанный черновик с идентификатором и токеном ревизии из команды.
+
+    Другой идентификатор — `draft_mismatch`, другой токен — `draft_revision_conflict`;
+    оба отказа несут запись конфликта черновика. Формат полей команды
+    проверяет `valid_expected_draft` до чтения хранилища; изменение после
+    этого чтения сверяет само хранилище по прочитанной ревизии.
+    """
+    if stored.session.draft_id != draft_id:
+        return DRAFT_MISMATCH
+    if draft_revision_token(stored.revision) != expected_revision:
+        return DRAFT_CHANGED
+    return None
 
 
 def read_stored_draft(store: DraftSessionStore) -> StoredDraftSession | None | ErrorDetail:
@@ -299,7 +369,8 @@ class InspectDraftHandler:
             return failed(operation_id, name, stored)
         if stored is None:
             return succeeded(operation_id, name, DraftStatusView(False, None))
-        return succeeded(operation_id, name, DraftStatusView(True, DraftView.from_session(stored.session)))
+        view = DraftView.from_session(stored.session, stored.revision)
+        return succeeded(operation_id, name, DraftStatusView(True, view))
 
 
 class CreateDraftHandler:
@@ -351,22 +422,24 @@ class CreateDraftHandler:
         try:
             revision = self._store.create_draft(session)
         except Exception as error:
-            return failed(operation_id, name, store_error_detail(error))
+            return failed(operation_id, name, store_error_detail(error, ConflictState.ABSENT))
         if type(revision) is not str or revision != draft_revision(content):
             return failed(operation_id, name, INVALID_STORE_RESULT)
-        return succeeded(operation_id, name, DraftView.from_session(session))
+        return succeeded(operation_id, name, DraftView.from_session(session, revision))
 
 
 class DiscardDraftHandler:
-    """Отменить черновик: удалить файл сессии с идентификатором из команды, ничего не применяя.
+    """Отменить черновик: удалить файл сессии с идентификатором и токеном ревизии из команды, ничего не применяя.
 
-    Порядок: одно чтение хранилища и не больше одного изменения — удаления
-    по прочитанной ревизии или подтверждения отсутствия. Черновика нет —
-    хранилище закрепляет его отсутствие на диске, затем успех `already_absent`:
-    так повтор после `draft_write_unconfirmed` не сообщает успех без
-    подтверждения. Другой идентификатор — отказ `draft_mismatch` без удаления;
-    повреждённый файл — отказ хранилища, файл не удаляется. Изменение черновика
-    после чтения сверяет хранилище: удаление отклоняется конфликтом ревизии.
+    Порядок: проверка формата полей команды, одно чтение хранилища и не
+    больше одного изменения — удаления по прочитанной ревизии или
+    подтверждения отсутствия. Черновика нет — хранилище закрепляет его
+    отсутствие на диске, затем успех `already_absent`: так повтор после
+    `draft_write_unconfirmed` не сообщает успех без подтверждения. Другой
+    идентификатор — отказ `draft_mismatch`, другой токен ревизии — конфликт
+    `draft_revision_conflict`, оба без удаления; повреждённый файл — отказ
+    хранилища, файл не удаляется. Изменение черновика после чтения сверяет
+    хранилище: удаление отклоняется конфликтом ревизии.
     """
 
     def __init__(self, store: DraftSessionStore, *, operation_ids: OperationIdFactory = new_operation_id) -> None:
@@ -382,29 +455,30 @@ class DiscardDraftHandler:
         error = check_contract_version(command.contract_version)
         if error is not None:
             return failed(operation_id, name, error)
-        if not valid_draft_id(command.draft_id):
-            # Идентификатор берётся из представления черновика, а не вводится пользователем.
+        if not valid_expected_draft(command.draft_id, command.expected_revision):
+            # Идентификатор и токен берутся из представления черновика, а не вводятся пользователем.
             return failed(operation_id, name, invalid_command())
         stored = read_stored_draft(self._store)
         if isinstance(stored, ErrorDetail):
             return failed(operation_id, name, stored)
         if stored is None:
-            error = _change_store(self._store.confirm_draft_absent)
+            error = _change_store(self._store.confirm_draft_absent, ConflictState.ABSENT)
             outcome = DraftDiscardOutcome.ALREADY_ABSENT
-        elif stored.session.draft_id != command.draft_id:
-            return failed(operation_id, name, DRAFT_MISMATCH)
         else:
-            error = _change_store(lambda: self._store.remove_draft(stored.revision))
+            error = check_expected_draft(stored, command.draft_id, command.expected_revision)
+            if error is not None:
+                return failed(operation_id, name, error)
+            error = _change_store(lambda: self._store.remove_draft(stored.revision), ConflictState.PRESENT)
             outcome = DraftDiscardOutcome.DISCARDED
         if error is not None:
             return failed(operation_id, name, error)
         return succeeded(operation_id, name, DraftDiscardView(outcome.value, command.draft_id))
 
 
-def _change_store(change: Callable[[], object]) -> ErrorDetail | None:
-    """Выполнить изменение хранилища, которое по контракту возвращает None."""
+def _change_store(change: Callable[[], object], expected: ConflictState) -> ErrorDetail | None:
+    """Выполнить изменение хранилища, которое по контракту возвращает None; `expected` — для записи конфликта."""
     try:
         outcome = change()
     except Exception as error:
-        return store_error_detail(error)
+        return store_error_detail(error, expected)
     return None if outcome is None else INVALID_STORE_RESULT

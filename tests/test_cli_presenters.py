@@ -7,7 +7,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application.contract import (
-    CONTRACT_VERSION, NEXT_STEP_MESSAGES, ErrorCategory, ErrorCode, ErrorDetail, NextStepCode, Result, failed, succeeded,
+    CONTRACT_VERSION, NEXT_STEP_MESSAGES, Conflict, ConflictState, ConflictSubject, ErrorCategory, ErrorCode,
+    ErrorDetail, NextStepCode, Result, failed, succeeded,
 )
 from dataclasses import replace
 
@@ -30,6 +31,7 @@ from keenvpn.application.routing_rules import (
 from keenvpn.domain.manager_metadata import ManagerMetadata, RuleRecord, UnknownFields, encode_manager_metadata
 from keenvpn.domain.rule_binding import rule_key, scheme_rules
 from keenvpn.domain.routing_import import import_routing_scheme
+from keenvpn.domain.source_baseline import BaselineSource
 from keenvpn.application.quick_check import QuickCheck, QuickCheckHandler
 from keenvpn.application.status_summary import PORT_53_HINT, InspectStatusSummary, InspectStatusSummaryHandler
 from keenvpn.domain.xray_process import XrayProcessObservation
@@ -815,6 +817,30 @@ class SafeValueTests(unittest.TestCase):
         enum_coded = ErrorDetail(ErrorCategory.INVALID_REQUEST, ErrorCode.UNSUPPORTED_CONTRACT_VERSION, "Текст.")
         self.assertEqual(present_error(enum_coded)[-1], f"Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.UPDATE_INTERFACE]}")
         self.assertEqual(len(present_error(ErrorDetail(ErrorCategory.INVALID_REQUEST, ErrorCode.INVALID_COMMAND, "Текст."))), 2)
+
+    def test_error_presenter_shows_conflicts_from_application_labels(self):
+        # Записи конфликта показываются подписями каталога application: меню их не вычисляет и не дополняет.
+        error = ErrorDetail(
+            ErrorCategory.SOURCE_FAILED, "draft_revision_conflict", "Черновик изменился.", conflicts=(
+                Conflict(ConflictSubject.DRAFT, ConflictState.PRESENT, ConflictState.CHANGED),
+                Conflict(ConflictSubject.METADATA, ConflictState.ABSENT, ConflictState.PRESENT),
+                Conflict(
+                    ConflictSubject.SOURCE, ConflictState.PRESENT, ConflictState.UNKNOWN, BaselineSource.XKEEN_INIT,
+                ),
+                Conflict(ConflictSubject.SOURCE, ConflictState.UNKNOWN, ConflictState.UNKNOWN),
+            ),
+        )
+        self.assertEqual(present_error(error), [
+            "Отказ: source_failed / draft_revision_conflict", "Причина: Черновик изменился.",
+            "Конфликт: черновик — ожидалось: есть, найдено: другая ревизия",
+            "Конфликт: метаданные менеджера — ожидалось: нет, найдено: есть",
+            "Конфликт: источник xkeen_init — ожидалось: есть, найдено: не установлено",
+            "Конфликт: источник неизвестен этой версии — ожидалось: не установлено, найдено: не установлено",
+            f"Следующий шаг: {NEXT_STEP_MESSAGES[NextStepCode.OPEN_VIEW]}",
+        ])
+        self.assertTrue(all(line.isprintable() for line in present_error(error)))
+        plain = ErrorDetail(ErrorCategory.SOURCE_FAILED, "metadata_revision_conflict", "Текст.")
+        self.assertFalse([line for line in present_error(plain) if line.startswith("Конфликт")])
 
     def test_error_presenter_shows_enum_codes_and_reasons_by_value(self):
         # Контракт принимает в коде и уточнении подклассы str: показывается значение, а не пометка скрытого.

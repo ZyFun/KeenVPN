@@ -17,7 +17,10 @@ import re
 from types import MappingProxyType
 
 from keenvpn.application.checks import CHECK_STATUS_LABELS, ChecksView, CheckView
-from keenvpn.application.contract import CONTRACT_VERSION, CheckStatus, ErrorDetail, Result
+from keenvpn.application.contract import (
+    CONFLICT_STATE_LABELS, CONFLICT_SUBJECT_LABELS, CONTRACT_VERSION, UNKNOWN_SOURCE_LABEL, CheckStatus, Conflict,
+    ConflictSubject, ErrorDetail, Result,
+)
 from keenvpn.application.installation import GeoDataView, InstallationView, XrayProcessView
 from keenvpn.application.keenetic_devices import (
     ASSIGNMENT_LABELS, MAX_DEVICE_NAME_LENGTH, PRESENCE_LABELS, PRESENCE_REASON_LABELS, SEGMENT_MATCH_LABELS,
@@ -235,12 +238,25 @@ def _indent(lines: Iterable[str], level: int = 1) -> Lines:
     return [_INDENT * level + line for line in lines]
 
 
-def present_error(error: ErrorDetail) -> Lines:
-    """Показать отказ сценария: категорию, код, уточнение, текст и безопасный следующий шаг.
+def _conflict_line(conflict: Conflict) -> str:
+    """Строка записи конфликта из подписей каталога application; источник — после проверки формата."""
+    subject = CONFLICT_SUBJECT_LABELS[conflict.subject]
+    if conflict.subject is ConflictSubject.SOURCE:
+        source = UNKNOWN_SOURCE_LABEL if conflict.source is None else identifier(conflict.source.value)
+        subject = f"{subject} {source}"
+    return (
+        f"Конфликт: {subject} — ожидалось: {CONFLICT_STATE_LABELS[conflict.expected]}, "
+        f"найдено: {CONFLICT_STATE_LABELS[conflict.found]}"
+    )
 
-    Шаг берётся из `error.next_step` как есть: меню его не выбирает и не выполняет.
-    Без шага строка не выводится. Код и уточнение контракт допускает подклассами
-    `str`, например перечислениями: фильтр получает их значение обычной строкой.
+
+def present_error(error: ErrorDetail) -> Lines:
+    """Показать отказ сценария: категорию, код, уточнение, текст, записи конфликта и безопасный следующий шаг.
+
+    Записи конфликта и шаг берутся из `error` как есть: меню их не вычисляет,
+    шаг не выбирает и не выполняет. Без записей и без шага строк нет. Код
+    и уточнение контракт допускает подклассами `str`, например перечислениями:
+    фильтр получает их значение обычной строкой.
     """
     if type(error) is not ErrorDetail:
         raise TypeError("Ожидается ErrorDetail.")
@@ -248,6 +264,7 @@ def present_error(error: ErrorDetail) -> Lines:
     if error.reason is not None:
         lines.append(f"Уточнение: {identifier(str.__str__(error.reason))}")
     lines.append(f"Причина: {safe_text(error.message)}")
+    lines.extend(_conflict_line(conflict) for conflict in error.conflicts)
     step = error.next_step
     if step is not None:
         lines.append(f"Следующий шаг: {safe_text(step.message)}")

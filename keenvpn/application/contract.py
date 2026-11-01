@@ -4,7 +4,9 @@
 он получает типизированную команду и возвращает структурированный результат.
 Интерфейс сам решает, как показать данные и сообщение об ошибке. Безопасный
 следующий шаг отказа задаёт каталог этого модуля по категории и коду ошибки:
-интерфейсы только показывают его и ничего не выполняют.
+интерфейсы только показывают его и ничего не выполняют. Отказ из-за того,
+что состояние объекта разошлось с ожидаемым командой, дополнительно несёт
+структурированные записи конфликта без хешей, путей и значений.
 """
 
 from collections.abc import Callable, Mapping
@@ -13,6 +15,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Protocol
 import uuid
+
+from keenvpn.domain.source_baseline import BaselineSource
 
 
 CONTRACT_VERSION = 1
@@ -193,6 +197,105 @@ def next_step_for(category: ErrorCategory, code: str) -> NextStep | None:
     return None if step_code is None else NextStep(step_code, NEXT_STEP_MESSAGES[step_code])
 
 
+class ConflictSubject(StrEnum):
+    """Объект, состояние которого разошлось с ожидаемым командой."""
+
+    DRAFT = "draft"
+    """Сессия черновика: появилась, исчезла, другая или другой ревизии."""
+    METADATA = "metadata"
+    """Метаданные менеджера изменились после чтения."""
+    SOURCE = "source"
+    """Управляемый источник разошёлся с исходными отпечатками черновика."""
+
+
+class ConflictState(StrEnum):
+    """Состояние объекта в записи конфликта: без значений, ревизий и хешей."""
+
+    PRESENT = "present"
+    """Объект есть; в ожидаемом состоянии — в той ревизии, которую знала команда."""
+    ABSENT = "absent"
+    """Объекта нет."""
+    CHANGED = "changed"
+    """Объект есть, но другой или другой ревизии; бывает только найденным состоянием."""
+    UNKNOWN = "unknown"
+    """Состояние не установлено: не зафиксировано, не прочитано или хранилище его не сообщило."""
+
+
+CONFLICT_SUBJECT_LABELS: Mapping[ConflictSubject, str] = MappingProxyType({
+    ConflictSubject.DRAFT: "черновик",
+    ConflictSubject.METADATA: "метаданные менеджера",
+    ConflictSubject.SOURCE: "источник",
+})
+"""Заранее заданная русская подпись объекта конфликта; интерфейсы только показывают её. Таблица только для чтения."""
+
+CONFLICT_STATE_LABELS: Mapping[ConflictState, str] = MappingProxyType({
+    ConflictState.PRESENT: "есть",
+    ConflictState.ABSENT: "нет",
+    ConflictState.CHANGED: "другая ревизия",
+    ConflictState.UNKNOWN: "не установлено",
+})
+"""Заранее заданная русская подпись состояния в записи конфликта. Таблица только для чтения."""
+
+UNKNOWN_SOURCE_LABEL = "неизвестен этой версии"
+"""Подпись источника записи конфликта, которого нет в перечне этой версии менеджера."""
+
+_MATCHING_STATES = frozenset({
+    (ConflictState.PRESENT, ConflictState.PRESENT), (ConflictState.ABSENT, ConflictState.ABSENT),
+})
+"""Совпадение ожидаемого и найденного — не конфликт."""
+
+
+@dataclass(frozen=True, slots=True)
+class Conflict:
+    """Запись конфликта: какой объект, что ожидала команда и что найдено.
+
+    `source` — управляемый источник для `subject=source` либо `None`, если
+    запись источника неизвестна этой версии; у черновика и метаданных — всегда
+    `None`. Ожидаемое состояние не бывает `changed`, найденное `changed` бывает
+    только при ожидаемом `present`. Хешей, ревизий, путей, идентификаторов
+    и значений в записи нет.
+    """
+
+    subject: ConflictSubject
+    expected: ConflictState
+    found: ConflictState
+    source: BaselineSource | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.subject) is not ConflictSubject
+            or type(self.expected) is not ConflictState or type(self.found) is not ConflictState
+            or (self.source is not None and type(self.source) is not BaselineSource)
+            or (self.source is not None and self.subject is not ConflictSubject.SOURCE)
+            or self.expected is ConflictState.CHANGED
+            or (self.found is ConflictState.CHANGED and self.expected is not ConflictState.PRESENT)
+            or (self.expected, self.found) in _MATCHING_STATES
+        ):
+            raise TypeError("Некорректное описание конфликта.")
+
+    def to_dict(self) -> dict[str, str | None]:
+        """Вернуть JSON-совместимое представление."""
+        return {
+            "subject": self.subject.value,
+            "source": None if self.source is None else self.source.value,
+            "expected": self.expected.value,
+            "found": self.found.value,
+        }
+
+
+def revision_conflict(subject: ConflictSubject, expected: ConflictState) -> Conflict:
+    """Запись конфликта по отказу хранилища, которое сообщает только несовпадение ревизии.
+
+    Ожидалось отсутствие — значит, объект найден; ожидалась прочитанная
+    ревизия — найденное состояние не установлено: объект мог исчезнуть
+    или измениться.
+    """
+    if type(expected) is not ConflictState or expected not in (ConflictState.PRESENT, ConflictState.ABSENT):
+        raise TypeError("Ожидается состояние present или absent.")
+    found = ConflictState.PRESENT if expected is ConflictState.ABSENT else ConflictState.UNKNOWN
+    return Conflict(subject, expected, found)
+
+
 @dataclass(frozen=True, slots=True)
 class ErrorDetail:
     """Безопасное описание отказа.
@@ -201,13 +304,16 @@ class ErrorDetail:
     заранее заданный русский текст. Входные значения и сырые исключения
     внешних источников сюда не попадают. `next_step` — безопасный следующий
     шаг из каталога контракта по категории и коду; `None` означает, что
-    безопасного шага нет.
+    безопасного шага нет. `conflicts` — записи конфликта, если отказ вызван
+    расхождением состояния объекта с ожидаемым командой; каждый объект
+    не больше одного раза.
     """
 
     category: ErrorCategory
     code: str
     message: str
     reason: str | None = None
+    conflicts: tuple[Conflict, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -215,6 +321,9 @@ class ErrorDetail:
             or not isinstance(self.code, str) or not self.code
             or not isinstance(self.message, str) or not self.message
             or (self.reason is not None and (not isinstance(self.reason, str) or not self.reason))
+            or type(self.conflicts) is not tuple
+            or any(type(item) is not Conflict for item in self.conflicts)
+            or len({(item.subject, item.source) for item in self.conflicts}) != len(self.conflicts)
         ):
             raise TypeError("Некорректное описание ошибки сценария.")
 
@@ -224,7 +333,7 @@ class ErrorDetail:
         return next_step_for(self.category, self.code)
 
     def to_dict(self) -> dict[str, object]:
-        """Вернуть JSON-совместимое представление; ключ `next_step` добавлен в версии контракта 1."""
+        """Вернуть JSON-совместимое представление; ключи `next_step` и `conflicts` добавлены в версии контракта 1."""
         step = self.next_step
         return {
             "category": self.category.value,
@@ -232,6 +341,7 @@ class ErrorDetail:
             "reason": self.reason,
             "message": self.message,
             "next_step": None if step is None else step.to_dict(),
+            "conflicts": [item.to_dict() for item in self.conflicts],
         }
 
 

@@ -424,6 +424,21 @@ class DraftCandidateTests(unittest.TestCase):
                 self.assertEqual(data.outcome, "incomplete")
 
 
+    def test_effective_domain_strategy_rejects_non_string_values(self):
+        for value in (7, False, {}, []):
+            with self.subTest(value=value):
+                result = self.run_check(xray=config(rules(domainStrategy=value)))
+                self.check_item(result, "candidate_schema", "failed", "invalid_reference_structure")
+                self.assertEqual(result.data.outcome, "failed")
+        for value in ("IPIfNonMatch", "", None):
+            with self.subTest(value=value):
+                self.assertEqual(self.run_check(xray=config(rules(domainStrategy=value))).data.outcome, "passed")
+
+    def test_numeric_rule_type_is_ignored_by_the_supported_decoder(self):
+        document = {**rules(), "routing": {"rules": [{**FINAL, "type": 7}]}}
+        self.assertEqual(self.run_check(xray=config(document)).to_dict(), self.run_check().to_dict())
+
+
 
 class CandidateRoutingDomainTests(unittest.TestCase):
     def test_rule_overlaps_and_comparison_boundary(self):

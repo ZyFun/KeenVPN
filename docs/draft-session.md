@@ -140,6 +140,8 @@
 поля условий, тегов и типа с точным именем и значением `null`. У outbound
 пропускается `tag: null`. Правило, оставшееся без условий, даёт ошибку схемы.
 Неизвестный ключ или вариант регистра сохраняется при анализе и ограничивает проверку.
+У действующего раздела маршрутизации поле `domainStrategy` допускает строку,
+`null` или отсутствие. В правилах поле `type` декодер Xray 26.3.27 игнорирует.
 
 Обработчик получает хранилище сессии и источник отпечатков. При наличии ссылок на геобазы
 он использует переданный источник инвентаря и кортеж доверенных `GeoCategoryCatalog`.
@@ -161,7 +163,7 @@
 
 | Проверка | Статус | Причина и значение |
 | --- | --- | --- |
-| Схема | `failed` | `invalid_reference_structure` — неверна структура прочитанных полей inbound, DNS, API или ссылок inbound. `outbound_protocol_invalid` — в действующем outbound отсутствует непустая строка протокола. |
+| Схема | `failed` | `invalid_reference_structure` — неверен тип `routing.domainStrategy` либо структура прочитанных полей inbound, DNS, API или ссылок inbound. `outbound_protocol_invalid` — в действующем outbound отсутствует непустая строка протокола. |
 | Схема | `failed` | `routing_unsupported`, `rules_unsupported`, `rule_not_object`, `values_invalid`, `values_empty`, `rule_without_conditions`, `outbounds_unsupported`, `balancers_unsupported` — нарушение структуры или отсутствие обязательных данных. |
 | Схема | `unsupported` | `routing_missing` — нет раздела маршрутизации. `outbound_chained`, `outbound_protocol_unsupported`, `balancer_mixed`, `fallback_mixed` — статическая модель не определяет единое действие объявления. |
 | Цели | `failed` | `duplicate_inbound` — повтор тега inbound сохраняется после объединения частей. `missing_inbound` — ни inbound, ни действующий тег DNS не разрешает ссылку. |

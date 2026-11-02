@@ -658,6 +658,7 @@ def candidate_document(part: ConfigDocument) -> dict[str, object]:
             _omit_null(server, _DNS_SERVER_FIELDS)
     routing = document.get("routing")
     if type(routing) is dict:
+        _omit_null(routing, ("domainStrategy",))
         for rule in _object_entries(routing.get("rules")):
             _omit_null(rule, _NULLABLE_RULE_FIELDS)
     for outbound in _object_entries(document.get("outbounds")):
@@ -719,10 +720,13 @@ def candidate_references(config: "XrayConfigSet") -> CandidateReferences:
     invalid |= bool(summary.unsupported)
     if "routing" in sections:
         summary.add_routing(*sections["routing"])
-        invalid |= any(".inboundTag" in item["path"] for item in summary.unsupported)
+        invalid |= any(
+            item["path"] == "routing.domainStrategy" or ".inboundTag" in item["path"]
+            for item in summary.unsupported
+        )
 
     # Формы назначений и правила с null проверяет импорт. Здесь важны только
-    # собственные ссылки inbound и списки геоданных, которые читает сводка.
+    # тип domainStrategy, собственные ссылки inbound и списки геоданных.
     known = inbound_names.union(summary.dns_tags, summary.dns_server_tags)
     missing = any(tag not in known for rule in summary.rules for tag in rule["inbound_tags"])
     return CandidateReferences(tuple(summary.rule_values), summary.case_variant, invalid, duplicate, missing)

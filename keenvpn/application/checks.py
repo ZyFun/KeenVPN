@@ -22,8 +22,8 @@ from keenvpn.domain.xkeen_config import (
     XKeenFlagStatus, XKeenInitParameters, XKeenList, XKeenListItemKind, port_53_facts,
 )
 from keenvpn.domain.xray_config import (
-    XRAY_TAIL_MARKER, RuleTargetKind, TagRepeat, TagRepeats, XrayConfigSet, config_case_variants,
-    summarize_xray_config, tag_repeats,
+    XRAY_TAIL_MARKER, RuleTargetKind, TagRepeat, TagRepeats, XrayConfigSet, api_handler_conflict,
+    config_case_variants, summarize_xray_config, tag_repeats,
 )
 from keenvpn.domain.xray_process import XrayProcessObservation
 
@@ -51,6 +51,11 @@ _CODE = re.compile(r"\A[a-z][a-z0-9_]{2,63}\Z")
 _PORT_ITEMS = (XKeenListItemKind.PORT, XKeenListItemKind.RANGE)
 _REPLACED_SECTIONS = ("routing", "dns")
 """Разделы, которые `Config.Override` Xray заменяет целиком разделом последней части, а не объединяет."""
+_REFERENCE_SECTIONS = (*_REPLACED_SECTIONS, "api")
+"""Заменяемые целиком разделы, от которых зависят ссылки правил: `api` даёт тег обработчика API.
+
+Ссылки на наборы геобаз раздел `api` не содержит, поэтому их проверка его повтор не учитывает.
+"""
 
 
 class CheckReason(StrEnum):
@@ -74,14 +79,19 @@ class CheckReason(StrEnum):
 
     Повтор inbound или outbound Xray не загрузит; повтор балансировщика
     действующего `routing` Xray при запуске принимает и молча берёт последний,
-    поэтому ссылка `balancerTag` на него неоднозначна.
+    поэтому ссылка `balancerTag` на него неоднозначна. Тег обработчика API,
+    совпавший с тегом outbound, Xray при запуске молча отдаёт обработчику API.
     """
     TAGS_REPEATED_ACROSS_PARTS = "tags_repeated_across_parts"
     """Повтор тега затрагивает объединение частей: Xray переопределяет теги и заменяет `routing`, а сводка это не моделирует."""
     CASE_VARIANT_KEYS = "case_variant_keys"
     """Ключ отличается от поля Xray только регистром: Xray его применит, а сводка не читает, поэтому выводы недостоверны."""
     SECTIONS_REPEATED_ACROSS_PARTS = "sections_repeated_across_parts"
-    """Раздел `routing` или `dns` есть в нескольких частях: Xray берёт раздел последней, сводка действующий не выбирает."""
+    """Раздел `routing`, `dns` или, для ссылок правил, `api` есть в нескольких частях: Xray берёт раздел последней.
+
+    Сводка действующий `routing` и `dns` не выбирает, а ссылки по всем частям
+    включают ссылки заменённых разделов.
+    """
     UNRESOLVED_REFERENCES = "unresolved_references"
     """`inboundTag`, `outboundTag`, `balancerTag` правила или `fallbackTag` балансировщика не находит цель."""
     RULE_TARGET_AMBIGUOUS = "rule_target_ambiguous"
@@ -231,12 +241,14 @@ def xray_config_check(config: XrayConfigSet) -> CheckView:
     — `failed` / `duplicate_tags`: inbound или outbound, повторённый там, где
     тег ещё новый (Xray такой набор не загрузит), либо балансировщик,
     повторённый в единственном разделе `routing` (Xray возьмёт последний,
-    ссылка на тег неоднозначна);
-    раздел `routing` или `dns` в нескольких частях — `unsupported` /
+    ссылка на тег неоднозначна), либо outbound с тегом действующего
+    обработчика API (Xray молча отдаст тег обработчику API);
+    раздел `routing`, `dns` или `api` в нескольких частях — `unsupported` /
     `sections_repeated_across_parts`: Xray берёт раздел последней части целиком,
-    сводка действующий раздел не выбирает, поэтому ссылки и назначения правил
-    оцениваются только при единственном разделе; ссылка правила или
-    `fallbackTag` без цели — `failed` / `unresolved_references`; правило
+    поэтому ссылки и назначения правил оцениваются только при единственном
+    разделе; ссылка правила или `fallbackTag` без цели — `failed` /
+    `unresolved_references`, при этом `outboundTag` в тег действующего
+    обработчика API цель находит; правило
     с обоими назначениями или без назначения — `failed` / `rule_target_ambiguous`;
     любой другой повтор тега — inbound или outbound внутри последующей части,
     где объединение его схлопывает, или между частями — `unsupported` /
@@ -253,11 +265,11 @@ def xray_config_check(config: XrayConfigSet) -> CheckView:
     repeats = tag_repeats(config.parts)
     rules = summary["rules"]
     balancers = summary["balancers"]
-    if _unmerged_repeats(repeats, config, summary["sections"]):
+    if _unmerged_repeats(repeats, config, summary["sections"]) or api_handler_conflict(config.parts):
         return CheckView(XRAY_CONFIG_CHECK, CheckStatus.FAILED, False, CheckReason.DUPLICATE_TAGS.value)
-    if _replaced_repeated(summary["duplicate_sections"]):
+    if any(section in _REFERENCE_SECTIONS for section in summary["duplicate_sections"]):
         return CheckView(XRAY_CONFIG_CHECK, CheckStatus.UNSUPPORTED, False, CheckReason.SECTIONS_REPEATED_ACROSS_PARTS.value)
-    resolvable = (RuleTargetKind.OUTBOUND.value, RuleTargetKind.BALANCER.value)
+    resolvable = (RuleTargetKind.OUTBOUND.value, RuleTargetKind.BALANCER.value, RuleTargetKind.API.value)
     if (
         any(not rule["inbound_tags_resolved"] for rule in rules)
         or any(rule["target_kind"] in resolvable and not rule["target_resolved"] for rule in rules)

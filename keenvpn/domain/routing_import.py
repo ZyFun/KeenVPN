@@ -10,7 +10,10 @@ v26.3.27 и собирает группы правил в исходном по�
 только для просмотра с машинной причиной. Действие DIRECT, VPN или BLOCK
 определяется только по явному соответствию outbound или балансировщика;
 неоднозначность не угадывается, группа резервирования и её `fallbackTag`
-сохраняются как назначение. Финальное правило берётся из конфигурации только
+сохраняются как назначение. Тег действующего обработчика API Xray —
+служебное назначение без действия: правило в него только для просмотра
+и в политику не входит, если его единственное условие — `inboundTag`.
+Финальное правило берётся из конфигурации только
 в поддержанной форме и не выдумывается. Байты частей не меняются: неизвестные
 поля остаются в исходном документе. Ничего не записывается и не применяется.
 """
@@ -30,7 +33,8 @@ from keenvpn.domain.routing import (
 )
 from keenvpn.domain.routing_policy import FinalRoutingRule, RoutingPolicy
 from keenvpn.domain.xray_config import (
-    XRAY_TAIL_MARKER, RuleListValue, RuleTargetKind, XrayConfigSet, decode_string_list, has_case_variant,
+    API_FIELDS, XRAY_TAIL_MARKER, RuleListValue, RuleTargetKind, XrayConfigSet, api_handler_tag,
+    decode_string_list, effective_api_section, has_case_variant,
 )
 from keenvpn.domain.xray_identifiers import (
     BALANCER_STRATEGIES, XRAY_RULE_CONDITION_FIELDS, safe_identifier, safe_strategy,
@@ -48,7 +52,9 @@ _SERVICE_FIELDS = frozenset({"type", "ruleTag", "outboundTag", "balancerTag"})
 """`type` декодер v26.3.27 не читает; остальные поля задают назначение и тег правила."""
 _MODEL_FIELDS = frozenset({"domain", "domains", "ip"})
 _FINAL_NETWORKS = frozenset({"tcp", "udp"})
-_DOCUMENT_FIELDS = frozenset({"routing", "outbounds"})
+_DOCUMENT_FIELDS = frozenset({"routing", "outbounds", "api"})
+_API_SERVICE_FIELDS = ("inboundTag",)
+"""Единственное поле условия служебного правила API: трафик служебного inbound, а не клиентов."""
 _ROUTING_FIELDS = frozenset({"rules", "balancers"})
 _OUTBOUND_FIELDS = frozenset({"tag", "protocol", "proxySettings", "streamSettings"})
 _PROXY_SETTINGS_FIELDS = frozenset({"tag", "transportLayer"})
@@ -153,6 +159,8 @@ class ImportReason(StrEnum):
     """Тега нет среди действующих outbound или балансировщиков."""
     TARGET_DUPLICATE = "target_duplicate"
     """Тег определён более одного раза; ничего не выбирается по первому."""
+    TARGET_API = "target_api"
+    """Тег принадлежит обработчику API Xray: служебное назначение без действия VPN, DIRECT или BLOCK."""
     OUTBOUND_PROTOCOL_UNSUPPORTED = "outbound_protocol_unsupported"
     """Протокол outbound не сопоставлен с DIRECT, VPN или BLOCK."""
     OUTBOUND_CHAINED = "outbound_chained"
@@ -252,7 +260,11 @@ class RuleTarget:
     резервирования не сводится к одному профилю. Действие fallback должно
     быть определено и совпадать с действием выбранных outbound. `action`
     равно `None`, когда соответствие неоднозначно или отсутствует;
-    причины объясняют почему.
+    причины объясняют почему. Назначение вида `api` — тег действующего
+    обработчика API: без действия, outbound и стратегии, с единственной
+    причиной `target_api`. Селектор балансировщика и `fallbackTag` выбирают
+    и обработчик API, как в Xray; тогда его тег входит в `outbound_tags`,
+    а у балансировщика та же причина и нет действия.
     Теги и стратегия хранятся как написаны для доверенного кода; в вывод
     они попадают только после проверки формата.
     """
@@ -284,6 +296,11 @@ class RuleTarget:
                 or self.strategy is not None or self.action is not None
             ))
             or (self.kind is RuleTargetKind.BALANCER and self.tag is None)
+            or (self.kind is RuleTargetKind.API and (
+                self.tag is None or self.outbound_tags or self.fallback_tag is not None
+                or self.strategy is not None or self.action is not None
+                or len(self.reasons) != 1 or self.reasons[0] is not ImportReason.TARGET_API
+            ))
         ):
             _raise_detached(RoutingImportErrorCode.TARGET)
 
@@ -376,6 +393,20 @@ class ImportedRuleGroup(_PrivateRepresentation):
         )
 
     @property
+    def api_service(self) -> bool:
+        """Служебное правило API: назначение — обработчик API, единственное поле условия — `inboundTag`.
+
+        Такое правило направляет трафик служебного inbound, а не клиентов:
+        оно только для просмотра, в политику не входит и режим схемы не меняет.
+        Правило в тег API с другими условиями может совпасть с трафиком
+        клиентов, поэтому служебным не считается.
+        """
+        return (
+            self.kind is RuleGroupKind.RULES and self.target.kind is RuleTargetKind.API
+            and self.fields == _API_SERVICE_FIELDS
+        )
+
+    @property
     def rules(self) -> tuple[RoutingRule, ...]:
         """Правила модели для условий группы; без действия правил нет."""
         if self.action is None:
@@ -408,6 +439,7 @@ class ImportedRuleGroup(_PrivateRepresentation):
             "reasons": [reason.value for reason in self.reasons],
             "value_reasons": [{"path": item.path, "reason": item.reason.value} for item in self.value_reasons],
             "target": self.target.to_diagnostic(),
+            "api_service": self.api_service,
         }
 
 
@@ -482,7 +514,10 @@ def _check_scheme(scheme: "RoutingScheme") -> None:
     if (
         type(scheme.policy) is not RoutingPolicy
         or final is None or final.kind is not RuleGroupKind.FINAL or final.action is None
-        or any(group.kind is RuleGroupKind.FINAL or group.action is None for group in scheme.groups[:-1])
+        or any(
+            group.kind is RuleGroupKind.FINAL or (group.action is None and not group.api_service)
+            for group in scheme.groups[:-1]
+        )
     ):
         _raise_detached(RoutingImportErrorCode.SCHEME)
     try:
@@ -531,10 +566,11 @@ class RoutingScheme(_PrivateRepresentation):
 
     `routing_part` — часть, чей раздел `routing` действует: при загрузке
     нескольких частей Xray v26.3.27 берёт раздел последней части, в которой
-    он есть. `policy` собирается только когда каждое правило получило
-    однозначное действие, а последнее правило — финальное в поддержанной
-    форме; иначе `policy` равна `None`, а причины перечислены в `reasons`.
-    Группы сохраняются всегда, включая доступные только для просмотра.
+    он есть. `policy` собирается только когда каждое правило, кроме
+    служебных правил API, получило однозначное действие, а последнее
+    правило — финальное в поддержанной форме; иначе `policy` равна `None`,
+    а причины перечислены в `reasons`. Служебные правила API в политику
+    не входят. Группы сохраняются всегда, включая доступные только для просмотра.
     """
 
     routing_part: str | None
@@ -564,8 +600,13 @@ class RoutingScheme(_PrivateRepresentation):
 
     @property
     def read_only(self) -> bool:
-        """Схема только для просмотра: есть причина уровня схемы либо группа только для просмотра."""
-        return self.policy is None or bool(self.reasons) or any(group.read_only for group in self.groups)
+        """Схема только для просмотра: есть причина уровня схемы либо группа только для просмотра.
+
+        Служебное правило API само только для просмотра, но режим схемы не меняет.
+        """
+        return self.policy is None or bool(self.reasons) or any(
+            group.read_only and not group.api_service for group in self.groups
+        )
 
     def to_diagnostic(self) -> dict[str, object]:
         """Группы, политика и причины без доменов, адресов, кодов наборов и тегов правил."""
@@ -729,6 +770,13 @@ def _effective_outbounds(documents: list[tuple[str, dict[str, object]]]) -> tupl
     return ordered, supported, variant
 
 
+def _api_handler(documents: list[tuple[str, dict[str, object]]]) -> tuple[str | None, bool]:
+    """Тег действующего обработчика API и признак ключей `tag`/`listen` раздела в другом регистре."""
+    section = effective_api_section(document for _name, document in documents)
+    variant = type(section) is dict and has_case_variant(section, API_FIELDS)
+    return api_handler_tag(section), variant
+
+
 def _target(kind: RuleTargetKind, tag: str | None, *reasons: ImportReason) -> RuleTarget:
     return RuleTarget(kind, tag, (), None, None, None, tuple(reasons))
 
@@ -739,11 +787,19 @@ def _select_outbounds(selectors: tuple[str, ...], tags: tuple[str, ...]) -> tupl
 
 
 class _TargetResolver:
-    """Сопоставление тегов правил с действующими outbound и балансировщиками за линейное время."""
+    """Сопоставление тегов правил с действующими outbound и балансировщиками за линейное время.
 
-    def __init__(self, outbounds: list[_Outbound], balancers: object) -> None:
+    Xray регистрирует обработчик API среди outbound под его тегом, поэтому
+    он учитывается как outbound без действия с причиной `target_api`: правило
+    в его тег получает назначение вида `api`, селектор и `fallbackTag`
+    балансировщика выбирают его, как в Xray, а outbound с тем же тегом даёт повтор.
+    """
+
+    def __init__(self, outbounds: list[_Outbound], balancers: object, api_tag: str | None = None) -> None:
         self._by_tag: dict[str, list[_Outbound]] = {}
         tags: list[str] = []
+        if api_tag is not None:
+            outbounds = [*outbounds, _Outbound(api_tag, None, ImportReason.TARGET_API)]
         for entry in outbounds:
             # Outbound без тега Xray не регистрирует по тегу: правило и селектор его не достигают.
             if not entry.tag:
@@ -794,6 +850,8 @@ class _TargetResolver:
             return _target(RuleTargetKind.OUTBOUND, tag, ImportReason.TARGET_UNRESOLVED)
         if len(entries) > 1:
             return _target(RuleTargetKind.OUTBOUND, tag, ImportReason.TARGET_DUPLICATE)
+        if entries[0].reason is ImportReason.TARGET_API:
+            return _target(RuleTargetKind.API, tag, ImportReason.TARGET_API)
         if entries[0].action is None:
             return _target(RuleTargetKind.OUTBOUND, tag, entries[0].reason or ImportReason.OUTBOUND_PROTOCOL_UNSUPPORTED)
         return RuleTarget(RuleTargetKind.OUTBOUND, tag, (tag,), None, None, entries[0].action, ())
@@ -1021,13 +1079,18 @@ def import_routing_scheme(config: XrayConfigSet) -> RoutingScheme:
     ссылками, а правило с полями вне модели — одним неподдержанным условием.
     Политика собирается только при однозначных действиях всех правил и
     финальном правиле в поддержанной форме; импортированные правила не
-    помечаются служебными и не отключаются.
+    помечаются служебными и не отключаются. Тег действующего раздела `api`
+    разрешает `outboundTag` как обработчик API; служебное правило API
+    (условие только `inboundTag`) сохраняется группой без действия и в политику
+    не входит.
     """
     if type(config) is not XrayConfigSet:
         _raise_detached(RoutingImportErrorCode.CONFIG)
     documents = [(part.name, part.export()) for part in config.parts]
     outbounds, outbounds_supported, case_variant = _effective_outbounds(documents)
     case_variant = case_variant or any(has_case_variant(document, _DOCUMENT_FIELDS) for _name, document in documents)
+    api_tag, api_variant = _api_handler(documents)
+    case_variant = case_variant or api_variant
     routing_part = None
     routing: object = None
     routing_parts: list[str] = []
@@ -1047,7 +1110,7 @@ def import_routing_scheme(config: XrayConfigSet) -> RoutingScheme:
     elif type(routing) is not dict:
         reasons.append(ImportReason.ROUTING_UNSUPPORTED)
     else:
-        resolver = _TargetResolver(outbounds, routing.get("balancers"))
+        resolver = _TargetResolver(outbounds, routing.get("balancers"), api_tag)
         if not resolver.balancers_supported:
             reasons.append(ImportReason.BALANCERS_UNSUPPORTED)
         case_variant = case_variant or resolver.case_variant
@@ -1071,7 +1134,7 @@ def import_routing_scheme(config: XrayConfigSet) -> RoutingScheme:
             reasons.append(ImportReason.FINAL_RULE_MISSING)
     elif final.action is None:
         reasons.append(ImportReason.FINAL_RULE_UNRESOLVED)
-    elif any(group.action is None for group in groups[:-1]):
+    elif any(group.action is None and not group.api_service for group in groups[:-1]):
         reasons.append(ImportReason.RULE_ACTION_UNRESOLVED)
     elif not case_variant:
         # При вариантах регистра Xray мог выбрать другой раздел, outbound или поле: политика не собирается.
@@ -1084,7 +1147,8 @@ def balancer_fallbacks(config: XrayConfigSet) -> tuple[RuleTarget | None, ...] |
     """Назначение `fallbackTag` каждого балансировщика действующего раздела `routing` в порядке файла.
 
     Тег сопоставляется так же, как `outboundTag` правила при импорте: с действующими
-    outbound всех частей. Повтор тега, цепочка outbound и протокол без действия дают
+    outbound всех частей и обработчиком API — назначение вида `api` без действия.
+    Повтор тега, цепочка outbound и протокол без действия дают
     назначение без действия с причиной. Балансировщик неподдержанной структуры
     (не объект, тег не непустая строка, селектор не `StringList`, `fallbackTag`
     не строка, `strategy` не объект — те же проверки, что у назначения правила)
@@ -1098,6 +1162,8 @@ def balancer_fallbacks(config: XrayConfigSet) -> tuple[RuleTarget | None, ...] |
         _raise_detached(RoutingImportErrorCode.CONFIG)
     documents = [(part.name, part.export()) for part in config.parts]
     outbounds, outbounds_supported, case_variant = _effective_outbounds(documents)
+    api_tag, api_variant = _api_handler(documents)
+    case_variant = case_variant or api_variant
     routing: object = None
     for _name, document in documents:
         case_variant = case_variant or has_case_variant(document, _DOCUMENT_FIELDS)
@@ -1114,7 +1180,7 @@ def balancer_fallbacks(config: XrayConfigSet) -> tuple[RuleTarget | None, ...] |
         return ()
     if type(balancers) is not list:
         return None
-    resolver = _TargetResolver(outbounds, balancers)
+    resolver = _TargetResolver(outbounds, balancers, api_tag)
     targets: list[RuleTarget | None] = []
     for item in balancers:
         if _balancer_tag(item) is None or _balancer_invalid(item, _balancer_selectors(item)):

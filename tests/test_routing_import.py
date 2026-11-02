@@ -162,6 +162,7 @@ class SnapshotRoutingImportTests(unittest.TestCase):
             "target": {"kind": "outbound", "tag_known": True, "tag": "direct", "outbound_tags": ["direct"],
                        "fallback_known": False, "fallback_tag": None, "strategy_known": False, "strategy": None,
                        "action": "DIRECT", "reasons": []},
+            "api_service": False,
         })
         self.assertEqual(diagnostic["groups"][7]["target"], {
             "kind": "balancer", "tag_known": True, "tag": "vpn-group", "outbound_tags": ["trojan-out"],

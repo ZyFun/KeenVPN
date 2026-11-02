@@ -1,6 +1,7 @@
 """Сводка состояния по областям на снимке и управляемых источниках прокси и процесса."""
 
 from dataclasses import FrozenInstanceError, replace
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
@@ -16,6 +17,7 @@ from keenvpn.application.contract import (
     CONTRACT_VERSION, NEXT_STEP_MESSAGES, CheckStatus, ErrorCategory, ErrorDetail, NextStepCode, OperationStatus,
 )
 from keenvpn.application.proxy_config import InspectProxyConfigHandler, Port53View, ProxyConfigSource, XKeenFlagView
+from keenvpn.application.ports import DraftSessionStoreError, DraftStoreFailure
 from keenvpn.application.status_summary import (
     AREA_LABELS, AREA_STATES, AUTOSTART_CHECK, DRAFT_CHECK, FALLBACK_CHECK, INTERCEPTION_CHECK, PORT_53_HINT,
     PORT_53_PATH_CHECK, STATE_LABELS, AreaState, FallbackView, InspectStatusSummary, InspectStatusSummaryHandler,
@@ -23,10 +25,12 @@ from keenvpn.application.status_summary import (
     port_53_path_not_checked, read_summary_sources,
 )
 from keenvpn.domain.config_document import ConfigDocument
+from keenvpn.domain.draft_session import DraftSession, encode_draft_session
+from keenvpn.domain.manager_metadata import UnknownFields
 from keenvpn.domain.xkeen_config import XKeenList, XKeenListName, XKeenSettings, parse_xkeen_init
 from keenvpn.domain.xray_config import XrayConfigSet
 from keenvpn.domain.xray_process import XrayProcessObservation
-from tests.support.in_memory import AdapterSetupError, UnconfiguredResponseError
+from tests.support.in_memory import AdapterSetupError, InMemoryDraftSessionStore, UnconfiguredResponseError
 from tests.support.isolation import forbid_external_effects
 from tests.support.privacy import UNSAFE_MARKERS, reachable, unsafe_xkeen_settings, unsafe_xray_config
 from tests.support.snapshot import SYNTHETIC_XRAY_PID, snapshot_installation_sources
@@ -50,8 +54,8 @@ EXPECTED_AREAS = [
      "check": {"code": "autostart_flag_unambiguous", "status": "passed", "network": False, "reason": None}},
     {"area": "fallback", "state": "no_direct_fallback", "source_error": None,
      "check": {"code": "fallback_profile_consistent", "status": "passed", "network": False, "reason": None}},
-    {"area": "draft", "state": None, "source_error": None,
-     "check": {"code": "draft_present", "status": "unsupported", "network": False, "reason": "drafts_not_implemented"}},
+    {"area": "draft", "state": "absent", "source_error": None,
+     "check": {"code": "draft_present", "status": "passed", "network": False, "reason": None}},
 ]
 EXPECTED_PORT_53 = {
     "port": 53, "port_exclude_entry": True, "port_exclude_range": False, "port_proxying_entry": False,
@@ -94,13 +98,21 @@ OUTBOUNDS = [
 ]
 
 
-def handler_for(sources, *, proxy=True, process=True, **options):
-    """Сценарий над источниками снимка; `proxy` и `process` выключают подключение источников."""
+_NO_DRAFT = object()
+
+
+def handler_for(sources, *, proxy=True, process=True, drafts=_NO_DRAFT, **options):
+    """Сценарий над источниками снимка; `proxy` и `process` выключают подключение источников.
+
+    `drafts` — хранилище черновика; по умолчанию подключено пустое хранилище в памяти, `None` — не подключено.
+    """
     proxy_handler = None
     if proxy:
         ports = sources.proxy
         proxy_handler = InspectProxyConfigHandler(ports.xray, ports.settings, ports.init, ports.lists)
-    return InspectStatusSummaryHandler(proxy_handler, sources.process if process else None, **options)
+    if drafts is _NO_DRAFT:
+        drafts = InMemoryDraftSessionStore()
+    return InspectStatusSummaryHandler(proxy_handler, sources.process if process else None, drafts=drafts, **options)
 
 
 def configure(sources, name, outcome):
@@ -325,7 +337,7 @@ class StatusSummaryScenarioTests(unittest.TestCase):
     def test_reading_and_building_are_shared_functions_with_the_same_result(self):
         ports = self.sources.proxy
         proxy = InspectProxyConfigHandler(ports.xray, ports.settings, ports.init, ports.lists)
-        readings = read_summary_sources(proxy, self.sources.process)
+        readings = read_summary_sources(proxy, self.sources.process, InMemoryDraftSessionStore())
         self.assertEqual(readings.models(ProxyConfigSource.XRAY, ProxyConfigSource.INIT), (readings.proxy[ProxyConfigSource.XRAY], readings.proxy[ProxyConfigSource.INIT]))
         self.assertEqual(sorted(source.value for source in readings.proxy), sorted(("xray", "settings", "init", "port_exclude", "port_proxying")))
         self.assertEqual(build_status_summary(readings).to_dict(), self.execute().data.to_dict())
@@ -333,13 +345,16 @@ class StatusSummaryScenarioTests(unittest.TestCase):
             XKeenListName.PORT_EXCLUDE, XKeenListName.PORT_PROXYING, XKeenListName.PORT_EXCLUDE, XKeenListName.PORT_PROXYING,
         )))
         # Модели содержат секреты: repr показывает только подключённость, а словарь ответов только для чтения.
-        self.assertEqual(repr(readings), "SummaryReadings(proxy=True, process=True)")
+        self.assertEqual(repr(readings), "SummaryReadings(proxy=True, process=True, draft=True)")
         self.assertNotIn(str(SYNTHETIC_XRAY_PID), repr(readings))
         with self.assertRaises(TypeError):
             readings.proxy[ProxyConfigSource.XRAY] = None
         unconnected = read_summary_sources(None, None)
-        self.assertEqual((unconnected.proxy, unconnected.process, unconnected.models(ProxyConfigSource.XRAY)), (None, None, None))
-        self.assertEqual(repr(unconnected), "SummaryReadings(proxy=False, process=False)")
+        self.assertEqual(
+            (unconnected.proxy, unconnected.process, unconnected.draft, unconnected.models(ProxyConfigSource.XRAY)),
+            (None, None, None, None),
+        )
+        self.assertEqual(repr(unconnected), "SummaryReadings(proxy=False, process=False, draft=False)")
         self.assertEqual(outcome(self.handler.execute(InspectStatusSummary()), "core"), ("running", "passed", None))
         for value in (readings.proxy, {"proxy": None, "process": None}, None):
             with self.subTest(value=type(value).__name__), self.assertRaises(TypeError):
@@ -519,7 +534,7 @@ class AreaOutcomeTests(unittest.TestCase):
         expected = {
             "core": {"passed", "failed", "not_checked"}, "interception": {"unsupported"}, "vpn": {"not_checked"},
             "dns": {"not_checked"}, "autostart": {"passed", "failed", "unsupported", "not_checked"},
-            "fallback": {"passed", "failed", "unsupported", "not_checked"}, "draft": {"unsupported"},
+            "fallback": {"passed", "failed", "unsupported", "not_checked"}, "draft": {"passed", "not_checked"},
         }
         seen = {area: set() for area in expected}
 
@@ -528,7 +543,9 @@ class AreaOutcomeTests(unittest.TestCase):
                 seen[item.area.value].add(item.check.status.value)
 
         collect(self.handler.execute(InspectStatusSummary()))
-        collect(handler_for(snapshot_installation_sources(), proxy=False, process=False).execute(InspectStatusSummary()))
+        collect(handler_for(
+            snapshot_installation_sources(), proxy=False, process=False, drafts=None,
+        ).execute(InspectStatusSummary()))
         collect(self.run_case("process", XrayProcessObservation((), True)))
         collect(self.run_case("init", parse_xkeen_init(b'start_auto="yes"\n')))
         collect(self.run_case("init", parse_xkeen_init(b'  start_auto="on"\n')))
@@ -536,6 +553,95 @@ class AreaOutcomeTests(unittest.TestCase):
         collect(self.run_case("xray", fallback_config(balancer("block-out"))))
         collect(self.run_case("xray", fallback_config()))
         self.assertEqual(seen, expected)
+
+
+class DraftAreaTests(unittest.TestCase):
+    """Область «Черновик» читает хранилище черновика один раз и не меняет его."""
+
+    DRAFT_ID = "0000abcd-0000-4000-8000-00000000000d"
+
+    def content(self):
+        session = DraftSession(
+            self.DRAFT_ID, datetime(2026, 11, 1, 2, 14, 16, tzinfo=timezone.utc),
+            UnknownFields({"TEST_secret-extra": "TEST_private-note"}),
+        )
+        return encode_draft_session(session)
+
+    def execute(self, drafts, *, isolated=False):
+        # Снимок читается с диска до изоляции: сам сценарий файлов не открывает.
+        handler = handler_for(snapshot_installation_sources(), drafts=drafts, operation_ids=lambda: "op-1")
+        if isolated:
+            with forbid_external_effects():
+                result = handler.execute(InspectStatusSummary())
+        else:
+            result = handler.execute(InspectStatusSummary())
+        self.assertTrue(result.succeeded)
+        return result
+
+    def assert_unchanged(self, store, before):
+        self.assertEqual(store.content, before)
+        self.assertEqual(store.read_calls, 1)
+        self.assertEqual((store.changes, store.create_calls, store.remove_calls, store.confirm_calls), (0, (), (), 0))
+
+    def test_present_and_absent_draft_are_passed_states(self):
+        for before, state in ((None, "absent"), (self.content(), "present")):
+            with self.subTest(state=state):
+                store = InMemoryDraftSessionStore(before)
+                result = self.execute(store, isolated=True)
+                self.assertEqual(outcome(result, "draft"), (state, "passed", None))
+                self.assertIsNone(areas(result)["draft"].source_error)
+                text = repr(result.to_dict())
+                for marker in ("TEST_secret-extra", "TEST_private-note", self.DRAFT_ID):
+                    self.assertNotIn(marker, text)
+                self.assert_unchanged(store, before)
+
+    def test_store_failure_and_corrupted_file_are_not_checked_with_their_code(self):
+        for failure in DraftStoreFailure:
+            with self.subTest(failure=failure.value):
+                store = InMemoryDraftSessionStore(self.content())
+                store.read_failure = DraftSessionStoreError(failure)
+                result = self.execute(store)
+                self.assertEqual(outcome(result, "draft"), (None, "not_checked", failure.value))
+                self.assertEqual(areas(result)["draft"].source_error.code, failure.value)
+                self.assert_unchanged(store, self.content())
+        damaged = b'{"format": "keenvpn-draft-session", TEST_private-note'
+        store = InMemoryDraftSessionStore(damaged)
+        result = self.execute(store)
+        error = areas(result)["draft"].source_error
+        self.assertEqual(outcome(result, "draft"), (None, "not_checked", "invalid_stored_draft"))
+        self.assertIs(error.category, ErrorCategory.INVALID_SOURCE_DATA)
+        self.assertIs(error.next_step.code, NextStepCode.PRESERVE_FILE)
+        self.assertNotIn("TEST_private-note", repr(result.to_dict()))
+        self.assert_unchanged(store, damaged)
+        store = InMemoryDraftSessionStore()
+        store.read_failure = OSError("/tmp/mnt/TEST_private-note")
+        result = self.execute(store)
+        self.assertEqual(outcome(result, "draft"), (None, "not_checked", "draft_store_failed"))
+        self.assertNotIn("TEST_private-note", repr(result.to_dict()))
+
+    def test_unconnected_store_is_not_checked_and_other_areas_do_not_change(self):
+        result = self.execute(None)
+        self.assertEqual(outcome(result, "draft"), (None, "not_checked", "source_not_connected"))
+        connected = self.execute(InMemoryDraftSessionStore())
+        self.assertEqual(
+            [item.to_dict() for item in result.data.areas][:-1], [item.to_dict() for item in connected.data.areas][:-1],
+        )
+
+    def test_former_reason_is_kept_but_never_returned(self):
+        self.assertEqual(SummaryReason.DRAFTS_NOT_IMPLEMENTED.value, "drafts_not_implemented")
+        for drafts in (None, InMemoryDraftSessionStore(), InMemoryDraftSessionStore(b"{}")):
+            self.assertNotIn("drafts_not_implemented", repr(self.execute(drafts).to_dict()))
+
+    def test_draft_area_accepts_only_its_states(self):
+        check = CheckView(DRAFT_CHECK, CheckStatus.PASSED, False, None)
+        for state in AreaState:
+            with self.subTest(state=state.value):
+                if state in (AreaState.PRESENT, AreaState.ABSENT):
+                    SummaryAreaView(SummaryArea.DRAFT, state, check)
+                else:
+                    with self.assertRaises(TypeError):
+                        SummaryAreaView(SummaryArea.DRAFT, state, check)
+        self.assertEqual((STATE_LABELS[AreaState.PRESENT], STATE_LABELS[AreaState.ABSENT]), ("есть неприменённый", "нет"))
 
 
 class SummaryViewModelTests(unittest.TestCase):

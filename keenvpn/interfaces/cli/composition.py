@@ -5,15 +5,18 @@
 которых нужен источник, показываются недоступными. Чтение роутера включается
 явно (`vpn-menu --read-router`): тогда подключаются источники файлов Xray,
 XKeen и геобаз Entware, наблюдения процесса Xray и состояния Keenetic через
-локальный RCI. Хранилище метаданных и членство в наборах геобаз в этой версии
-не подключаются ни в одном режиме. Объяснение маршрута открывает запрос значения
+локальный RCI. Хранилище метаданных, хранилище черновика и членство в наборах
+геобаз в этой версии не подключаются ни в одном режиме: каталог черновика по
+умолчанию не выбран, хранилище передаётся сборке только явно. Объяснение маршрута открывает запрос значения
 и передаёт введённую строку сценарию без разбора. Сводка состояния и быстрая проверка допускают
 неподключённые источники, поэтому пункты «Сводка» и «Быстрая проверка без изменений» и шапка
 главного меню доступны всегда и показывают такие области и проверки «не проверено». Каждое действие выполняет сценарий
 заново при каждом выборе пункта и не хранит результаты между выборами: список,
 который вернуло действие, существует, пока он открыт, а возврат из карточки
 или поиска источники не читает. Шапка выполняет тот же сценарий сводки при
-входе в корень главного меню.
+входе в корень главного меню. Выход из корня обоих меню и конец ввода
+выполняют сценарий решения о выходе: при неприменённом черновике или отказе
+его хранилища меню спрашивает, остаться ли или выйти, сохранив черновик.
 """
 
 from collections.abc import Mapping
@@ -28,8 +31,9 @@ from keenvpn.application.contract import OperationIdFactory, new_operation_id
 from keenvpn.application.keenetic_devices import ListKeeneticDevices, ListKeeneticDevicesHandler
 from keenvpn.application.keenetic_state import InspectKeeneticStateHandler
 from keenvpn.application.manager_metadata import InspectManagerMetadata, InspectManagerMetadataHandler
+from keenvpn.application.menu_exit import InspectMenuExit, InspectMenuExitHandler
 from keenvpn.application.ports import (
-    GeoDatabaseSource, GeoDataSource, KeeneticHotspotRuntimeSource, KeeneticHotspotSettingsSource,
+    DraftSessionStore, GeoDatabaseSource, GeoDataSource, KeeneticHotspotRuntimeSource, KeeneticHotspotSettingsSource,
     KeeneticPolicySource, KeeneticRegistrationSource, ManagerMetadataStore, XKeenInitSource, XKeenListSource,
     XKeenSettingsSource, XrayConfigSource, XrayProcessSource,
 )
@@ -40,13 +44,13 @@ from keenvpn.application.routing import ExplainRoute, ExplainRouteHandler
 from keenvpn.application.routing_import import ImportRoutingSchemeHandler
 from keenvpn.application.routing_rules import ListRoutingRules, ListRoutingRulesHandler
 from keenvpn.application.status_summary import InspectStatusSummary, InspectStatusSummaryHandler
-from keenvpn.interfaces.cli.menu import Menu, MenuError, UnavailableReason, ValueRequest
+from keenvpn.interfaces.cli.menu import ExitNotice, Menu, MenuError, UnavailableReason, ValueRequest
 from keenvpn.interfaces.cli.presenters import (
     ROUTE_PROMPT, present_about, present_connections, present_device_list, present_manager_metadata, present_port53,
-    present_quick_check, present_result, present_route_explanation, present_rule_list, present_status_header,
-    present_status_summary,
+    present_menu_exit, present_quick_check, present_result, present_route_explanation, present_rule_list,
+    present_status_header, present_status_summary,
 )
-from keenvpn.interfaces.cli.terminal import Action, Header
+from keenvpn.interfaces.cli.terminal import Action, ExitCheck, Header
 from keenvpn.interfaces.cli.tree import (
     BOUND_SCENARIOS, BUILTIN_ACTIONS, ActionStates, build_main_menu, build_setup_menu,
 )
@@ -73,6 +77,8 @@ class MenuSources:
     metadata: ManagerMetadataStore | None = None
     geo_match: GeoDataSource | None = None
     """Источник членства в наборах GeoIP и GeoSite для объяснения маршрута; без него условия геобаз «неизвестны»."""
+    drafts: DraftSessionStore | None = None
+    """Хранилище черновика для области «Черновик» и решения о выходе; сценарии его только читают."""
 
     @property
     def keenetic_connected(self) -> bool:
@@ -87,11 +93,12 @@ class MenuSources:
 
 @dataclass(frozen=True, slots=True)
 class MenuAssembly:
-    """Собранное меню, обработчики его доступных действий и шапка корня; у меню мастера шапки нет."""
+    """Собранное меню, обработчики его доступных действий, шапка корня и проверка выхода; у меню мастера шапки нет."""
 
     menu: Menu
     actions: Mapping[str, Action]
     header: Header | None = None
+    exit_check: ExitCheck | None = None
 
 
 def default_sources() -> MenuSources:
@@ -102,9 +109,11 @@ def default_sources() -> MenuSources:
 def router_sources() -> MenuSources:
     """Источники запуска с флагом `--read-router`: файлы Entware, процесс Xray и локальный RCI проверенной платформы.
 
-    Источники только читают. Хранилище метаданных и членство в наборах геобаз
-    не подключаются: зависящие от них пункты остаются с пометкой, а правила
-    показываются без названий и идентификаторов. Создание источников ничего
+    Источники только читают. Хранилище метаданных, хранилище черновика
+    и членство в наборах геобаз не подключаются: зависящие от них пункты
+    остаются с пометкой, правила показываются без названий и идентификаторов,
+    область «Черновик» — «не проверено», а выход сообщает, что черновик не
+    проверялся. Создание источников ничего
     не читает: файлы, процесс и RCI читаются при выполнении сценария.
     """
     return MenuSources(
@@ -117,8 +126,8 @@ def router_sources() -> MenuSources:
 
 def _bindings(
     sources: MenuSources, operation_ids: OperationIdFactory,
-) -> tuple[ActionStates, dict[str, Action], Header]:
-    """Решить для каждой привязки, доступна ли она, и собрать её действие и шапку корня."""
+) -> tuple[ActionStates, dict[str, Action], Header, ExitCheck]:
+    """Решить для каждой привязки, доступна ли она, и собрать её действие, шапку корня и проверку выхода."""
     if type(sources) is not MenuSources:
         raise MenuError("Источники меню задаются объектом MenuSources.")
     keenetic = None
@@ -142,11 +151,17 @@ def _bindings(
         actions[action_id] = action
 
     # Сводка допускает неподключённые источники: пункт и шапка — один сценарий, который читает то, что подключено.
-    summary = InspectStatusSummaryHandler(proxy, sources.process, operation_ids=operation_ids)
+    summary = InspectStatusSummaryHandler(proxy, sources.process, drafts=sources.drafts, operation_ids=operation_ids)
     bind("status.summary", lambda: present_result(summary.execute(InspectStatusSummary()), present_status_summary))
 
     def header() -> list[str]:
         return present_result(summary.execute(InspectStatusSummary()), present_status_header)
+
+    # Решение о выходе принимает сценарий; меню только показывает его строки и задаёт вопрос, если он нужен.
+    menu_exit = InspectMenuExitHandler(sources.drafts, operation_ids=operation_ids)
+
+    def exit_check() -> ExitNotice:
+        return present_menu_exit(menu_exit.execute(InspectMenuExit()))
 
     # Быстрая проверка читает те же источники теми же функциями, что сводка, и дополнительно инвентарь геобаз.
     quick_check = QuickCheckHandler(proxy, sources.process, sources.geodata, operation_ids=operation_ids)
@@ -180,20 +195,22 @@ def _bindings(
         )
     for action_id in BUILTIN_ACTIONS:
         bind(action_id, present_about)
-    return states, actions, header
+    return states, actions, header, exit_check
 
 
 def assemble_main_menu(
     sources: MenuSources | None = None, *, operation_ids: OperationIdFactory = new_operation_id,
 ) -> MenuAssembly:
-    """Собрать главное меню `vpn-menu` с шапкой сводки состояния для переданных источников."""
-    states, actions, header = _bindings(default_sources() if sources is None else sources, operation_ids)
-    return MenuAssembly(build_main_menu(states), MappingProxyType(actions), header)
+    """Собрать главное меню `vpn-menu` с шапкой сводки состояния и проверкой выхода для переданных источников."""
+    states, actions, header, exit_check = _bindings(default_sources() if sources is None else sources, operation_ids)
+    return MenuAssembly(build_main_menu(states), MappingProxyType(actions), header, exit_check)
 
 
 def assemble_setup_menu(
     sources: MenuSources | None = None, *, operation_ids: OperationIdFactory = new_operation_id,
 ) -> MenuAssembly:
-    """Собрать корневое меню `vpn-setup`: пункты мастера без шапки; действий мастера в этой версии нет."""
-    states, actions, _header = _bindings(default_sources() if sources is None else sources, operation_ids)
-    return MenuAssembly(build_setup_menu(states), MappingProxyType(actions))
+    """Собрать корневое меню `vpn-setup`: пункты мастера без шапки и проверка выхода; действий мастера нет."""
+    states, actions, _header, exit_check = _bindings(
+        default_sources() if sources is None else sources, operation_ids,
+    )
+    return MenuAssembly(build_setup_menu(states), MappingProxyType(actions), exit_check=exit_check)

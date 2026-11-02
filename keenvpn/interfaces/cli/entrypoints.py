@@ -34,7 +34,9 @@ Assembler = Callable[[], MenuAssembly]
 def _run(assemble: Assembler, stdin: TextInput, stdout: TextOutput, stderr: TextOutput) -> int:
     try:
         assembly = assemble()
-        return run_menu(MenuNavigator(assembly.menu), assembly.actions, stdin, stdout, assembly.header)
+        return run_menu(
+            MenuNavigator(assembly.menu), assembly.actions, stdin, stdout, assembly.header, assembly.exit_check,
+        )
     except KeyboardInterrupt:
         stderr.write(INTERRUPTED_MESSAGE + "\n")
         return EXIT_INTERRUPTED

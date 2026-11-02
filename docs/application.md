@@ -26,6 +26,7 @@
 | `InspectDraft` | `InspectDraftHandler` | Читает [сессию черновика](draft-session.md) из хранилища и показывает её идентификатор, [токен ревизии](#сессия-черновика), время создания, число неизвестных полей и состояния зафиксированных источников без пути, ревизии файла и хешей; отсутствие черновика — успех с `present=False` |
 | `CreateDraft` | `CreateDraftHandler` | Создаёт одну [сессию черновика](draft-session.md) с новым идентификатором, временем создания UTC и [исходными отпечатками](draft-session.md#исходные-отпечатки) управляемых источников; существующий черновик не перезаписывается, недоступный источник — отказ без записи. Черновик ничего не применяет |
 | `DiscardDraft` | `DiscardDraftHandler` | Отменяет черновик с идентификатором и токеном ревизии из команды: удаляет только файл сессии по ревизии из чтения, ничего не применяя; другой черновик или токен — [конфликт](#конфликт-ревизий) без удаления; повторная отмена — успех `already_absent` после закрепления отсутствия на диске |
+| `InspectMenuExit` | `InspectMenuExitHandler` | Решает, можно ли [выйти из меню](cli-menu.md#выход-при-неприменённом-черновике) без вопроса: один раз читает [сессию черновика](draft-session.md); нет черновика — выход, есть черновик или хранилище не прочитано — вопрос «остаться или выйти, сохранив черновик», хранилище не подключено — выход с причиной `draft_store_not_connected`; ничего не записывает |
 | `CheckDraftBaseline` | `CheckDraftBaselineHandler` | Проверяет, не устарел ли черновик с идентификатором и токеном ревизии из команды: повторно читает все управляемые источники и сравнивает их с [исходными отпечатками](draft-session.md#исходные-отпечатки); изменившийся, исчезнувший, появившийся, незафиксированный или непрочитанный источник — [конфликт](#конфликт-ревизий) с записью по каждому источнику; ничего не записывает |
 | `InspectRoutingRules` | `InspectRoutingRulesHandler` | Показывает [правила с названиями и идентификаторами](routing-import.md#названия-и-идентификаторы-правил) из метаданных менеджера поверх `ImportRoutingSchemeHandler.read()` и порта хранилища: привязка по семантическому ключу, позиции, признак и длина названия, причины отсутствия привязки; ничего не записывает |
 | `AssignRuleIdentifiers` | `AssignRuleIdentifiersHandler` | Присваивает идентификаторы правилам без записи в метаданных: генерирует их подставляемой фабрикой `uuid4`, дописывает записи без названия и записывает раздел `rules` один раз только при изменениях |
@@ -78,7 +79,7 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 | --- | --- |
 | `contract_version` | Версия формата команд и результатов, сейчас `1` (`CONTRACT_VERSION`) |
 | `operation_id` | Идентификатор вызова; по умолчанию случайная hex-строка |
-| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_connections`, `inspect_installation`, `inspect_status_summary`, `quick_check`, `import_routing_scheme`, `inspect_manager_metadata`, `import_storage_placement`, `inspect_draft`, `create_draft`, `discard_draft`, `check_draft_baseline`, `inspect_routing_rules`, `assign_rule_identifiers`, `list_routing_rules` или `list_keenetic_devices` |
+| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_connections`, `inspect_installation`, `inspect_status_summary`, `quick_check`, `import_routing_scheme`, `inspect_manager_metadata`, `import_storage_placement`, `inspect_draft`, `create_draft`, `discard_draft`, `check_draft_baseline`, `inspect_menu_exit`, `inspect_routing_rules`, `assign_rule_identifiers`, `list_routing_rules` или `list_keenetic_devices` |
 | `status` | `OperationStatus.SUCCEEDED` или `OperationStatus.FAILED` |
 | `data` | Безопасное представление при успехе, иначе `None` |
 | `error` | `ErrorDetail` при отказе, иначе `None` |
@@ -848,9 +849,9 @@ inbound/outbound, балансировщики с `fallbackTag`, число пр
 `InspectStatusSummary` даёт раздельные состояния ядра Xray, перехвата,
 доступности VPN, DNS и порта 53, автозапуска, режима резерва и черновика одним
 сценарием: его результат показывают и шапка главного меню, и пункт «Сводка».
-`InspectStatusSummaryHandler(proxy, processes)` получает обработчик конфигурации
-Xray и XKeen и порт наблюдения процесса; `None` означает неподключённый
-источник. Каждый нужный источник читается один раз, отказ одного не прерывает
+`InspectStatusSummaryHandler(proxy, processes, *, drafts=None)` получает
+обработчик конфигурации Xray и XKeen, порт наблюдения процесса и порт
+хранилища черновика; `None` означает неподключённый источник. Каждый нужный источник читается один раз, отказ одного не прерывает
 чтение остальных: зависящие от него области получают `not_checked` с кодом
 отказа в причине и описанием отказа со следующим шагом, неподключённый источник —
 причину `source_not_connected`. `StatusSummaryView` содержит
@@ -861,12 +862,12 @@ Xray и XKeen и порт наблюдения процесса; `None` озна
 | Ситуация | Результат |
 | --- | --- |
 | Неверный тип команды или версия | `invalid_request` / `invalid_command`, `unsupported_contract_version` |
-| Источник Xray, XKeen или процесса отказал или вернул некорректные данные | успех; зависящие области `not_checked` с кодом отказа источника и `source_error` |
+| Источник Xray, XKeen, процесса или хранилище черновика отказали или вернули некорректные данные | успех; зависящие области `not_checked` с кодом отказа источника и `source_error` |
 | Источник не подключён | успех; зависящие области `not_checked` / `source_not_connected` |
 
 Области, состояния, причины, правило режима резерва и пример описаны в [сводке
 состояния](status-summary.md). Чтение и сборка сводки — функции
-`read_summary_sources(proxy, processes)` и `build_status_summary(readings)`;
+`read_summary_sources(proxy, processes, drafts=None)` и `build_status_summary(readings)`;
 обработчик вызывает их по очереди, а быстрая проверка строит по тем же
 ответам источников свои проверки.
 
@@ -1065,6 +1066,28 @@ outbound и балансировщиков показываются только
 `reason` отказа хранилища передаётся, только если входит в известный набор
 причин `StoreReason` или кодов домена для `invalid_stored_draft`. Повреждённый
 файл и файл другой версии схемы ни один сценарий не перезаписывает и не удаляет.
+
+### Решение о выходе из меню
+
+`InspectMenuExitHandler(store)` из `keenvpn.application.menu_exit` получает
+порт `DraftSessionStore` либо `None`, если хранилище не подключено, и
+выполняет `InspectMenuExit()`. Хранилище читается не больше одного раза общей
+функцией `read_stored_draft` и не меняется; актуальность черновика не
+проверяется. `MenuExitView` содержит `decision` (`MenuExitDecision`),
+`reason` (`MenuExitReason`), `draft_created_at` и `store_error`; решение
+однозначно задаётся причиной, а модель проверяет точные типы и согласованность
+полей.
+
+| Ситуация | `decision` / `reason` |
+| --- | --- |
+| Неверный тип команды или версия | отказ `invalid_request` / `invalid_command`, `unsupported_contract_version`; хранилище не читается |
+| Хранилище не подключено | `exit` / `draft_store_not_connected`; хранилище не вызывается |
+| Чтение подтвердило, что черновика нет | `exit` / `no_draft` |
+| Есть черновик | `confirm` / `draft_present` с `draft_created_at` в виде `YYYY-MM-DDTHH:MM:SSZ`; идентификатора и токена ревизии нет |
+| Отказ хранилища, повреждённый файл, непредвиденное исключение или ответ не по контракту | `confirm` / `draft_not_checked` со `store_error` — тем же кодом, что у [сценариев черновика](#сессия-черновика), и следующим шагом |
+
+Отказ хранилища не делает сценарий неуспешным и не превращается в выход,
+будто черновика нет. `KeyboardInterrupt` и `SystemExit` проходят наружу.
 
 ## Правила с названиями и идентификаторами
 
@@ -1330,6 +1353,15 @@ ANSI-последовательности в строках и байтах, а 
 применения, который не пишет поверх нового состояния, показ в CLI и
 отсутствие хешей, имён частей, токенов, ревизий и путей с фиксированным
 `operation_id`.
+
+`test_application_menu_exit.py` проверяет решение о выходе: отсутствие
+и наличие черновика, каждый отказ хранилища со своим шагом, непредвиденное
+исключение и повреждённый файл без их текста, ответы не по контракту,
+неподключённое хранилище, прерывания, неверную команду и версию без чтения,
+настоящее файловое хранилище во временном каталоге без изменения файла,
+инварианты `MenuExitView`, стабильные коды, отсутствие изменений хранилища,
+идентификатора, токена и значений неизвестных полей в результате
+с фиксированным `operation_id`.
 
 `test_application_conflicts.py` проверяет записи конфликта: допустимые
 сочетания ожидаемого и найденного состояния, в том числе для каждого

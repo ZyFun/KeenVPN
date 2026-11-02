@@ -97,7 +97,11 @@ _INCONSISTENT = ErrorDetail(
 
 @dataclass(frozen=True, slots=True)
 class RouteSchemeView:
-    """Импортированная схема, по политике которой выполнен расчёт: часть, режим, причины и счётчики."""
+    """Импортированная схема, по политике которой выполнен расчёт: часть, режим, причины и счётчики.
+
+    `api_service_group_count` — число служебных правил API: в политику они не
+    входят, поэтому расчёт их не проверяет и шагов они не дают.
+    """
 
     routing_part: str | None
     read_only: bool
@@ -105,6 +109,7 @@ class RouteSchemeView:
     group_count: int
     rule_count: int
     policy_present: bool
+    api_service_group_count: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -113,6 +118,8 @@ class RouteSchemeView:
             or type(self.reasons) is not tuple or any(type(item) is not str for item in self.reasons)
             or type(self.group_count) is not int or self.group_count < 0
             or type(self.rule_count) is not int or self.rule_count < 0
+            or type(self.api_service_group_count) is not int
+            or not 0 <= self.api_service_group_count <= self.group_count
         ):
             raise TypeError("Некорректное описание схемы в объяснении маршрута.")
 
@@ -124,6 +131,7 @@ class RouteSchemeView:
             routing_part=diagnostic["routing_part"], read_only=diagnostic["read_only"],
             reasons=tuple(diagnostic["reasons"]), group_count=diagnostic["group_count"],
             rule_count=diagnostic["rule_count"], policy_present=diagnostic["policy"] is not None,
+            api_service_group_count=sum(group["api_service"] is True for group in diagnostic["groups"]),
         )
 
 

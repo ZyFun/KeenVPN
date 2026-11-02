@@ -564,6 +564,8 @@ ROUTING_LIST_TITLE = "Группы правил"
 ROUTING_ITEM_NAME = "Группа правил"
 OUTBOUND_TAGS_PER_LINE = 10
 """Сколько тегов outbound в строке карточки: тег после фильтра не длиннее 64 символов, строка остаётся в пределе."""
+API_SERVICE_NOTE = "служебное правило API — в политику не входит"
+"""Подпись группы, которая направляет трафик служебного inbound в обработчик API Xray."""
 
 
 def _value_reasons(group: RuleGroupView) -> str:
@@ -588,6 +590,8 @@ def _group_label(group: RuleGroupView) -> str:
         f"{identifier(target.kind)} {known_value(target.tag_known, target.tag, identifier, 'без тега')}, "
         f"только просмотр {flag(group.read_only)}"
     )
+    if group.api_service is True:
+        line += f", {API_SERVICE_NOTE}"
     if group.reasons:
         line += f", причины: {identifiers(group.reasons)}"
     if target.reasons:
@@ -626,6 +630,7 @@ def _group_card(group: RuleGroupView) -> tuple[str, ...]:
         f"неизвестных: {count(group.unknown_field_count)}",
         f"Тег правила: {_rule_tag(group.has_rule_tag)}",
         f"Действие: {'нет' if group.action is None else identifier(group.action)}",
+        f"Служебное правило API: {API_SERVICE_NOTE if group.api_service is True else flag(group.api_service)}",
         f"Назначение: {identifier(target.kind)} {known_value(target.tag_known, target.tag, identifier, 'без тега')}; "
         f"запасной: {known_value(target.fallback_known, target.fallback_tag, identifier, 'не задан')}; "
         f"стратегия: {known_value(target.strategy_known, target.strategy, identifier, 'не задана')}; "
@@ -783,6 +788,7 @@ TARGET_POSITION_LABELS: Mapping[TargetPositionState, str] = MappingProxyType({
     TargetPositionState.ABSENT: "без тега",
     TargetPositionState.UNSUPPORTED: "не определена: заданы оба тега",
     TargetPositionState.UNAVAILABLE: "сводка не описывает это правило",
+    TargetPositionState.API: "обработчик API Xray, служебное назначение",
 })
 """Подпись позиции назначения группы, когда позиция не разрешена. Таблица только для чтения."""
 
@@ -985,6 +991,11 @@ def present_route_explanation(view: RouteExplanationView) -> Lines:
             f"групп {count(scheme.group_count)}; правил модели {count(scheme.rule_count)}; политика {policy}; "
             f"причины: {identifiers(scheme.reasons)}"
         )
+        if scheme.api_service_group_count:
+            lines.append(
+                f"Служебных правил API вне расчёта: {count(scheme.api_service_group_count)} — "
+                "они направляют трафик служебного inbound в обработчик API и в политику не входят"
+            )
         lines += _metadata_state_lines(view.metadata_state, view.metadata_error)
     lines.append(f"Шагов проверки: {count(len(view.steps))}")
     lines += _indent(_route_step_line(number, step) for number, step in enumerate(view.steps, start=1))

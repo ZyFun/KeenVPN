@@ -70,7 +70,14 @@ class ValueReasonView:
 
 @dataclass(frozen=True, slots=True)
 class RuleGroupView:
-    """Группа правила: состав условий, поля, назначение и причины режима только для просмотра."""
+    """Группа правила: состав условий, поля, назначение и причины режима только для просмотра.
+
+    `api_service` — служебное правило API: назначение в обработчик API Xray
+    и единственное поле условия `inboundTag` служебных inbound, которые
+    слушают loopback без прозрачного приёма; такое правило только для
+    просмотра, в политику не входит и режим схемы не меняет. Ключ добавлен
+    в версии контракта 1 как необязательный.
+    """
 
     part: str
     index: int
@@ -87,6 +94,7 @@ class RuleGroupView:
     reasons: tuple[str, ...]
     value_reasons: tuple[ValueReasonView, ...]
     target: RuleTargetView
+    api_service: bool = False
 
 
 @dataclass(frozen=True, slots=True)

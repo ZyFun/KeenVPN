@@ -12,12 +12,14 @@
 `streamSettings`, доменов, адресов, путей, паролей и теги правил `ruleTag` в
 сводку не попадают. Семантика объединения нескольких файлов Xray не
 моделируется: сводка лишь показывает, какие части содержат каждый раздел.
-Значения списков доменов и адресов правил и DNS доступны доверенному коду
-отдельно через `rule_list_values`: по ним разбираются ссылки на наборы геобаз,
-в сводку они не входят.
+Исключение — раздел `api`: тег обработчика API берётся из действующего
+раздела, как его выбирает `Config.Override`, потому что от него зависит
+разрешимость назначения правила. Значения списков доменов и адресов правил
+и DNS доступны доверенному коду отдельно через `rule_list_values`: по ним
+разбираются ссылки на наборы геобаз, в сводку они не входят.
 """
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import NoReturn
@@ -46,7 +48,9 @@ _RULE_IP_LIST_KEYS = ("ip", "source", "sourceIP", "localIP")
 """Поля правила со списками адресов: `StringList` Xray, разбираются `ToCidrList`."""
 _DNS_IP_LIST_KEYS = ("expectIPs", "expectedIPs", "unexpectedIPs")
 """Поля сервера DNS со списками адресов: `StringList` Xray, разбираются `ToCidrList`."""
-_READ_SECTIONS = frozenset({"inbounds", "outbounds", "dns", "routing", *_OBSERVATORY_SECTIONS})
+_READ_SECTIONS = frozenset({"inbounds", "outbounds", "dns", "routing", "api", *_OBSERVATORY_SECTIONS})
+API_FIELDS = frozenset({"tag", "listen"})
+"""Поля раздела `api`, от которых зависит обработчик API среди outbound; `services` не читается."""
 _ENDPOINT_FIELDS = frozenset({"tag", "protocol"})
 _DNS_FIELDS = frozenset({"tag", "servers", "hosts"})
 _DNS_SERVER_FIELDS = frozenset({"tag", "domains", *_DNS_IP_LIST_KEYS})
@@ -113,16 +117,55 @@ def _raise_detached(code: XrayConfigErrorCode) -> NoReturn:
 
 
 class RuleTargetKind(StrEnum):
-    """Куда правило направляет трафик; `both` и `none` не разрешаются выбором одного."""
+    """Куда правило направляет трафик; `both` и `none` не разрешаются выбором одного.
+
+    `api` — `outboundTag` указывает тег действующего обработчика API Xray, а не
+    outbound раздела `outbounds`: это служебное назначение без действия VPN,
+    DIRECT или BLOCK.
+    """
 
     OUTBOUND = "outbound"
     BALANCER = "balancer"
     BOTH = "both"
     NONE = "none"
+    API = "api"
 
 
 def _text(value: object) -> str | None:
     return value if type(value) is str else None
+
+
+def effective_api_section(documents: Iterable[Mapping[str, object]]) -> object | None:
+    """Действующий раздел `api` по документам частей в их порядке; `None` — раздела нет.
+
+    `Config.Override` Xray v26.3.27 заменяет раздел целиком значением следующей
+    части, только если оно не `null`: поля разделов разных частей не сливаются.
+    Ключ в другом регистре здесь не учитывается: его отмечают проверки вариантов
+    регистра.
+    """
+    section = None
+    for document in documents:
+        if document.get("api") is not None:
+            section = document["api"]
+    return section
+
+
+def api_handler_tag(section: object) -> str | None:
+    """Тег, под которым обработчик API Xray v26.3.27 зарегистрирован среди outbound, либо `None`.
+
+    `Commander.Start` регистрирует обработчик по тегу, только если `listen`
+    отсутствует, `null` или пуст; иначе API слушает свой адрес, и правило
+    в его тег цели не находит. Пустой или отсутствующий тег Xray отклоняет при
+    сборке (`API tag can't be empty`), поле другого типа — при разборе JSON:
+    обработчика тогда нет. Тег возвращается как написан, для доверенного кода.
+    """
+    if type(section) is not dict:
+        return None
+    tag = section.get("tag")
+    listen = section.get("listen")
+    if type(tag) is not str or not tag or (listen is not None and (type(listen) is not str or listen)):
+        return None
+    return tag
 
 
 def has_case_variant(item: dict[str, object], names: frozenset[str]) -> bool:
@@ -205,6 +248,7 @@ class _Summary:
         self.observatory: list[dict[str, object]] = []
         self.unsupported: list[dict[str, str]] = []
         self.rule_values: list[RuleListValue] = []
+        self.api_section: object | None = None
         self.case_variant = False
 
     def unsupported_path(self, part: str, path: str) -> None:
@@ -293,6 +337,8 @@ class _Summary:
                 self.add_dns(name, value)
             elif section == "routing":
                 self.add_routing(name, value)
+            elif section == "api":
+                self.add_api(name, value)
             elif section in _OBSERVATORY_SECTIONS:
                 if type(value) is not dict:
                     self.unsupported_path(name, section)
@@ -348,6 +394,23 @@ class _Summary:
                     self.rule_values.append(
                         RuleListValue(name, f"dns.hosts[{index}]", ConditionFamily.DOMAIN, False, key),
                     )
+
+    def add_api(self, name: str, api: object) -> None:
+        """Учесть раздел `api`: действует последний не-`null`, неверный тип отмечается как неподдержанный.
+
+        `null` раздела и его полей `tag` и `listen` декодер Xray считает
+        отсутствием значения, поле другого типа — ошибкой разбора.
+        """
+        if api is None:
+            return
+        self.api_section = api
+        if type(api) is not dict:
+            self.unsupported_path(name, "api")
+            return
+        self.note_case_variants(api, API_FIELDS)
+        for key, value in api.items():
+            if key in API_FIELDS and value is not None and type(value) is not str:
+                self.unsupported_path(name, f"api.{key}")
 
     def add_routing(self, name: str, routing: object) -> None:
         if type(routing) is not dict:
@@ -422,7 +485,10 @@ class _Summary:
         исходным тегам; в вывод теги попадают только после проверки формата,
         а протоколы, стратегии и `type` — только из списков известных значений.
         Позиция цели ссылки указывается, только если среди всех частей ровно
-        один outbound или балансировщик носит этот тег.
+        один outbound или балансировщик носит этот тег. `outboundTag`, равный
+        тегу действующего обработчика API, разрешён без позиции: вид назначения
+        `api`, а если тот же тег носит и outbound — `outbound` без позиции,
+        как при повторе тега.
         """
         inbound_tags = [item["tag"] for item in self.inbounds if item["tag"] is not None]
         outbound_tags = [item["tag"] for item in self.outbounds if item["tag"] is not None]
@@ -431,11 +497,16 @@ class _Summary:
         known_inbound = set(inbound_tags) | set(self.dns_tags) | set(self.dns_server_tags)
         outbound_positions = _unique_positions(self.outbounds)
         balancer_positions = _unique_positions(self.balancers)
+        api_tag = api_handler_tag(self.api_section)
         rules = []
         for rule in self.rules:
             kind = rule["target_kind"]
             tag = rule["target_tag"]
-            if kind is RuleTargetKind.OUTBOUND:
+            if kind is RuleTargetKind.OUTBOUND and tag == api_tag:
+                # Обработчик API вытесняет outbound с тем же тегом: такую цель не выбираем по первому.
+                kind = RuleTargetKind.OUTBOUND if tag in outbound_positions else RuleTargetKind.API
+                resolved, position = True, None
+            elif kind is RuleTargetKind.OUTBOUND:
                 resolved = tag in outbound_positions
                 position = outbound_positions.get(tag)
             elif kind is RuleTargetKind.BALANCER:
@@ -630,6 +701,22 @@ def tag_repeats(parts: tuple[ConfigDocument, ...]) -> TagRepeats:
             if len(set(names)) > 1:
                 between.append(TagRepeat(section, tag, tuple(names)))
     return TagRepeats(tuple(within), tuple(between))
+
+
+def api_handler_conflict(parts: tuple[ConfigDocument, ...]) -> bool:
+    """Носит ли outbound какой-либо части тег действующего обработчика API; для доверенного кода.
+
+    `Commander.Start` Xray v26.3.27 удаляет outbound с тегом обработчика
+    и регистрирует вместо него обработчик API, а если это был первый outbound,
+    обработчик API становится обработчиком по умолчанию. Ссылка на такой тег
+    неоднозначна. Обработчик с непустым `listen` по тегу не регистрируется
+    и ни с чем не совпадает; inbound и балансировщики — другие пространства имён.
+    """
+    summary = _Summary()
+    for part in parts:
+        summary.add_part(part)
+    tag = api_handler_tag(summary.api_section)
+    return tag is not None and any(item["tag"] == tag for item in summary.outbounds)
 
 
 @dataclass(frozen=True, slots=True, repr=False)

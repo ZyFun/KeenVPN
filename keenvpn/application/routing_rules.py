@@ -401,6 +401,11 @@ class TargetPositionState(StrEnum):
     """Заданы оба тега: сводка не разрешает выбор одного из них."""
     UNAVAILABLE = "unavailable"
     """Сводка не описывает это правило, например правило не объект."""
+    API = "api"
+    """Тег принадлежит действующему обработчику API Xray: служебное назначение, позиции среди outbound нет.
+
+    Значение добавлено в версии контракта 1 как совместимое расширение.
+    """
 
 
 _BOUND = "bound"
@@ -582,6 +587,8 @@ def resolve_target_position(rule: XrayRuleView | None) -> tuple[TargetPositionSt
         return TargetPositionState.UNSUPPORTED, None
     if rule.target_kind == "none" or not rule.target_tag_known:
         return TargetPositionState.ABSENT, None
+    if rule.target_kind == "api":
+        return TargetPositionState.API, None
     if not rule.target_resolved:
         return TargetPositionState.UNRESOLVED, None
     if rule.target_position is None:

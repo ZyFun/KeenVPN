@@ -531,7 +531,7 @@ class ContractVersionSnapshotTests(unittest.TestCase):
             [code.value for code in NextStepCode],
             [
                 "retry_input", "consult_documentation", "check_source", "inspect_source_data", "retry_later", "open_view",
-                "preserve_file", "update_interface", "recreate_draft",
+                "preserve_file", "update_interface", "recreate_draft", "review_draft",
             ],
         )
         self.assertEqual([status.value for status in OperationStatus], ["succeeded", "failed"])

@@ -44,7 +44,11 @@ from tests.support.snapshot import snapshot_proxy_sources
 
 API_PART = "08_test_api.json"
 LATER_API_PART = "09_test_api.json"
-INBOUNDS = [{"tag": "test-api-in", "protocol": "dokodemo-door"}, {"tag": "test-lan", "protocol": "tunnel"}]
+API_INBOUND = {"tag": "test-api-in", "listen": "127.0.0.1", "port": 10085, "protocol": "dokodemo-door"}
+"""Служебный inbound API: слушает loopback и не принимает прозрачно перенаправленный трафик."""
+CLIENT_INBOUND = {"tag": "test-lan", "port": 61219, "protocol": "dokodemo-door", "settings": {"followRedirect": True}}
+"""Inbound трафика клиентов: прозрачное перенаправление без loopback-адреса."""
+INBOUNDS = [API_INBOUND, CLIENT_INBOUND]
 OUTBOUNDS = [
     {"tag": "test-proxy", "protocol": "trojan"},
     {"tag": "test-direct", "protocol": "freedom"},
@@ -273,6 +277,68 @@ class ApiImportTests(unittest.TestCase):
         self.assertEqual((1, RoutingAction.BLOCK), (address.selection.index, address.selection.rule.action))
         self.assertEqual(2, len(address.steps))
 
+    def test_service_rule_needs_service_only_inbounds(self):
+        """Правило в тег API служебное, только если все его inbound во всех частях слушают loopback без прозрачного приёма."""
+        def scheme_for(inbound_tags, *, api_inbound=API_INBOUND, extra_parts=()):
+            rule = {**API_RULE, "inboundTag": inbound_tags}
+            return import_routing_scheme(config(
+                rules=[rule, *RULES[1:]], inbounds=[api_inbound, CLIENT_INBOUND],
+                api_parts=((API_PART, {"api": API}), *extra_parts),
+            ))
+
+        service = {
+            "loopback IPv4": scheme_for(["test-api-in"]),
+            "loopback IPv6": scheme_for(["test-api-in"], api_inbound={**API_INBOUND, "listen": "::1"}),
+            "другой адрес 127/8": scheme_for(["test-api-in"], api_inbound={**API_INBOUND, "listen": "127.0.0.2"}),
+            "строковая форма StringList": scheme_for("test-api-in"),
+            "followRedirect false": scheme_for(["test-api-in"], api_inbound={**API_INBOUND, "settings": {"followRedirect": False}}),
+            "tproxy off": scheme_for(
+                ["test-api-in"], api_inbound={**API_INBOUND, "streamSettings": {"sockopt": {"tproxy": "off"}}},
+            ),
+        }
+        for name, scheme in service.items():
+            with self.subTest(name):
+                self.assertTrue(scheme.groups[0].api_service)
+                self.assertEqual((), scheme.reasons)
+                self.assertIsNotNone(scheme.policy)
+
+        repeated = {"inbounds": [{**API_INBOUND, "listen": "198.51.100.1"}]}
+        not_service = {
+            "клиентский inbound": scheme_for(["test-lan"]),
+            "служебный и клиентский": scheme_for(["test-api-in", "test-lan"]),
+            "без listen": scheme_for(["test-api-in"], api_inbound={key: value for key, value in API_INBOUND.items() if key != "listen"}),
+            "listen на всех адресах": scheme_for(["test-api-in"], api_inbound={**API_INBOUND, "listen": "0.0.0.0"}),
+            "listen не loopback": scheme_for(["test-api-in"], api_inbound={**API_INBOUND, "listen": "198.51.100.1"}),
+            "listen доменом": scheme_for(["test-api-in"], api_inbound={**API_INBOUND, "listen": "localhost"}),
+            "listen Unix-сокетом": scheme_for(["test-api-in"], api_inbound={**API_INBOUND, "listen": "@test-api"}),
+            "followRedirect": scheme_for(["test-api-in"], api_inbound={**API_INBOUND, "settings": {"followRedirect": True}}),
+            "tproxy": scheme_for(
+                ["test-api-in"], api_inbound={**API_INBOUND, "streamSettings": {"sockopt": {"tproxy": "tproxy"}}},
+            ),
+            "settings не объект": scheme_for(["test-api-in"], api_inbound={**API_INBOUND, "settings": []}),
+            "вариант регистра listen": scheme_for(["test-api-in"], api_inbound={**API_INBOUND, "Listen": "0.0.0.0"}),
+            "вариант регистра tproxy": scheme_for(
+                ["test-api-in"], api_inbound={**API_INBOUND, "streamSettings": {"sockopt": {"TProxy": "tproxy"}}},
+            ),
+            "повтор тега в более поздней части": scheme_for(["test-api-in"], extra_parts=(("09_test_inbounds.json", repeated),)),
+            "повтор тега в более ранней части": scheme_for(["test-api-in"], extra_parts=(("01_test_inbounds.json", repeated),)),
+            "раздел inbounds в другом регистре": scheme_for(
+                ["test-api-in"], extra_parts=(("09_test_inbounds.json", {"Inbounds": []}),),
+            ),
+            "тег DNS": scheme_for(["test-dns"], extra_parts=(("02_dns.json", {"dns": {"tag": "test-dns"}}),)),
+            "нет inbound": scheme_for(["test-missing"]),
+            "пустой список": scheme_for([]),
+            "пустой тег": scheme_for([""]),
+        }
+        for name, scheme in not_service.items():
+            with self.subTest(name):
+                group = scheme.groups[0]
+                self.assertIs(RuleTargetKind.API, group.target.kind)
+                self.assertFalse(group.api_service)
+                self.assertIn(ImportReason.RULE_ACTION_UNRESOLVED, scheme.reasons)
+                self.assertIsNone(scheme.policy)
+                self.assertTrue(scheme.read_only)
+
     def test_api_rule_with_client_conditions_blocks_the_policy(self):
         for name, fields in {
             "inbound и домен": {"inboundTag": ["test-api-in"], "domain": ["domain:example.test"]},
@@ -369,12 +435,32 @@ class ApiImportTests(unittest.TestCase):
     def test_scheme_rejects_unresolved_non_service_group_next_to_a_policy(self):
         scheme = import_routing_scheme(config())
         group = scheme.groups[0]
-        widened = replace(group, fields=("inboundTag", "port"), unsupported_fields=("inboundTag", "port"))
-        self.assertFalse(widened.api_service)
-        with self.assertRaises(RoutingImportError) as caught:
-            RoutingScheme(scheme.routing_part, scheme.routing_parts, (widened, *scheme.groups[1:]), scheme.policy, scheme.reasons)
-        self.assertIs(RoutingImportErrorCode.SCHEME, caught.exception.code)
-        self.assertIsNone(caught.exception.__context__)
+        for name, change in {
+            "признак снят": dict(api_service=False),
+            "другие поля": dict(fields=("inboundTag", "port"), unsupported_fields=("inboundTag", "port"), api_service=False),
+        }.items():
+            with self.subTest(name):
+                demoted = replace(group, **change)
+                with self.assertRaises(RoutingImportError) as caught:
+                    RoutingScheme(
+                        scheme.routing_part, scheme.routing_parts, (demoted, *scheme.groups[1:]), scheme.policy, scheme.reasons,
+                    )
+                self.assertIs(RoutingImportErrorCode.SCHEME, caught.exception.code)
+                self.assertIsNone(caught.exception.__context__)
+
+    def test_group_flag_is_checked_against_kind_target_and_fields(self):
+        scheme = import_routing_scheme(config())
+        service, ordinary = scheme.groups[0], scheme.groups[1]
+        broken = {
+            "флаг числом": (service, dict(api_service=1)),
+            "другие поля": (service, dict(fields=("inboundTag", "port"), unsupported_fields=("inboundTag", "port"))),
+            "не обработчик API": (ordinary, dict(api_service=True)),
+        }
+        for name, (group, change) in broken.items():
+            with self.subTest(name), self.assertRaises(RoutingImportError) as caught:
+                replace(group, **change)
+            self.assertIs(RoutingImportErrorCode.GROUP, caught.exception.code)
+            self.assertIsNone(caught.exception.__context__)
 
     def test_diagnostic_hides_unsafe_handler_tag(self):
         xray = config(api={"tag": UNSAFE_TAG}, rules=[{**API_RULE, "outboundTag": UNSAFE_TAG}, *RULES[1:]])
@@ -406,6 +492,7 @@ class ApiQuickCheckTests(unittest.TestCase):
                 balancers=[{"tag": "test-api", "selector": ["test-proxy"]}],
             ), ("passed", None)),
             "правило API с доменом": (config(rules=[{**API_RULE, "domain": ["domain:example.test"]}, *RULES[1:]]), ("passed", None)),
+            "правило API с клиентским inbound": (config(rules=[{**API_RULE, "inboundTag": ["test-lan"]}, *RULES[1:]]), ("passed", None)),
         }
         for name, (xray, expected) in cases.items():
             with self.subTest(name), forbid_external_effects():
@@ -482,6 +569,15 @@ class ApiScenarioTests(unittest.TestCase):
         self.assertIn(f"Назначение по позиции: {TARGET_POSITION_LABELS[TargetPositionState.API]}", rule_list.entries[0].card)
         route = present_route_explanation(results["route"].data)
         self.assertEqual(1, sum(line.startswith("Служебных правил API вне расчёта: 1") for line in route))
+
+    def test_api_rule_from_client_inbound_leaves_the_route_undetermined(self):
+        """Сценарий GitHub review: правило в тег API для клиентского inbound не пропускается молча."""
+        results = self.run_all(config(rules=[{**API_RULE, "inboundTag": ["test-lan"]}, *RULES[1:]]))
+        route = results["route"].data
+        self.assertIs(RouteOutcome.POLICY_ABSENT, route.outcome)
+        self.assertEqual((0, ("rule_action_unresolved",)), (route.scheme.api_service_group_count, route.scheme.reasons))
+        self.assertIs(False, results["scheme"].data.groups[0].api_service)
+        self.assertNotIn(API_SERVICE_NOTE, present_routing_scheme(results["scheme"].data).entries[0].label)
 
     def test_explanation_without_service_rules_has_no_extra_line(self):
         results = self.run_all(config(rules=RULES[1:], api_parts=()))

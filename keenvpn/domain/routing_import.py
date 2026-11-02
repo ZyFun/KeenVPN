@@ -12,7 +12,8 @@ v26.3.27 и собирает группы правил в исходном по�
 неоднозначность не угадывается, группа резервирования и её `fallbackTag`
 сохраняются как назначение. Тег действующего обработчика API Xray —
 служебное назначение без действия: правило в него только для просмотра
-и в политику не входит, если его единственное условие — `inboundTag`.
+и в политику не входит, если его единственное условие — `inboundTag`
+служебных inbound, которые слушают loopback без прозрачного приёма.
 Финальное правило берётся из конфигурации только
 в поддержанной форме и не выдумывается. Байты частей не меняются: неизвестные
 поля остаются в исходном документе. Ничего не записывается и не применяется.
@@ -55,6 +56,8 @@ _FINAL_NETWORKS = frozenset({"tcp", "udp"})
 _DOCUMENT_FIELDS = frozenset({"routing", "outbounds", "api"})
 _API_SERVICE_FIELDS = ("inboundTag",)
 """Единственное поле условия служебного правила API: трафик служебного inbound, а не клиентов."""
+_INBOUND_SERVICE_FIELDS = frozenset({"tag", "listen", "settings", "streamSettings"})
+"""Поля inbound, по которым он признаётся служебным; их варианты регистра не дают это установить."""
 _ROUTING_FIELDS = frozenset({"rules", "balancers"})
 _OUTBOUND_FIELDS = frozenset({"tag", "protocol", "proxySettings", "streamSettings"})
 _PROXY_SETTINGS_FIELDS = frozenset({"tag", "transportLayer"})
@@ -341,6 +344,14 @@ class ImportedRuleGroup(_PrivateRepresentation):
     `UnsupportedRuleCondition` и остаётся только для просмотра; финальное
     правило условий не имеет. `rules` строятся из условий и действия, пока
     действие определено.
+
+    `api_service` — служебное правило API: назначение в обработчик API,
+    единственное поле условия `inboundTag`, и каждый его тег принадлежит
+    служебному inbound (см. `import_routing_scheme`). Такое правило направляет
+    соединения процессов самого роутера, а не трафик клиентов: оно только для
+    просмотра, в политику не входит и режим схемы не меняет. Признак
+    вычисляется по определениям inbound всех частей при импорте и хранится
+    в группе; конструктор проверяет его согласованность с видом, назначением и полями.
     """
 
     part: str
@@ -355,6 +366,7 @@ class ImportedRuleGroup(_PrivateRepresentation):
     has_rule_tag: bool
     reasons: tuple[ImportReason, ...]
     value_reasons: tuple[ValueReason, ...]
+    api_service: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -374,6 +386,11 @@ class ImportedRuleGroup(_PrivateRepresentation):
             or not all(type(item) is ValueReason for item in self.value_reasons)
             or (self.kind is RuleGroupKind.FINAL and (self.conditions or self.value_reasons))
             or (self.kind is RuleGroupKind.RULES and not self.conditions)
+            or type(self.api_service) is not bool
+            or (self.api_service and (
+                self.kind is not RuleGroupKind.RULES or self.target.kind is not RuleTargetKind.API
+                or self.fields != _API_SERVICE_FIELDS
+            ))
         ):
             _raise_detached(RoutingImportErrorCode.GROUP)
 
@@ -390,20 +407,6 @@ class ImportedRuleGroup(_PrivateRepresentation):
         """Группу нельзя безопасно редактировать как обычное правило."""
         return bool(self.reasons) or bool(self.target.reasons) or any(
             isinstance(item, (UnknownCondition, UnsupportedRuleCondition)) for item in self.conditions
-        )
-
-    @property
-    def api_service(self) -> bool:
-        """Служебное правило API: назначение — обработчик API, единственное поле условия — `inboundTag`.
-
-        Такое правило направляет трафик служебного inbound, а не клиентов:
-        оно только для просмотра, в политику не входит и режим схемы не меняет.
-        Правило в тег API с другими условиями может совпасть с трафиком
-        клиентов, поэтому служебным не считается.
-        """
-        return (
-            self.kind is RuleGroupKind.RULES and self.target.kind is RuleTargetKind.API
-            and self.fields == _API_SERVICE_FIELDS
         )
 
     @property
@@ -482,7 +485,7 @@ def _rebuild_group(group: ImportedRuleGroup) -> ImportedRuleGroup:
             group.part, group.index, group.kind, tuple(_rebuild_condition(item) for item in group.conditions),
             _rebuild_target(group.target), group.fields, group.unsupported_fields, group.unknown_fields,
             group.value_count, group.has_rule_tag, group.reasons,
-            tuple(ValueReason(item.path, item.reason) for item in group.value_reasons),
+            tuple(ValueReason(item.path, item.reason) for item in group.value_reasons), group.api_service,
         )
     except RoutingValidationError:
         # Повреждённое условие — ошибка группы; отказ назначения и группы проходит своим кодом.
@@ -770,6 +773,74 @@ def _effective_outbounds(documents: list[tuple[str, dict[str, object]]]) -> tupl
     return ordered, supported, variant
 
 
+def _loopback(listen: object) -> bool:
+    """`listen` inbound — loopback-адрес IPv4 или IPv6; отсутствие, домен и Unix-сокет — нет."""
+    if type(listen) is not str:
+        return False
+    try:
+        return ipaddress.ip_address(listen).is_loopback
+    except ValueError:
+        return False
+
+
+def _transparent(item: dict[str, object]) -> bool:
+    """Может ли inbound принимать прозрачно перенаправленный трафик: `followRedirect` или режим `tproxy`.
+
+    Неподдержанная структура этих полей и варианты регистра их ключей считаются
+    возможным прозрачным приёмом: служебность тогда не устанавливается.
+    """
+    settings = item.get("settings")
+    if settings is not None:
+        if type(settings) is not dict or has_case_variant(settings, frozenset({"followRedirect"})):
+            return True
+        redirect = settings.get("followRedirect")
+        if redirect is not None and redirect is not False:
+            return True
+    stream = item.get("streamSettings")
+    if stream is None:
+        return False
+    if type(stream) is not dict or has_case_variant(stream, _STREAM_SETTINGS_FIELDS):
+        return True
+    sockopt = stream.get("sockopt")
+    if sockopt is None:
+        return False
+    if type(sockopt) is not dict or has_case_variant(sockopt, frozenset({"tproxy"})):
+        return True
+    mode = sockopt.get("tproxy")
+    return mode is not None and mode not in ("", "off")
+
+
+def _service_inbounds(documents: list[tuple[str, dict[str, object]]]) -> frozenset[str]:
+    """Теги inbound, все определения которых во всех частях служебные.
+
+    Служебный inbound слушает loopback-адрес и не принимает прозрачно
+    перенаправленный трафик: через него приходят соединения процессов самого
+    роутера, а не клиентов. Определения сравниваются во всех частях, поэтому
+    результат не зависит от того, какое из них оставит объединение частей.
+    Раздел `inbounds` не список, ключ `inbounds` части или поле inbound в другом
+    регистре — служебные inbound не устанавливаются вовсе.
+    """
+    verdicts: dict[str, bool] = {}
+    for _name, document in documents:
+        if has_case_variant(document, frozenset({"inbounds"})):
+            return frozenset()
+        inbounds = document.get("inbounds")
+        if inbounds is None:
+            continue
+        if type(inbounds) is not list:
+            return frozenset()
+        for item in inbounds:
+            if type(item) is not dict:
+                continue
+            if has_case_variant(item, _INBOUND_SERVICE_FIELDS):
+                return frozenset()
+            tag = item.get("tag")
+            if type(tag) is not str or not tag:
+                continue
+            verdicts[tag] = verdicts.get(tag, True) and _loopback(item.get("listen")) and not _transparent(item)
+    return frozenset(tag for tag, service in verdicts.items() if service)
+
+
 def _api_handler(documents: list[tuple[str, dict[str, object]]]) -> tuple[str | None, bool]:
     """Тег действующего обработчика API и признак ключей `tag`/`listen` раздела в другом регистре."""
     section = effective_api_section(document for _name, document in documents)
@@ -997,7 +1068,9 @@ def _translate(
     return UnknownCondition(family, text), ImportReason.DOMAIN_PLAIN
 
 
-def _import_rule(part: str, index: int, rule: object, resolver: _TargetResolver, last: bool) -> ImportedRuleGroup:
+def _import_rule(
+    part: str, index: int, rule: object, resolver: _TargetResolver, last: bool, service_inbounds: frozenset[str],
+) -> ImportedRuleGroup:
     path = f"routing.rules[{index}]"
     if type(rule) is not dict:
         reason = ImportReason.RULE_NOT_OBJECT
@@ -1010,12 +1083,16 @@ def _import_rule(part: str, index: int, rule: object, resolver: _TargetResolver,
     unsupported = tuple(key for key in fields if key in XRAY_RULE_CONDITION_FIELDS and key not in _MODEL_FIELDS)
     unknown = tuple(key for key in fields if key not in XRAY_RULE_CONDITION_FIELDS)
     has_rule_tag = "ruleTag" in rule
+    api_service = False
+    if target.kind is RuleTargetKind.API and fields == _API_SERVICE_FIELDS:
+        inbound_tags = decode_string_list(rule["inboundTag"])
+        api_service = bool(inbound_tags) and all(tag in service_inbounds for tag in inbound_tags)
 
     def group(kind: RuleGroupKind, conditions: tuple[RoutingCondition, ...], reasons: tuple[ImportReason, ...],
               value_count: int = 0, value_reasons: tuple[ValueReason, ...] = ()) -> ImportedRuleGroup:
         return ImportedRuleGroup(
             part, index, kind, conditions, target, fields, unsupported, unknown, value_count, has_rule_tag,
-            reasons, value_reasons,
+            reasons, value_reasons, api_service,
         )
 
     def placeholder() -> tuple[UnsupportedRuleCondition]:
@@ -1081,8 +1158,11 @@ def import_routing_scheme(config: XrayConfigSet) -> RoutingScheme:
     финальном правиле в поддержанной форме; импортированные правила не
     помечаются служебными и не отключаются. Тег действующего раздела `api`
     разрешает `outboundTag` как обработчик API; служебное правило API
-    (условие только `inboundTag`) сохраняется группой без действия и в политику
-    не входит.
+    (условие только `inboundTag`, и каждый его тег — служебный inbound:
+    во всех частях слушает loopback-адрес и не принимает прозрачно
+    перенаправленный трафик) сохраняется группой без действия и в политику
+    не входит. Правило в тег API с другим inbound, тегом DNS или отсутствующим
+    inbound может совпасть с трафиком клиентов: политика не собирается.
     """
     if type(config) is not XrayConfigSet:
         _raise_detached(RoutingImportErrorCode.CONFIG)
@@ -1091,6 +1171,7 @@ def import_routing_scheme(config: XrayConfigSet) -> RoutingScheme:
     case_variant = case_variant or any(has_case_variant(document, _DOCUMENT_FIELDS) for _name, document in documents)
     api_tag, api_variant = _api_handler(documents)
     case_variant = case_variant or api_variant
+    service_inbounds = _service_inbounds(documents)
     routing_part = None
     routing: object = None
     routing_parts: list[str] = []
@@ -1122,7 +1203,7 @@ def import_routing_scheme(config: XrayConfigSet) -> RoutingScheme:
         else:
             rules_readable = True
             groups = tuple(
-                _import_rule(routing_part, index, rule, resolver, index == len(rules) - 1)
+                _import_rule(routing_part, index, rule, resolver, index == len(rules) - 1, service_inbounds)
                 for index, rule in enumerate(rules)
             )
     if case_variant:

@@ -35,7 +35,7 @@ from keenvpn.domain.routing import (
 from keenvpn.domain.routing_policy import FinalRoutingRule, RoutingPolicy
 from keenvpn.domain.xray_config import (
     API_FIELDS, XRAY_TAIL_MARKER, RuleListValue, RuleTargetKind, XrayConfigSet, api_handler_tag,
-    decode_string_list, effective_api_section, has_case_variant,
+    candidate_document, decode_string_list, effective_api_section, has_case_variant,
 )
 from keenvpn.domain.xray_identifiers import (
     BALANCER_STRATEGIES, XRAY_RULE_CONDITION_FIELDS, safe_identifier, safe_strategy,
@@ -164,6 +164,8 @@ class ImportReason(StrEnum):
     """Тег определён более одного раза; ничего не выбирается по первому."""
     TARGET_API = "target_api"
     """Тег принадлежит обработчику API Xray: служебное назначение без действия VPN, DIRECT или BLOCK."""
+    OUTBOUND_PROTOCOL_INVALID = "outbound_protocol_invalid"
+    """Действующий outbound не задаёт протокол непустой строкой."""
     OUTBOUND_PROTOCOL_UNSUPPORTED = "outbound_protocol_unsupported"
     """Протокол outbound не сопоставлен с DIRECT, VPN или BLOCK."""
     OUTBOUND_CHAINED = "outbound_chained"
@@ -656,6 +658,7 @@ class _Outbound:
     tag: str | None
     action: RoutingAction | None
     reason: ImportReason | None = None
+    valid_protocol: bool = True
 
 
 def _chained(item: dict[str, object]) -> bool:
@@ -707,11 +710,14 @@ def _outbound_entries(value: object) -> tuple[list[_Outbound], bool, bool]:
         variant = variant or has_case_variant(item, _OUTBOUND_FIELDS)
         tag = item.get("tag", "")
         tag = tag if type(tag) is str else None
+        protocol = item.get("protocol")
+        valid_protocol = type(protocol) is str and bool(protocol)
         if _chained(item):
-            entries.append(_Outbound(tag, None, ImportReason.OUTBOUND_CHAINED))
+            entries.append(_Outbound(tag, None, ImportReason.OUTBOUND_CHAINED, valid_protocol))
             continue
-        action = _outbound_action(item.get("protocol"))
-        entries.append(_Outbound(tag, action, None if action is not None else ImportReason.OUTBOUND_PROTOCOL_UNSUPPORTED))
+        action = _outbound_action(protocol)
+        reason = None if action is not None else ImportReason.OUTBOUND_PROTOCOL_UNSUPPORTED
+        entries.append(_Outbound(tag, action, reason, valid_protocol))
     return entries, supported, variant
 
 
@@ -896,6 +902,24 @@ class _TargetResolver:
                 self._balancers.setdefault(tag, []).append(item)
             else:
                 self.balancers_supported = False
+
+    def declaration_reasons(self, outbounds: list[_Outbound]) -> tuple[ImportReason, ...]:
+        """Проверить действующие outbound и все балансировщики через то же разрешение тегов."""
+        reasons = []
+        for outbound in outbounds:
+            if not outbound.valid_protocol:
+                reasons.append(ImportReason.OUTBOUND_PROTOCOL_INVALID)
+            if outbound.tag is None:
+                reasons.append(ImportReason.TARGET_INVALID)
+            elif outbound.reason is not None:
+                reasons.append(outbound.reason)
+        if not outbounds:
+            reasons.append(ImportReason.OUTBOUNDS_UNSUPPORTED)
+        if any(len(entries) > 1 for entries in self._by_tag.values()):
+            reasons.append(ImportReason.TARGET_DUPLICATE)
+        for tag in self._balancers:
+            reasons.extend(self.resolve({"balancerTag": tag}).reasons)
+        return tuple(dict.fromkeys(reasons))
 
     def resolve(self, rule: dict[str, object]) -> RuleTarget:
         """Определить назначение по `outboundTag` и `balancerTag`, как их читает `parseFieldRule`."""
@@ -1164,9 +1188,28 @@ def import_routing_scheme(config: XrayConfigSet) -> RoutingScheme:
     не входит. Правило в тег API с другим inbound, тегом DNS или отсутствующим
     inbound может совпасть с трафиком клиентов: политика не собирается.
     """
+    scheme, _ = _import_routing(config, inspect_declarations=False)
+    return scheme
+
+
+def inspect_routing_declarations(config: XrayConfigSet) -> tuple[RoutingScheme, tuple[ImportReason, ...]]:
+    """Импортировать схему кандидата и проверить в том числе неиспользуемые назначения.
+
+    Из копии части исключаются известные необязательные поля со значением
+    null по правилам candidate_document. Обычный импорт читает исходное
+    представление полей документа.
+    """
+    return _import_routing(config, inspect_declarations=True)
+
+
+def _import_routing(
+    config: XrayConfigSet, *, inspect_declarations: bool,
+) -> tuple[RoutingScheme, tuple[ImportReason, ...]]:
     if type(config) is not XrayConfigSet:
         _raise_detached(RoutingImportErrorCode.CONFIG)
-    documents = [(part.name, part.export()) for part in config.parts]
+    documents = [
+        (part.name, candidate_document(part) if inspect_declarations else part.export()) for part in config.parts
+    ]
     outbounds, outbounds_supported, case_variant = _effective_outbounds(documents)
     case_variant = case_variant or any(has_case_variant(document, _DOCUMENT_FIELDS) for _name, document in documents)
     api_tag, api_variant = _api_handler(documents)
@@ -1186,12 +1229,13 @@ def import_routing_scheme(config: XrayConfigSet) -> RoutingScheme:
         case_variant = True
     groups: tuple[ImportedRuleGroup, ...] = ()
     rules_readable = False
+    resolver = _TargetResolver(outbounds, routing.get("balancers") if type(routing) is dict else None, api_tag)
+    declarations = resolver.declaration_reasons(outbounds) if inspect_declarations else ()
     if routing is None:
         reasons.append(ImportReason.ROUTING_MISSING)
     elif type(routing) is not dict:
         reasons.append(ImportReason.ROUTING_UNSUPPORTED)
     else:
-        resolver = _TargetResolver(outbounds, routing.get("balancers"), api_tag)
         if not resolver.balancers_supported:
             reasons.append(ImportReason.BALANCERS_UNSUPPORTED)
         case_variant = case_variant or resolver.case_variant
@@ -1221,7 +1265,7 @@ def import_routing_scheme(config: XrayConfigSet) -> RoutingScheme:
         # При вариантах регистра Xray мог выбрать другой раздел, outbound или поле: политика не собирается.
         rules = tuple(rule for group in groups[:-1] for rule in group.rules)
         policy = RoutingPolicy(rules, FinalRoutingRule(final.action))
-    return RoutingScheme(routing_part, tuple(routing_parts), groups, policy, tuple(reasons))
+    return RoutingScheme(routing_part, tuple(routing_parts), groups, policy, tuple(reasons)), declarations
 
 
 def balancer_fallbacks(config: XrayConfigSet) -> tuple[RuleTarget | None, ...] | None:

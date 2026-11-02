@@ -28,6 +28,7 @@
 | `DiscardDraft` | `DiscardDraftHandler` | Отменяет черновик с идентификатором и токеном ревизии из команды: удаляет только файл сессии по ревизии из чтения, ничего не применяя; другой черновик или токен — [конфликт](#конфликт-ревизий) без удаления; повторная отмена — успех `already_absent` после закрепления отсутствия на диске |
 | `InspectMenuExit` | `InspectMenuExitHandler` | Решает, можно ли [выйти из меню](cli-menu.md#выход-при-неприменённом-черновике) без вопроса: один раз читает [сессию черновика](draft-session.md); нет черновика — выход, есть черновик или хранилище не прочитано — вопрос «остаться или выйти, сохранив черновик», хранилище не подключено — выход с причиной `draft_store_not_connected`; ничего не записывает |
 | `CheckDraftBaseline` | `CheckDraftBaselineHandler` | Проверяет, не устарел ли черновик с идентификатором и токеном ревизии из команды: повторно читает все управляемые источники и сравнивает их с [исходными отпечатками](draft-session.md#исходные-отпечатки); изменившийся, исчезнувший, появившийся, незафиксированный или непрочитанный источник — [конфликт](#конфликт-ревизий) с записью по каждому источнику; ничего не записывает |
+| `CheckDraftCandidate` | `CheckDraftCandidateHandler` | Проверяет переданный в памяти кандидат на исходной ревизии черновика и возвращает результаты по Xray, порядку правил, геобазам и DNS. [Вход и результат](draft-session.md#предварительная-проверка-кандидата) |
 | `InspectRoutingRules` | `InspectRoutingRulesHandler` | Показывает [правила с названиями и идентификаторами](routing-import.md#названия-и-идентификаторы-правил) из метаданных менеджера поверх `ImportRoutingSchemeHandler.read()` и порта хранилища: привязка по семантическому ключу, позиции, признак и длина названия, причины отсутствия привязки; ничего не записывает |
 | `AssignRuleIdentifiers` | `AssignRuleIdentifiersHandler` | Присваивает идентификаторы правилам без записи в метаданных: генерирует их подставляемой фабрикой `uuid4`, дописывает записи без названия и записывает раздел `rules` один раз только при изменениях |
 | `ListRoutingRules` | `ListRoutingRulesHandler` | Показывает [группы правил для меню](routing-import.md#список-правил-для-меню) в фактическом порядке вместе с названиями и идентификаторами из метаданных, когда хранилище подключено и прочитано: отказ или отсутствие хранилища не отказывает списку, позиции назначений берутся из структурной сводки; ничего не записывает |
@@ -79,7 +80,7 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 | --- | --- |
 | `contract_version` | Версия формата команд и результатов, сейчас `1` (`CONTRACT_VERSION`) |
 | `operation_id` | Идентификатор вызова; по умолчанию случайная hex-строка |
-| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_connections`, `inspect_installation`, `inspect_status_summary`, `quick_check`, `import_routing_scheme`, `inspect_manager_metadata`, `import_storage_placement`, `inspect_draft`, `create_draft`, `discard_draft`, `check_draft_baseline`, `inspect_menu_exit`, `inspect_routing_rules`, `assign_rule_identifiers`, `list_routing_rules` или `list_keenetic_devices` |
+| `command` | Имя команды: `inspect_connection_link`, `inspect_connection_profile`, `inspect_profile_link`, `inspect_protocol_support`, `explain_route`, `resolve_keenetic_policy`, `inspect_keenetic_state`, `inspect_proxy_config`, `inspect_connections`, `inspect_installation`, `inspect_status_summary`, `quick_check`, `import_routing_scheme`, `inspect_manager_metadata`, `import_storage_placement`, `inspect_draft`, `create_draft`, `discard_draft`, `check_draft_baseline`, `check_draft_candidate`, `inspect_menu_exit`, `inspect_routing_rules`, `assign_rule_identifiers`, `list_routing_rules` или `list_keenetic_devices` |
 | `status` | `OperationStatus.SUCCEEDED` или `OperationStatus.FAILED` |
 | `data` | Безопасное представление при успехе, иначе `None` |
 | `error` | `ErrorDetail` при отказе, иначе `None` |
@@ -130,6 +131,7 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 | `open_view` | Откройте просмотр текущего состояния и сверьте его перед повторной попыткой; данные при этом не меняются. |
 | `preserve_file` | Не перезаписывайте и не удаляйте файл: сохраните его копию и проверьте вручную по документации. |
 | `update_interface` | Используйте интерфейс, совместимый с версией контракта установленного менеджера. |
+| `review_draft` | Исправьте отмеченные ошибки в черновике и повторите проверку. |
 | `recreate_draft` | Сверьте текущее состояние и создайте черновик заново: устаревший черновик не применяется, настройки роутера при этом не менялись. |
 
 Шаг категории: `invalid_request` — шага нет; `invalid_input` — `retry_input`;

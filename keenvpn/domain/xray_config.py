@@ -27,7 +27,7 @@ from typing import NoReturn
 from keenvpn.domain.config_document import ConfigDocument, validate_config_document
 from keenvpn.domain.routing import ConditionFamily
 from keenvpn.domain.xray_identifiers import (
-    known_condition_field, known_section, safe_domain_strategy, safe_identifier, safe_inbound_protocol,
+    XRAY_RULE_CONDITION_FIELDS, known_condition_field, known_section, safe_domain_strategy, safe_identifier, safe_inbound_protocol,
     safe_outbound_protocol, safe_rule_type, safe_selector, safe_strategy,
 )
 
@@ -55,6 +55,7 @@ _ENDPOINT_FIELDS = frozenset({"tag", "protocol"})
 _DNS_FIELDS = frozenset({"tag", "servers", "hosts"})
 _DNS_SERVER_FIELDS = frozenset({"tag", "domains", *_DNS_IP_LIST_KEYS})
 _ROUTING_FIELDS = frozenset({"domainStrategy", "rules", "balancers"})
+_NULLABLE_RULE_FIELDS = _RULE_SERVICE_KEYS | XRAY_RULE_CONDITION_FIELDS
 _RULE_READ_FIELDS = _RULE_SERVICE_KEYS | frozenset(_RULE_DOMAIN_LIST_KEYS) | frozenset(_RULE_IP_LIST_KEYS)
 _BALANCER_READ_FIELDS = frozenset({"tag", "selector", "fallbackTag", "strategy"})
 _STRATEGY_READ_FIELDS = frozenset({"type"})
@@ -630,6 +631,101 @@ def rule_list_values(parts: tuple[ConfigDocument, ...]) -> tuple[RuleListValue, 
     for part in parts:
         summary.add_part(part)
     return tuple(summary.rule_values)
+
+
+def _omit_null(item: dict[str, object], keys: Iterable[str]) -> None:
+    for key in keys:
+        if key in item and item[key] is None:
+            del item[key]
+
+
+def _object_entries(value: object) -> Iterator[dict[str, object]]:
+    if type(value) is list:
+        yield from (item for item in value if type(item) is dict)
+
+
+def candidate_document(part: ConfigDocument) -> dict[str, object]:
+    """Экспорт для проверки кандидата с семантикой null у необязательных полей Xray.
+
+    Меняется только экспортированная копия. Некорректные типы, элементы
+    списков и значения произвольных ключей dns.hosts остаются для проверки.
+    """
+    document = part.export()
+    dns = document.get("dns")
+    if type(dns) is dict:
+        _omit_null(dns, _DNS_FIELDS)
+        for server in _object_entries(dns.get("servers")):
+            _omit_null(server, _DNS_SERVER_FIELDS)
+    routing = document.get("routing")
+    if type(routing) is dict:
+        for rule in _object_entries(routing.get("rules")):
+            _omit_null(rule, _NULLABLE_RULE_FIELDS)
+    for outbound in _object_entries(document.get("outbounds")):
+        _omit_null(outbound, ("tag",))
+    return document
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class CandidateReferences:
+    """Исходные значения действующих ссылок и признаки ограничений для доверенного кода."""
+
+    values: tuple[RuleListValue, ...]
+    case_variant: bool
+    schema_invalid: bool
+    duplicate_inbound: bool
+    missing_inbound: bool
+
+
+def candidate_references(config: "XrayConfigSet") -> CandidateReferences:
+    """Читать ссылки только действующих routing и dns, сохраняя StringList и алиасы декодера.
+
+    Непустые теги inbound остаются доступными при замене определения с тем же
+    тегом. В первой части повтор сохраняется, в следующих определение заменяется.
+    Теги DNS действуют только из последнего раздела, отличного от null.
+    """
+    summary = _Summary()
+    inbound_names: set[str] = set()
+    invalid = duplicate = False
+    sections = {}
+    for index, part in enumerate(config.parts):
+        document = candidate_document(part)
+        summary.note_case_variants(document, frozenset({"routing", "dns", "inbounds", "api", "outbounds"}))
+        for key in ("routing", "dns", "api"):
+            if document.get(key) is not None:
+                sections[key] = (part.name, document[key])
+        inbounds = document.get("inbounds")
+        if inbounds is None:
+            continue
+        if type(inbounds) is not list:
+            invalid = True
+            continue
+        for inbound in inbounds:
+            if type(inbound) is not dict:
+                invalid = True
+                continue
+            summary.note_case_variants(inbound, _ENDPOINT_FIELDS)
+            tag = inbound.get("tag")
+            if tag is not None and type(tag) is not str:
+                invalid = True
+            elif tag:
+                duplicate |= index == 0 and tag in inbound_names
+                inbound_names.add(tag)
+    if "api" in sections:
+        name, api = sections["api"]
+        summary.add_api(name, api)
+        invalid |= type(api) is not dict or not api.get("tag")
+    if "dns" in sections:
+        summary.add_dns(*sections["dns"])
+    invalid |= bool(summary.unsupported)
+    if "routing" in sections:
+        summary.add_routing(*sections["routing"])
+        invalid |= any(".inboundTag" in item["path"] for item in summary.unsupported)
+
+    # Формы назначений и правила с null проверяет импорт. Здесь важны только
+    # собственные ссылки inbound и списки геоданных, которые читает сводка.
+    known = inbound_names.union(summary.dns_tags, summary.dns_server_tags)
+    missing = any(tag not in known for rule in summary.rules for tag in rule["inbound_tags"])
+    return CandidateReferences(tuple(summary.rule_values), summary.case_variant, invalid, duplicate, missing)
 
 
 def config_case_variants(parts: tuple[ConfigDocument, ...]) -> bool:

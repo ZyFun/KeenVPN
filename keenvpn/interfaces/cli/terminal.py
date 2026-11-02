@@ -6,7 +6,10 @@
 в том числе запросы поиска и введённые значения, не повторяются. Один цикл
 обслуживает все уровни: подменю, список, результаты поиска, карточку элемента
 и запрос значения. Запрос значения передаёт строку действию без разбора:
-проверку выполняет сценарий. Цвет и скрытый ввод здесь отсутствуют.
+проверку выполняет сценарий. Выход из корня и конец ввода сначала выполняют
+проверку выхода: она возвращает строки и признак вопроса «остаться или
+выйти, сохранив черновик», цикл только показывает их и читает ответ. Цвет
+и скрытый ввод здесь отсутствуют.
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -14,7 +17,7 @@ import re
 from typing import Protocol
 
 from keenvpn.interfaces.cli.menu import (
-    REASON_MESSAGES, CardLevel, InputLevel, ListLevel, MenuError, MenuList, MenuNavigator, SelectionKind,
+    REASON_MESSAGES, CardLevel, ExitNotice, InputLevel, ListLevel, MenuError, MenuList, MenuNavigator, SelectionKind,
     ValueRequest,
 )
 from keenvpn.interfaces.cli.search import MAX_QUERY_CHARS, MAX_QUERY_WORDS, is_number_like, parse_query
@@ -24,6 +27,8 @@ Action = Callable[[], list[str] | MenuList | ValueRequest]
 """Доступное действие пункта: возвращает строки для вывода, список элементов или запрос значения, ничего не печатает само."""
 Header = Callable[[], list[str]]
 """Шапка корня: возвращает строки под заголовком корневого меню, ничего не печатает сама."""
+ExitCheck = Callable[[], ExitNotice]
+"""Проверка выхода из корня и конца ввода: возвращает строки и признак вопроса, ничего не печатает сама."""
 
 UNAVAILABLE_MARK = "[недоступно]"
 """Пометка пункта, который показан, но не выполняется."""
@@ -41,6 +46,12 @@ EMPTY_LIST = "Список пуст."
 BACK_LABEL = "Назад"
 EXIT_LABEL = "Выход"
 EXIT_OK = 0
+STAY_LABEL = "Остаться в меню"
+LEAVE_LABEL = "Выйти, сохранив черновик"
+EXIT_DEFAULT = "Пустая строка — остаться."
+EXIT_HINT = "Введите 1, 2 или пустую строку."
+INPUT_ENDED = "Ввод завершён: черновик и настройки не изменены."
+"""Строка после вопроса о выходе, если ввод закончился: ответить уже некому, работа завершается."""
 
 MAX_INPUT_LENGTH = 1024
 """Предел строки ввода в символах без перевода строки; более длинная строка отбрасывается целиком."""
@@ -146,6 +157,11 @@ def render_input(navigator: MenuNavigator) -> list[str]:
     return [" / ".join(navigator.titles), *level.request.prompt, f"  0. {BACK_LABEL}"]
 
 
+def render_exit_question(notice: ExitNotice) -> list[str]:
+    """Собрать строки вопроса при выходе: строки проверки, варианты «остаться» и «выйти» и ответ по умолчанию."""
+    return [*notice.lines, f"  1. {STAY_LABEL}", f"  2. {LEAVE_LABEL}", EXIT_DEFAULT]
+
+
 def render_level(navigator: MenuNavigator, header: Sequence[str] = ()) -> list[str]:
     """Собрать строки открытого уровня любого вида; шапка показывается только в корневом меню."""
     level = navigator.current
@@ -183,6 +199,15 @@ def _flush(stream: TextOutput) -> None:
     flush = getattr(stream, "flush", None)
     if callable(flush):
         flush()
+
+
+def _exit_notice(check: ExitCheck | None) -> ExitNotice | None:
+    if check is None:
+        return None
+    notice = check()
+    if type(notice) is not ExitNotice:
+        raise MenuError("Проверка выхода возвращает ExitNotice.")
+    return notice
 
 
 def _menu_step(
@@ -261,9 +286,9 @@ def _input_step(navigator: MenuNavigator, line: str, root: _RootHeader) -> list[
 
 def run_menu(
     navigator: MenuNavigator, actions: Mapping[str, Action], stdin: TextInput, stdout: TextOutput,
-    header: Header | None = None,
+    header: Header | None = None, exit_check: ExitCheck | None = None,
 ) -> int:
-    """Выполнять цикл до `0` в корне или конца ввода; вернуть код завершения.
+    """Выполнять цикл до подтверждённого выхода или конца ввода; вернуть код завершения.
 
     В подменю нераспознанная строка, включая пустую, и неизвестный номер дают
     подсказку и повторный показ без смены состояния; недоступный пункт
@@ -274,23 +299,67 @@ def run_menu(
     любая другая строка передаётся действию и закрывает запрос. Строка длиннее
     предела отбрасывается на любом уровне. Шапка корня выполняется при старте и при
     каждом возврате в корень; повторный показ корня после подсказки или
-    действия в нём выводит те же строки без нового вызова. `KeyboardInterrupt`
-    не перехватывается: его обрабатывает точка входа.
+    действия в нём выводит те же строки без нового вызова.
+
+    `0` в корне и конец ввода выполняют проверку выхода, если она задана.
+    Без вопроса её строки показываются перед завершением. С вопросом `0`
+    показывает строки и варианты: `2` завершает работу, `1` и пустая строка
+    возвращают в корень с той же шапкой, другая строка даёт подсказку и
+    повтор вопроса, конец ввода завершает работу строкой `INPUT_ENDED`.
+    Конец ввода в меню вопроса не задаёт: показываются строки проверки и та
+    же строка. Код завершения во всех случаях `EXIT_OK`. `KeyboardInterrupt`
+    не перехватывается, в том числе во время вопроса: его обрабатывает точка входа.
     """
     def show(lines: list[str]) -> None:
         stdout.write("\n".join(lines) + "\n")
         _flush(stdout)
 
+    def ask() -> tuple[str | None, bool]:
+        stdout.write(PROMPT)
+        _flush(stdout)
+        return read_line(stdin)
+
+    def input_ended() -> int:
+        stdout.write("\n")
+        _flush(stdout)
+        notice = _exit_notice(exit_check)
+        if notice is not None:
+            lines = [*notice.lines, *((INPUT_ENDED,) if notice.confirm else ())]
+            if lines:
+                show(lines)
+        return EXIT_OK
+
+    def leave() -> bool:
+        """Выполнить проверку выхода и, если нужно, вопрос; True — работа завершается."""
+        notice = _exit_notice(exit_check)
+        if notice is None or not notice.confirm:
+            if notice is not None and notice.lines:
+                show(list(notice.lines))
+            return True
+        question = render_exit_question(notice)
+        show(["", *question])
+        while True:
+            line, too_long = ask()
+            if line is None:
+                stdout.write("\n")
+                show([INPUT_ENDED])
+                return True
+            if too_long:
+                show([LINE_TOO_LONG, "", *question])
+                continue
+            choice = parse_choice(line)
+            if not line.strip() or choice == 1:
+                return False
+            if choice == 2:
+                return True
+            show([EXIT_HINT, "", *question])
+
     root = _RootHeader(header)
     show(render_level(navigator, root.lines(navigator)))
     while True:
-        stdout.write(PROMPT)
-        _flush(stdout)
-        line, too_long = read_line(stdin)
+        line, too_long = ask()
         if line is None:
-            stdout.write("\n")
-            _flush(stdout)
-            return EXIT_OK
+            return input_ended()
         if too_long:
             show([LINE_TOO_LONG, "", *render_level(navigator, root.lines(navigator))])
             continue
@@ -304,6 +373,8 @@ def run_menu(
         else:
             lines = _menu_step(navigator, actions, line, root)
             if lines is None:
-                return EXIT_OK
+                if leave():
+                    return EXIT_OK
+                lines = ["", *render_level(navigator, root.lines(navigator))]
             show(lines)
         root.track(navigator)

@@ -245,6 +245,22 @@ class ValueRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ExitNotice:
+    """Что показать при выходе из корня: строки сценария и нужен ли вопрос «остаться или выйти».
+
+    Строки и признак вопроса готовит представление результата сценария;
+    цикл терминала только показывает их и читает ответ.
+    """
+
+    lines: tuple[str, ...]
+    confirm: bool
+
+    def __post_init__(self) -> None:
+        _require(_valid_lines(self.lines), "Строки выхода задаются tuple печатных строк.")
+        _require(type(self.confirm) is bool, "Признак вопроса при выходе задаётся bool.")
+
+
+@dataclass(frozen=True, slots=True)
 class InputLevel:
     """Открытый запрос значения: заголовок уровня — заголовок пункта, который его открыл."""
 

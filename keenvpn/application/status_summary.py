@@ -5,9 +5,9 @@
 и чтение одного не зависит от других: отказ или неподключённый источник дают
 «не проверено» только областям, которые от него зависят, а не отказ всей
 сводки и не исправность. Сетевых проб нет: доступность VPN и фактический путь
-DNS всегда «не проверено»; правила перехвата и черновики этой версией не
-читаются — «не поддерживается». Ничего не записывается, команды XKeen не
-вызываются. Успех описывает снимок на момент чтения и не подтверждает работу
+DNS всегда «не проверено»; правила перехвата этой версией не читаются — «не
+поддерживается». Черновик — наличие файла сессии в хранилище черновика, без
+проверки актуальности. Ничего не записывается, команды XKeen не вызываются. Успех описывает снимок на момент чтения и не подтверждает работу
 VPN, перехват трафика или маршрут клиента.
 """
 
@@ -25,8 +25,9 @@ from keenvpn.application.contract import (
     CONTRACT_VERSION, CheckStatus, ErrorDetail, OperationIdFactory, Result, check_contract_version, failed,
     invalid_command, new_operation_id, succeeded,
 )
+from keenvpn.application.draft_session import read_stored_draft
 from keenvpn.application.installation import read_xray_process
-from keenvpn.application.ports import XrayProcessSource
+from keenvpn.application.ports import DraftSessionStore, XrayProcessSource
 from keenvpn.application.proxy_config import InspectProxyConfigHandler, Port53View, ProxyConfigSource, XKeenFlagView
 from keenvpn.application.views import view_dict
 from keenvpn.domain.routing import RoutingAction
@@ -81,6 +82,10 @@ class AreaState(StrEnum):
     """kill-switch включён, fallback всех балансировщиков ведёт к блокировке."""
     DIRECT_FALLBACK = "direct_fallback"
     """kill-switch выключен, fallback всех балансировщиков ведёт к прямому выходу."""
+    PRESENT = "present"
+    """Есть неприменённый черновик; его актуальность не проверялась."""
+    ABSENT = "absent"
+    """Чтение хранилища подтвердило, что черновика нет."""
 
 
 AREA_STATES: Mapping[SummaryArea, frozenset[AreaState]] = MappingProxyType({
@@ -93,7 +98,7 @@ AREA_STATES: Mapping[SummaryArea, frozenset[AreaState]] = MappingProxyType({
     SummaryArea.DNS: frozenset({AreaState.EXCLUDED, AreaState.EXCLUDED_BY_RANGE, AreaState.NOT_EXCLUDED}),
     SummaryArea.AUTOSTART: frozenset({AreaState.ON, AreaState.OFF}),
     SummaryArea.FALLBACK: frozenset({AreaState.NO_DIRECT_FALLBACK, AreaState.DIRECT_FALLBACK}),
-    SummaryArea.DRAFT: frozenset(),
+    SummaryArea.DRAFT: frozenset({AreaState.PRESENT, AreaState.ABSENT}),
 })
 """Допустимые состояния каждой области. Таблица только для чтения."""
 
@@ -121,6 +126,8 @@ STATE_LABELS: Mapping[AreaState, str] = MappingProxyType({
     AreaState.OFF: "выключен",
     AreaState.NO_DIRECT_FALLBACK: "без прямого резерва",
     AreaState.DIRECT_FALLBACK: "прямой резерв разрешён",
+    AreaState.PRESENT: "есть неприменённый",
+    AreaState.ABSENT: "нет",
 })
 """Заранее заданная русская подпись каждого состояния; интерфейсы только показывают её. Таблица только для чтения."""
 
@@ -140,7 +147,7 @@ AUTOSTART_CHECK = "autostart_flag_unambiguous"
 FALLBACK_CHECK = "fallback_profile_consistent"
 """kill-switch и fallback балансировщиков образуют один из двух профилей резерва."""
 DRAFT_CHECK = "draft_present"
-"""Есть ли черновик изменений; сводка этой версии хранилище черновика не читает."""
+"""Есть ли неприменённый черновик изменений: прочитано хранилище черновика, актуальность не проверяется."""
 
 
 class SummaryReason(StrEnum):
@@ -151,7 +158,7 @@ class SummaryReason(StrEnum):
     INTERCEPTION_NOT_OBSERVED = "interception_not_observed"
     """Правила перехвата не читаются: перехват не выводится из процесса и файлов."""
     DRAFTS_NOT_IMPLEMENTED = "drafts_not_implemented"
-    """Сводка не читает хранилище черновика."""
+    """Прежняя причина области черновика; сводка её больше не выдаёт, значение сохранено для версии контракта 1."""
     FLAG_MISSING = "flag_missing"
     FLAG_DUPLICATE = "flag_duplicate"
     FLAG_UNEXPECTED = "flag_unexpected"
@@ -322,6 +329,7 @@ class StatusSummaryView:
 class SummaryReadings:
     """Ответы источников сводки за один проход: модель либо `ErrorDetail` на источник; `None` — не подключён.
 
+    `draft` — наличие черновика (`bool`) либо отказ хранилища черновика.
     Это данные для доверенного кода: модели содержат секреты конфигурации,
     поэтому `repr` их не показывает. Сводка и быстрая проверка читают источники
     этой функцией один раз и строят свои представления по одним и тем же ответам.
@@ -329,9 +337,13 @@ class SummaryReadings:
 
     proxy: Mapping[ProxyConfigSource, object] | None
     process: XrayProcessObservation | ErrorDetail | None
+    draft: bool | ErrorDetail | None = None
 
     def __repr__(self) -> str:
-        return f"SummaryReadings(proxy={self.proxy is not None}, process={self.process is not None})"
+        return (
+            f"SummaryReadings(proxy={self.proxy is not None}, process={self.process is not None}, "
+            f"draft={self.draft is not None})"
+        )
 
     def models(self, *sources: ProxyConfigSource) -> tuple[object, ...] | None:
         """Ответы источников конфигурации прокси в заданном порядке либо `None`, если обработчик не подключён."""
@@ -340,18 +352,26 @@ class SummaryReadings:
 
 def read_summary_sources(
     proxy: InspectProxyConfigHandler | None, processes: XrayProcessSource | None,
+    drafts: DraftSessionStore | None = None,
 ) -> SummaryReadings:
     """Прочитать источники сводки по одному разу в фиксированном порядке, не прерываясь на отказе.
 
     Порядок: части Xray, `xkeen.json`, параметры init, списки исключённых
     и перехватываемых портов через `read_source` обработчика конфигурации
-    прокси, затем наблюдение процесса через `read_xray_process`. Список
-    исключённых адресов, Keenetic и геобазы не читаются.
+    прокси, затем наблюдение процесса через `read_xray_process`, затем
+    хранилище черновика через `read_stored_draft`. Список исключённых
+    адресов, Keenetic и геобазы не читаются.
     """
     readings = None
     if proxy is not None:
         readings = MappingProxyType({source: proxy.read_source(source) for source in _PROXY_SOURCES})
-    return SummaryReadings(readings, None if processes is None else read_xray_process(processes))
+    process = None if processes is None else read_xray_process(processes)
+    return SummaryReadings(readings, process, None if drafts is None else _draft_presence(drafts))
+
+
+def _draft_presence(store: DraftSessionStore) -> bool | ErrorDetail:
+    stored = read_stored_draft(store)
+    return stored if isinstance(stored, ErrorDetail) else stored is not None
 
 
 def build_status_summary(readings: SummaryReadings) -> StatusSummaryView:
@@ -365,6 +385,7 @@ def build_status_summary(readings: SummaryReadings) -> StatusSummaryView:
     fallback, fallback_facts = _assemble(
         SummaryArea.FALLBACK, readings.models(ProxyConfigSource.XRAY, ProxyConfigSource.SETTINGS), _fallback,
     )
+    draft, _ = _assemble(SummaryArea.DRAFT, None if readings.draft is None else (readings.draft,), _draft)
     # Сводка пассивна: признак активной сетевой проверки всегда выключен, проб нет.
     return StatusSummaryView(False, (
         core,
@@ -373,7 +394,7 @@ def build_status_summary(readings: SummaryReadings) -> StatusSummaryView:
         dns,
         autostart,
         fallback,
-        _constant(SummaryArea.DRAFT, CheckStatus.UNSUPPORTED, SummaryReason.DRAFTS_NOT_IMPLEMENTED),
+        draft,
     ), port_53, fallback_facts)
 
 
@@ -382,9 +403,9 @@ class InspectStatusSummaryHandler:
 
     Порядок: части Xray, `xkeen.json`, параметры init, списки исключённых
     и перехватываемых портов через обработчик конфигурации прокси, затем
-    наблюдение процесса. Список исключённых адресов, Keenetic и геобазы не
-    читаются: ни одна область от них не зависит. `None` вместо обработчика или
-    источника — источник не подключён: его области «не проверено» с причиной
+    наблюдение процесса, затем хранилище черновика. Список исключённых
+    адресов, Keenetic и геобазы не читаются: ни одна область от них не
+    зависит. `None` вместо обработчика, источника или хранилища — источник не подключён: его области «не проверено» с причиной
     `source_not_connected`, сценарий его не вызывает. Отказ источника не
     прерывает чтение остальных и не делает сценарий неуспешным. Чтение
     и сборка — функции `read_summary_sources` и `build_status_summary`, общие
@@ -396,10 +417,12 @@ class InspectStatusSummaryHandler:
         proxy: InspectProxyConfigHandler | None,
         processes: XrayProcessSource | None,
         *,
+        drafts: DraftSessionStore | None = None,
         operation_ids: OperationIdFactory = new_operation_id,
     ) -> None:
         self._proxy = proxy
         self._processes = processes
+        self._drafts = drafts
         self._operation_ids = operation_ids
 
     def execute(self, command: InspectStatusSummary) -> Result[StatusSummaryView]:
@@ -411,7 +434,7 @@ class InspectStatusSummaryHandler:
         error = check_contract_version(command.contract_version)
         if error is not None:
             return failed(operation_id, name, error)
-        return succeeded(operation_id, name, build_status_summary(read_summary_sources(self._proxy, self._processes)))
+        return succeeded(operation_id, name, build_status_summary(read_summary_sources(self._proxy, self._processes, self._drafts)))
 
 
 _Built = tuple[SummaryAreaView, object]
@@ -431,6 +454,11 @@ def _assemble(area: SummaryArea, values: tuple[object, ...] | None, build: Calla
 def _constant(area: SummaryArea, status: CheckStatus, reason: SummaryReason) -> SummaryAreaView:
     check_code, network = _AREA_CHECKS[area]
     return SummaryAreaView(area, None, CheckView(check_code, status, network, reason.value))
+
+
+def _draft(present: bool) -> _Built:
+    state = AreaState.PRESENT if present else AreaState.ABSENT
+    return SummaryAreaView(SummaryArea.DRAFT, state, CheckView(DRAFT_CHECK, CheckStatus.PASSED, False, None)), None
 
 
 def _core(observation: XrayProcessObservation) -> _Built:

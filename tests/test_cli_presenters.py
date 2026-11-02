@@ -875,7 +875,7 @@ SUMMARY_HEADER = [
     "  DNS и порт 53: исключение 53 включено, не проверено",
     "  Автозапуск: включён",
     "  Режим резерва: без прямого резерва",
-    "  Черновик: не поддерживается",
+    "  Черновик: не проверено",
 ]
 
 
@@ -900,7 +900,7 @@ class StatusSummaryPresenterTests(PresenterAssertions):
         self.assertEqual(present_status_header(summary_view(connected=False))[1:], [
             "  Ядро Xray: не проверено", "  Перехват: не поддерживается", "  Доступность VPN: не проверено",
             "  DNS и порт 53: не проверено", "  Автозапуск: не проверено", "  Режим резерва: не проверено",
-            "  Черновик: не поддерживается",
+            "  Черновик: не проверено",
         ])
 
     def test_summary_shows_checks_facts_hint_and_disclaimer(self):
@@ -931,8 +931,8 @@ class StatusSummaryPresenterTests(PresenterAssertions):
             "  Проверка fallback_profile_consistent: успешно",
             "  kill-switch: present (on); балансировщиков: 1; цель fallback: прямой выход 0, блокировка 1, VPN 0, "
             "не определена 0, не задана 0",
-            "Черновик: не поддерживается",
-            "  Проверка draft_present: не поддерживается, причина drafts_not_implemented",
+            "Черновик: не проверено",
+            "  Проверка draft_present: не проверено, причина source_not_connected",
             "Это снимок источников на момент чтения: работу VPN, перехват трафика и маршрут клиента он не подтверждает.",
         ])
 

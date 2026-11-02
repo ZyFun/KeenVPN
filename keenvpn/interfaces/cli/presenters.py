@@ -28,6 +28,7 @@ from keenvpn.application.keenetic_devices import (
 )
 from keenvpn.application.keenetic_state import KeeneticSegmentView, KeeneticStateView
 from keenvpn.application.manager_metadata import ManagerMetadataStatusView
+from keenvpn.application.menu_exit import MenuExitDecision, MenuExitReason, MenuExitView
 from keenvpn.application.proxy_config import (
     Port53View, ProxyConfigView, XKeenFlagView, XKeenListView, XrayPositionView,
 )
@@ -47,7 +48,7 @@ from keenvpn.application.routing_rules import (
 from keenvpn.application.status_summary import (
     AREA_LABELS, PORT_53_HINT, STATE_LABELS, AreaState, FallbackView, StatusSummaryView, SummaryArea, SummaryAreaView,
 )
-from keenvpn.interfaces.cli.menu import MAX_ITEM_NUMBER, ListEntry, MenuList
+from keenvpn.interfaces.cli.menu import MAX_ITEM_NUMBER, ExitNotice, ListEntry, MenuList
 from keenvpn.interfaces.cli.terminal import UNAVAILABLE_MARK
 
 
@@ -87,6 +88,7 @@ _GEO_SOURCE = re.compile(
 _GEO_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
 """Версия геобазы: короткий идентификатор, как у домена."""
 _RULE_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_CREATED_AT = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2}:[0-9]{2}:[0-9]{2})Z")
 """Идентификатор правила: UUID 8-4-4-4-12 в нижнем регистре, как проверяет домен."""
 MAX_RULE_NAME_LENGTH = 64
 """Предел названия правила в символах: тот же, что у модели маршрутизации."""
@@ -1140,6 +1142,45 @@ def present_manager_metadata(view: ManagerMetadataStatusView) -> Lines:
         f"срок {identifier(limits.retention_state)} {optional_count(limits.retention_seconds)} с"
     )
     return lines
+
+
+DRAFT_NOT_CONNECTED = "Черновик не проверялся: хранилище черновика не подключено."
+DRAFT_NOT_CHECKED = "Не удалось проверить, есть ли неприменённый черновик."
+DRAFT_KEPT = "При выходе он сохранится без изменений; настройки роутера не меняются."
+DRAFT_KEPT_IF_PRESENT = "Если он есть, при выходе он сохранится без изменений; настройки роутера не меняются."
+
+
+def created_at(value: object) -> str:
+    """Время создания черновика `YYYY-MM-DDTHH:MM:SSZ` в виде `YYYY-MM-DD HH:MM:SS UTC`; иное — пометка."""
+    match = _CREATED_AT.fullmatch(value) if type(value) is str else None
+    return HIDDEN if match is None else f"{match[1]} {match[2]} UTC"
+
+
+def present_menu_exit(result: Result) -> ExitNotice:
+    """Строки и признак вопроса при выходе по решению сценария выхода.
+
+    Вопрос задаётся, если его требует решение сценария; причина выбирает
+    заранее заданные строки. Отказ сценария показывается как отказ чтения:
+    вопрос задаётся, а не выход, будто черновика нет. Идентификатор
+    и токен черновика сценарий не возвращает, путей в строках нет.
+    """
+    if type(result) is not Result:
+        raise TypeError("Ожидается Result сценария.")
+    if not result.succeeded:
+        return ExitNotice((DRAFT_NOT_CHECKED, *present_error(result.error), DRAFT_KEPT_IF_PRESENT), True)
+    view = result.data
+    if type(view) is not MenuExitView:
+        raise TypeError("Ожидается MenuExitView.")
+    confirm = view.decision is MenuExitDecision.CONFIRM
+    if view.reason is MenuExitReason.DRAFT_PRESENT:
+        lines = (f"Черновик изменений создан {created_at(view.draft_created_at)} и не применён.", DRAFT_KEPT)
+    elif view.reason is MenuExitReason.DRAFT_NOT_CHECKED:
+        lines = (DRAFT_NOT_CHECKED, *present_error(view.store_error), DRAFT_KEPT_IF_PRESENT)
+    elif view.reason is MenuExitReason.DRAFT_STORE_NOT_CONNECTED:
+        lines = (DRAFT_NOT_CONNECTED,)
+    else:
+        lines = ()
+    return ExitNotice(lines, confirm)
 
 
 def present_about() -> Lines:

@@ -313,11 +313,10 @@ _DOMAIN_REASONS = {code.value: code.value for code in DraftSessionErrorCode}
 
 def _reason(failure: DraftStoreFailure, value: object) -> str | None:
     """Передать причину только из известного набора; иначе строка хранилища не выводится."""
-    if type(value) in (StoreReason, DraftSessionErrorCode):
-        value = value.value
-    if type(value) is not str:
-        return None
-    return (_DOMAIN_REASONS if failure is DraftStoreFailure.INVALID else _STORE_REASONS).get(value)
+    if type(value) is str:
+        return (_DOMAIN_REASONS if failure is DraftStoreFailure.INVALID else _STORE_REASONS).get(value)
+    reasons = DraftSessionErrorCode if failure is DraftStoreFailure.INVALID else StoreReason
+    return next((known.value for known in reasons if value is known), None)
 
 
 def store_error_detail(error: Exception, expected: ConflictState | None = None) -> ErrorDetail:
@@ -333,7 +332,7 @@ def store_error_detail(error: Exception, expected: ConflictState | None = None) 
     if type(error) is not DraftSessionStoreError:
         return _STORE_FAILED
     failure = getattr(error, "failure", None)
-    if type(failure) is not DraftStoreFailure:
+    if not any(failure is known for known in DraftStoreFailure):
         return _STORE_FAILED
     category, message = _STORE_FAILURES[failure]
     conflicts = ()
@@ -383,6 +382,17 @@ def read_stored_draft(store: DraftSessionStore) -> StoredDraftSession | None | E
     return stored if valid else INVALID_STORE_RESULT
 
 
+def read_expected_draft(store: DraftSessionStore, draft_id: str, expected_revision: str) -> StoredDraftSession | ErrorDetail:
+    """Прочитать сессию и сверить её с уже проверенными полями команды."""
+    stored = read_stored_draft(store)
+    if isinstance(stored, ErrorDetail):
+        return stored
+    if stored is None:
+        return DRAFT_GONE
+    error = check_expected_draft(stored, draft_id, expected_revision)
+    return stored if error is None else error
+
+
 def check_draft_current(
     store: DraftSessionStore, fingerprints: SourceFingerprintSource, draft_id: object, expected_revision: object,
 ) -> StoredDraftSession | ErrorDetail:
@@ -403,14 +413,9 @@ def check_draft_current(
     if not valid_expected_draft(draft_id, expected_revision):
         # Идентификатор и токен берутся из представления черновика, а не вводятся пользователем.
         return invalid_command()
-    stored = read_stored_draft(store)
+    stored = read_expected_draft(store, draft_id, expected_revision)
     if isinstance(stored, ErrorDetail):
         return stored
-    if stored is None:
-        return DRAFT_GONE
-    error = check_expected_draft(stored, draft_id, expected_revision)
-    if error is not None:
-        return error
     error = compare_baseline(fingerprints, stored.session.baseline)
     again = read_stored_draft(store)
     if isinstance(again, ErrorDetail):

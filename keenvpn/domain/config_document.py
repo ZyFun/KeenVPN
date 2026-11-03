@@ -229,7 +229,8 @@ class ConfigDocument:
 
 def validate_config_document(document: ConfigDocument) -> None:
     """Проверить готовую модель заново: тип, байты, хеш и соответствие снимка содержимому."""
-    if type(document) is not ConfigDocument:
+    if (type(document) is not ConfigDocument or type(document.sha256) is not str
+            or type(document._snapshot) is not str):
         _raise_detached(ConfigDocumentErrorCode.DOCUMENT)
     rebuilt = ConfigDocument(document.name, document.content)
     if rebuilt.sha256 != document.sha256 or rebuilt._snapshot != document._snapshot:

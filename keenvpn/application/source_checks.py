@@ -25,7 +25,7 @@ class SourceCheck:
 
     `code` — код отказа `invalid_source_data` для этого источника, `model_type`
     — точный ожидаемый тип, `validate` — доменная повторная проверка модели,
-    `domain_errors` — ошибки домена, чей код передаётся в `reason`.
+    `domain_errors` — ошибки домена, `reason_codes` — их допустимые причины.
     `type_message` описывает ответ неподдерживаемого формата, `data_message`
     — модель, не прошедшую повторную проверку.
     """
@@ -36,17 +36,14 @@ class SourceCheck:
     type_message: str
     data_message: str
     domain_errors: tuple[type[Exception], ...]
-    reason_type: type[StrEnum] | None = None
+    reason_codes: tuple[StrEnum, ...] = ()
 
     def domain_failure(self, error: Exception) -> ErrorDetail:
-        """При заданном типе кода отклонить подменённые исключение и перечисление."""
+        """Передать только зарегистрированную причину из описания доверенного источника."""
         reason = None
         if any(type(error) is known for known in self.domain_errors):
             code = getattr(error, "code", None)
-            if self.reason_type is None:
-                reason = code.value
-            else:
-                reason = next((known.value for known in self.reason_type if code is known), None)
+            reason = next((known.value for known in self.reason_codes if code is known), None)
         return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, self.code, self.data_message, reason=reason)
 
     def __post_init__(self) -> None:
@@ -56,6 +53,8 @@ class SourceCheck:
             or not callable(self.validate)
             or not isinstance(self.type_message, str) or not self.type_message
             or not isinstance(self.data_message, str) or not self.data_message
+            or type(self.reason_codes) is not tuple
+            or any(not isinstance(item, StrEnum) for item in self.reason_codes)
             or type(self.domain_errors) is not tuple or not self.domain_errors
             or any(not (isinstance(item, type) and issubclass(item, Exception)) for item in self.domain_errors)
         ):

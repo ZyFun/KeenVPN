@@ -34,7 +34,7 @@ from keenvpn.domain.routing import (
 )
 from keenvpn.domain.routing_policy import FinalRoutingRule, RoutingPolicy
 from keenvpn.domain.xray_config import (
-    API_FIELDS, XRAY_TAIL_MARKER, RuleListValue, RuleTargetKind, XrayConfigSet, api_handler_tag,
+    API_FIELDS, RuleListValue, RuleTargetKind, XrayConfigSet, api_handler_tag, is_xray_tail_part,
     candidate_document, decode_string_list, effective_api_section, has_case_variant,
 )
 from keenvpn.domain.xray_identifiers import (
@@ -755,7 +755,7 @@ def _effective_outbounds(documents: list[tuple[str, dict[str, object]]]) -> tupl
             continue
         if not entries:
             continue
-        tail = XRAY_TAIL_MARKER in name.lower()
+        tail = is_xray_tail_part(name)
         prepends: list[list[_Outbound]] = []
         for entry in entries:
             cell = first.get(entry.tag) if entry.tag is not None else None

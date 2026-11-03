@@ -37,11 +37,9 @@ def _copy_parts(value: XrayConfigSet) -> dict[str, bytes]:
     for part in value.parts:
         if type(part) is not ConfigDocument or not valid_part_name(part.name) or part.name in parts:
             raise ValueError("Некорректный набор частей.")
-        if type(part.sha256) is not str or type(part._snapshot) is not str:
-            raise ValueError("Некорректный документ части.")
         validate_config_document(part)
         parts[part.name] = part.content
-    return dict(sorted(parts.items()))
+    return parts
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -55,12 +53,12 @@ class PreparedSnapshot:
         if payload is None:
             return SourceFingerprint(source, FingerprintState.ABSENT)
         if source is BaselineSource.XRAY_CONFIGS:
-            parts = tuple((name, hashlib.sha256(content).hexdigest()) for name, content in payload.items())
+            parts = tuple((name, hashlib.sha256(content).hexdigest()) for name, content in sorted(payload.items()))
             return SourceFingerprint(source, FingerprintState.PRESENT, parts=parts)
         return SourceFingerprint(source, FingerprintState.PRESENT, sha256=hashlib.sha256(payload).hexdigest())
 
 
-def prepare_snapshot(snapshot: DraftDiffSnapshot) -> PreparedSnapshot | None:
+def prepare_snapshot(snapshot: DraftDiffSnapshot, *, require_sorted_parts: bool = False) -> PreparedSnapshot | None:
     """Повторно проверить вход и отделить содержимое от переданных изменяемых моделей."""
     if type(snapshot) is not DraftDiffSnapshot:
         return None
@@ -72,6 +70,8 @@ def prepare_snapshot(snapshot: DraftDiffSnapshot) -> PreparedSnapshot | None:
                 payload = None
             elif source is BaselineSource.XRAY_CONFIGS:
                 payload = _copy_parts(value)
+                if require_sorted_parts and list(payload) != sorted(payload):
+                    return None
             elif source is BaselineSource.KEENETIC_POLICIES:
                 payload = canonical_native_bytes(value)
             elif source is BaselineSource.KEENETIC_HOTSPOT_SETTINGS:

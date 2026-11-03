@@ -245,6 +245,24 @@ class InspectInstallationTests(unittest.TestCase):
                 self.assert_failed(result, ErrorCategory.INVALID_SOURCE_DATA, INVALID_CODES[name], error.code.value)
                 self.assertEqual(sources.calls, calls_after_failure(SOURCES.index(name)))
 
+    def test_geodata_and_process_reject_damaged_and_cross_source_reasons(self):
+        damaged = XrayProcessError(XrayProcessErrorCode.OBSERVATION)
+        damaged.code = None
+        for name, error in (
+            ("process", damaged),
+            ("process", GeoDataError(GeoDataErrorCode.INVENTORY)),
+            ("geodata", XrayProcessError(XrayProcessErrorCode.OBSERVATION)),
+        ):
+            with self.subTest(source=name, error_type=type(error)):
+                error.args = ("TEST_private_detail",)
+                error.__cause__ = OSError("TEST_private_cause")
+                sources = snapshot_installation_sources()
+                configure(sources, name, error)
+                result = handler_for(sources).execute(InspectInstallation())
+                self.assert_failed(result, ErrorCategory.INVALID_SOURCE_DATA, INVALID_CODES[name])
+                self.assertNotIn("TEST_", repr(result.to_dict()))
+                self.assertEqual(sources.calls, calls_after_failure(SOURCES.index(name)))
+
     def test_router_read_failure_reason_is_kept_for_geodata_and_process(self):
         for name in ("geodata", "process"):
             for failure in RouterReadFailure:

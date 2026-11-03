@@ -29,7 +29,7 @@ BASELINE_UNAVAILABLE = unavailable(
 BASELINE_CHECK = SourceCheck(
     "invalid_draft_baseline_source", SourceFingerprint, validate_source_fingerprint,
     "Источник исходных отпечатков вернул ответ в неподдерживаемом формате.",
-    "Источник исходных отпечатков вернул некорректный отпечаток.", (SourceBaselineError,), SourceBaselineErrorCode,
+    "Источник исходных отпечатков вернул некорректный отпечаток.", (SourceBaselineError,), tuple(SourceBaselineErrorCode),
 )
 """Проверка ответа источника отпечатков; повторная проверка ловит данные, изменённые после создания модели."""
 BASELINE_CHANGED = ErrorDetail(

@@ -494,6 +494,9 @@ class CheckOutcomeTests(unittest.TestCase):
             ("tail marker is case-insensitive", xray_config(more_parts=(
                 ("09_TAIL.json", {"outbounds": [{"tag": "x-out", "protocol": "freedom"}, {"tag": "x-out", "protocol": "freedom"}]}),
             )), ("unsupported", "tags_repeated_across_parts")),
+            ("Метка tail учитывает простое приведение İ к i", xray_config(more_parts=(
+                ("09_TAİL.json", {"outbounds": [{"tag": "x-out", "protocol": "freedom"}, {"tag": "x-out", "protocol": "freedom"}]}),
+            )), ("unsupported", "tags_repeated_across_parts")),
             ("new inbound repeated inside a later part", xray_config(more_parts=(
                 ("05_override.json", {"inbounds": [{"tag": "x-in", "protocol": "tunnel"}, {"tag": "x-in", "protocol": "tunnel"}]}),
             )), ("unsupported", "tags_repeated_across_parts")),

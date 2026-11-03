@@ -13,12 +13,12 @@ from keenvpn.application.ports import (
 )
 from keenvpn.application.source_checks import SourceCheck, read_source_checked
 from keenvpn.application.views import view_dict, view_fields
-from keenvpn.domain.keenetic_device import KeeneticDeviceError
+from keenvpn.domain.keenetic_device import KeeneticDeviceError, KeeneticDeviceErrorCode
 from keenvpn.domain.keenetic_native import (
-    KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticNativeError, KeeneticNativeState, KeeneticRegistrations,
+    KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticNativeError, KeeneticNativeErrorCode, KeeneticNativeState, KeeneticRegistrations,
     assemble_keenetic_state, validate_hotspot_runtime, validate_hotspot_settings, validate_registrations,
 )
-from keenvpn.domain.keenetic_policy import KeeneticPolicyError
+from keenvpn.domain.keenetic_policy import KeeneticPolicyError, KeeneticPolicyErrorCode
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -133,6 +133,7 @@ class KeeneticStateView:
 
 
 _DOMAIN_ERRORS = (KeeneticNativeError, KeeneticDeviceError, KeeneticPolicyError)
+_REASON_CODES = (*KeeneticNativeErrorCode, *KeeneticDeviceErrorCode, *KeeneticPolicyErrorCode)
 _UNAVAILABLE = {
     "hotspot": ("keenetic_hotspot_unavailable", "Не удалось прочитать настройки hotspot Keenetic."),
     "registrations": ("keenetic_registrations_unavailable", "Не удалось прочитать реестр регистраций Keenetic."),
@@ -142,17 +143,17 @@ _CHECKS = {
     "hotspot": SourceCheck(
         "invalid_keenetic_hotspot", KeeneticHotspotSettings, validate_hotspot_settings,
         "Источник вернул настройки hotspot Keenetic в неподдерживаемом формате.",
-        "Источник вернул некорректные настройки hotspot Keenetic.", _DOMAIN_ERRORS,
+        "Источник вернул некорректные настройки hotspot Keenetic.", _DOMAIN_ERRORS, _REASON_CODES,
     ),
     "registrations": SourceCheck(
         "invalid_keenetic_registrations", KeeneticRegistrations, validate_registrations,
         "Источник вернул реестр регистраций Keenetic в неподдерживаемом формате.",
-        "Источник вернул некорректный реестр регистраций Keenetic.", _DOMAIN_ERRORS,
+        "Источник вернул некорректный реестр регистраций Keenetic.", _DOMAIN_ERRORS, _REASON_CODES,
     ),
     "runtime": SourceCheck(
         "invalid_keenetic_runtime", KeeneticHotspotRuntime, validate_hotspot_runtime,
         "Источник вернул наблюдаемое состояние Keenetic в неподдерживаемом формате.",
-        "Источник вернул некорректное наблюдаемое состояние Keenetic.", _DOMAIN_ERRORS,
+        "Источник вернул некорректное наблюдаемое состояние Keenetic.", _DOMAIN_ERRORS, _REASON_CODES,
     ),
 }
 

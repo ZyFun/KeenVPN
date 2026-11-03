@@ -22,8 +22,8 @@ from keenvpn.domain.xkeen_config import (
     XKeenFlagStatus, XKeenInitParameters, XKeenList, XKeenListItemKind, port_53_facts,
 )
 from keenvpn.domain.xray_config import (
-    XRAY_TAIL_MARKER, RuleTargetKind, TagRepeat, TagRepeats, XrayConfigSet, api_handler_conflict,
-    config_case_variants, summarize_xray_config, tag_repeats,
+    RuleTargetKind, TagRepeat, TagRepeats, XrayConfigSet, api_handler_conflict,
+    config_case_variants, is_xray_tail_part, summarize_xray_config, tag_repeats,
 )
 from keenvpn.domain.xray_process import XrayProcessObservation
 
@@ -293,7 +293,7 @@ def _unmerged_repeats(
     Повтор inbound и outbound сохраняется, если тег повторён в самой ранней
     своей части, где он ещё новый: inbound — только в первой части
     (последующие добавляют новый inbound сразу, и повтор его заменяет);
-    outbound — в первой части или в части без `XRAY_TAIL_MARKER` в имени,
+    outbound — в первой части или в части без метки `tail` в имени,
     которая откладывает новые outbound и ставит в начало все сразу.
     Сохранённый повтор последующие части уже не схлопывают: они заменяют
     только первую запись с тегом. Это то же правило, по которому импорт правил
@@ -312,7 +312,7 @@ def _unmerged_repeats(
         if item.section == "inbounds":
             return earliest == first
         if item.section == "outbounds":
-            return earliest == first or XRAY_TAIL_MARKER not in earliest.lower()
+            return earliest == first or not is_xray_tail_part(earliest)
         return sole_routing
 
     return tuple(item for item in repeats.within_parts if preserved(item))

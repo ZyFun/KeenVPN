@@ -135,7 +135,7 @@ def valid_json_tree(value: object, depth: int = 0) -> bool:
     """
     if depth > MAX_JSON_DEPTH:
         return False
-    if value is None or type(value) in (str, int, bool):
+    if value is None or type(value) is str or type(value) is int or type(value) is bool:
         return True
     if type(value) is float:
         return math.isfinite(value)

@@ -109,8 +109,8 @@ def valid_part_name(value: object) -> bool:
     return valid_document_name(value) and value.endswith(XRAY_PART_SUFFIX)
 
 
-def native_fingerprint(document: object) -> str:
-    """SHA-256 канонического JSON объекта native-настроек.
+def canonical_native_bytes(document: object) -> bytes:
+    """Приватный снимок полного объекта native-настроек в формате исходных отпечатков.
 
     Ключи объектов сортируются, массивы сохраняют исходный порядок: порядок
     разрешённых подключений значим. `true` и `1`, строка и число различаются.
@@ -125,7 +125,12 @@ def native_fingerprint(document: object) -> str:
         pass
     if text is None:
         _fail(SourceBaselineErrorCode.NATIVE)
-    return hashlib.sha256(text.encode("ascii")).hexdigest()
+    return text.encode("ascii")
+
+
+def native_fingerprint(document: object) -> str:
+    """SHA-256 канонического JSON всего объекта, включая неизвестные поля."""
+    return hashlib.sha256(canonical_native_bytes(document)).hexdigest()
 
 
 def _check_parts(parts: object) -> None:
@@ -157,9 +162,9 @@ class SourceFingerprint:
     parts: tuple[tuple[str, str], ...] | None = None
 
     def __post_init__(self) -> None:
-        if type(self.source) is not BaselineSource:
+        if not any(self.source is known for known in BaselineSource):
             _fail(SourceBaselineErrorCode.SOURCE)
-        if type(self.state) is not FingerprintState:
+        if self.state is not FingerprintState.ABSENT and self.state is not FingerprintState.PRESENT:
             _fail(SourceBaselineErrorCode.STATE)
         if self.state is FingerprintState.ABSENT:
             if self.sha256 is not None or self.parts is not None:

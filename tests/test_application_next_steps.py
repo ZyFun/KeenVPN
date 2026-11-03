@@ -162,6 +162,9 @@ LITERAL_PAIRS = sorted({
     ("source_failed", "draft_baseline_unavailable"),
     ("invalid_source_data", "invalid_draft_baseline_source"),
     ("source_failed", "draft_baseline_changed"),
+    ("invalid_source_data", "invalid_diff_snapshot"),
+    ("invalid_source_data", "diff_original_mismatch"),
+    ("unsupported", "diff_entry_limit"),
 })
 """Пары «категория, код», которые сценарии задают литералами; снимок неизменности кодов и категорий."""
 

@@ -8,6 +8,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 
 from keenvpn.application.contract import ErrorCategory, ErrorDetail
 from keenvpn.application.ports import RouterReadError, RouterReadFailure
@@ -35,6 +36,18 @@ class SourceCheck:
     type_message: str
     data_message: str
     domain_errors: tuple[type[Exception], ...]
+    reason_type: type[StrEnum] | None = None
+
+    def domain_failure(self, error: Exception) -> ErrorDetail:
+        """При заданном типе кода отклонить подменённые исключение и перечисление."""
+        reason = None
+        if any(type(error) is known for known in self.domain_errors):
+            code = getattr(error, "code", None)
+            if self.reason_type is None:
+                reason = code.value
+            else:
+                reason = next((known.value for known in self.reason_type if code is known), None)
+        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, self.code, self.data_message, reason=reason)
 
     def __post_init__(self) -> None:
         if (
@@ -61,7 +74,7 @@ def check_source_model(check: SourceCheck, value: object) -> ErrorDetail | None:
     try:
         check.validate(value)
     except check.domain_errors as error:
-        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, check.code, check.data_message, reason=error.code.value)
+        return check.domain_failure(error)
     except Exception:
         return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, check.code, check.type_message)
     return None
@@ -79,10 +92,10 @@ def read_source_checked(check: SourceCheck, read: Callable[[], object], code: st
     try:
         value = read()
     except RouterReadError as error:
-        failure = error.failure
-        return unavailable(code, message, reason=failure.value if type(failure) is RouterReadFailure else None)
+        failure = getattr(error, "failure", None) if type(error) is RouterReadError else None
+        return unavailable(code, message, reason=next((item.value for item in RouterReadFailure if failure is item), None))
     except check.domain_errors as error:
-        return ErrorDetail(ErrorCategory.INVALID_SOURCE_DATA, check.code, check.data_message, reason=error.code.value)
+        return check.domain_failure(error)
     except Exception:
         return unavailable(code, message)
     error = check_source_model(check, value)

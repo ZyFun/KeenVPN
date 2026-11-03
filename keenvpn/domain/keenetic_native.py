@@ -234,14 +234,15 @@ class KeeneticHotspotSettings:
 
 def validate_hotspot_settings(settings: KeeneticHotspotSettings) -> None:
     """Проверить готовую модель заново, включая данные, изменённые после создания."""
-    if type(settings) is not KeeneticHotspotSettings:
+    if type(settings) is not KeeneticHotspotSettings or type(settings._snapshot) is not str:
         _raise_detached(KeeneticNativeErrorCode.HOTSPOT_SETTINGS)
     rebuilt = KeeneticHotspotSettings(settings.export())
     if (
-        type(settings.segment_assignments) is not tuple
-        or any(type(item) is not KeeneticSegmentAssignment for item in settings.segment_assignments)
-        or [_canonical(item.export()) for item in rebuilt.segment_assignments]
-        != [_canonical(item.export()) for item in settings.segment_assignments]
+        rebuilt._snapshot != settings._snapshot or type(settings.segment_assignments) is not tuple
+        or any(type(item) is not KeeneticSegmentAssignment or type(item._snapshot) is not str
+               for item in settings.segment_assignments)
+        or tuple(item._snapshot for item in rebuilt.segment_assignments)
+        != tuple(item._snapshot for item in settings.segment_assignments)
     ):
         _raise_detached(KeeneticNativeErrorCode.HOTSPOT_SETTINGS)
 

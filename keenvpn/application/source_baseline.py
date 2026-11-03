@@ -17,7 +17,7 @@ from keenvpn.application.contract import Conflict, ConflictState, ConflictSubjec
 from keenvpn.application.ports import SourceFingerprintSource
 from keenvpn.application.source_checks import SourceCheck, read_source_checked, unavailable
 from keenvpn.domain.source_baseline import (
-    BaselineSource, FingerprintState, SourceBaseline, SourceBaselineError, SourceFingerprint, same_fingerprint,
+    BaselineSource, FingerprintState, SourceBaseline, SourceBaselineError, SourceBaselineErrorCode, SourceFingerprint, same_fingerprint,
     validate_source_fingerprint,
 )
 
@@ -29,7 +29,7 @@ BASELINE_UNAVAILABLE = unavailable(
 BASELINE_CHECK = SourceCheck(
     "invalid_draft_baseline_source", SourceFingerprint, validate_source_fingerprint,
     "Источник исходных отпечатков вернул ответ в неподдерживаемом формате.",
-    "Источник исходных отпечатков вернул некорректный отпечаток.", (SourceBaselineError,),
+    "Источник исходных отпечатков вернул некорректный отпечаток.", (SourceBaselineError,), SourceBaselineErrorCode,
 )
 """Проверка ответа источника отпечатков; повторная проверка ловит данные, изменённые после создания модели."""
 BASELINE_CHANGED = ErrorDetail(

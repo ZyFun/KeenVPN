@@ -86,6 +86,7 @@ EXPECTED_STORE_STEPS = {
 LITERAL_PAIRS = sorted({
     ("invalid_request", "invalid_command"),
     ("invalid_request", "unsupported_contract_version"),
+    ("source_failed", "xray_test_unavailable"),
     ("source_failed", "connection_parser_failed"),
     ("invalid_source_data", "invalid_connection_model"),
     ("invalid_source_data", "invalid_parser_rejection"),

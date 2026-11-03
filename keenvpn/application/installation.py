@@ -27,9 +27,11 @@ from keenvpn.application.proxy_config import InspectProxyConfigHandler, ProxyCon
 from keenvpn.application.source_checks import SourceCheck, read_source_checked
 from keenvpn.application.views import view_dict, view_fields
 from keenvpn.domain.geodata import (
-    GeoDatabaseInventory, GeoDataError, GeoDataState, assemble_geodata_state, validate_geo_inventory,
+    GeoDatabaseInventory, GeoDataError, GeoDataErrorCode, GeoDataState, assemble_geodata_state, validate_geo_inventory,
 )
-from keenvpn.domain.xray_process import XrayProcessError, XrayProcessObservation, validate_xray_process_observation
+from keenvpn.domain.xray_process import (
+    XrayProcessError, XrayProcessErrorCode, XrayProcessObservation, validate_xray_process_observation,
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -189,12 +191,12 @@ _CHECKS = {
     "geodata": SourceCheck(
         "invalid_geo_databases", GeoDatabaseInventory, validate_geo_inventory,
         "Источник вернул инвентарь геобаз в неподдерживаемом формате.",
-        "Источник вернул некорректный инвентарь геобаз.", _DOMAIN_ERRORS,
+        "Источник вернул некорректный инвентарь геобаз.", _DOMAIN_ERRORS, tuple(GeoDataErrorCode),
     ),
     "process": SourceCheck(
         "invalid_xray_process", XrayProcessObservation, validate_xray_process_observation,
         "Источник вернул наблюдение процесса Xray в неподдерживаемом формате.",
-        "Источник вернул некорректное наблюдение процесса Xray.", _DOMAIN_ERRORS,
+        "Источник вернул некорректное наблюдение процесса Xray.", _DOMAIN_ERRORS, tuple(XrayProcessErrorCode),
     ),
 }
 

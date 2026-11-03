@@ -12,12 +12,12 @@ from keenvpn.application.contract import (
 from keenvpn.application.ports import XKeenInitSource, XKeenListSource, XKeenSettingsSource, XrayConfigSource
 from keenvpn.application.source_checks import SourceCheck, read_source_checked
 from keenvpn.application.views import view_dict, view_fields
-from keenvpn.domain.config_document import ConfigDocumentError
+from keenvpn.domain.config_document import ConfigDocumentError, ConfigDocumentErrorCode
 from keenvpn.domain.xkeen_config import (
-    Port53Facts, XKeenConfig, XKeenConfigError, XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings,
+    Port53Facts, XKeenConfig, XKeenConfigError, XKeenConfigErrorCode, XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings,
     assemble_xkeen_config, validate_xkeen_init, validate_xkeen_list, validate_xkeen_settings,
 )
-from keenvpn.domain.xray_config import XrayConfigError, XrayConfigSet, validate_xray_config_set
+from keenvpn.domain.xray_config import XrayConfigError, XrayConfigErrorCode, XrayConfigSet, validate_xray_config_set
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -469,6 +469,7 @@ _LIST_FIELDS = {
 }
 _LIST_NAME = {field_name: name for name, field_name in _LIST_FIELDS.items()}
 _DOMAIN_ERRORS = (XrayConfigError, XKeenConfigError, ConfigDocumentError)
+_REASON_CODES = (*XrayConfigErrorCode, *XKeenConfigErrorCode, *ConfigDocumentErrorCode)
 _UNAVAILABLE = {
     "xray": ("xray_config_unavailable", "Не удалось прочитать части конфигурации Xray."),
     "settings": ("xkeen_settings_unavailable", "Не удалось прочитать настройки XKeen."),
@@ -481,32 +482,32 @@ _CHECKS = {
     "xray": SourceCheck(
         "invalid_xray_config", XrayConfigSet, validate_xray_config_set,
         "Источник вернул части конфигурации Xray в неподдерживаемом формате.",
-        "Источник вернул некорректные части конфигурации Xray.", _DOMAIN_ERRORS,
+        "Источник вернул некорректные части конфигурации Xray.", _DOMAIN_ERRORS, _REASON_CODES,
     ),
     "settings": SourceCheck(
         "invalid_xkeen_settings", XKeenSettings, validate_xkeen_settings,
         "Источник вернул настройки XKeen в неподдерживаемом формате.",
-        "Источник вернул некорректные настройки XKeen.", _DOMAIN_ERRORS,
+        "Источник вернул некорректные настройки XKeen.", _DOMAIN_ERRORS, _REASON_CODES,
     ),
     "init": SourceCheck(
         "invalid_xkeen_init", XKeenInitParameters, validate_xkeen_init,
         "Источник вернул параметры init XKeen в неподдерживаемом формате.",
-        "Источник вернул некорректные параметры init XKeen.", _DOMAIN_ERRORS,
+        "Источник вернул некорректные параметры init XKeen.", _DOMAIN_ERRORS, _REASON_CODES,
     ),
     "port_exclude": SourceCheck(
         "invalid_xkeen_port_exclude", XKeenList, validate_xkeen_list,
         "Источник вернул список исключённых портов XKeen в неподдерживаемом формате.",
-        "Источник вернул некорректный список исключённых портов XKeen.", _DOMAIN_ERRORS,
+        "Источник вернул некорректный список исключённых портов XKeen.", _DOMAIN_ERRORS, _REASON_CODES,
     ),
     "port_proxying": SourceCheck(
         "invalid_xkeen_port_proxying", XKeenList, validate_xkeen_list,
         "Источник вернул список перехватываемых портов XKeen в неподдерживаемом формате.",
-        "Источник вернул некорректный список перехватываемых портов XKeen.", _DOMAIN_ERRORS,
+        "Источник вернул некорректный список перехватываемых портов XKeen.", _DOMAIN_ERRORS, _REASON_CODES,
     ),
     "ip_exclude": SourceCheck(
         "invalid_xkeen_ip_exclude", XKeenList, validate_xkeen_list,
         "Источник вернул список исключённых адресов XKeen в неподдерживаемом формате.",
-        "Источник вернул некорректный список исключённых адресов XKeen.", _DOMAIN_ERRORS,
+        "Источник вернул некорректный список исключённых адресов XKeen.", _DOMAIN_ERRORS, _REASON_CODES,
     ),
 }
 LIST_NAME_MISMATCH = "xkeen_list_name_mismatch"

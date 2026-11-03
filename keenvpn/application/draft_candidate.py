@@ -96,7 +96,7 @@ class DraftCandidateView:
             ), None)
             if geo_reason == "geo_revision_unknown":
                 code = NextStepCode.REVIEW_DRAFT
-            elif geo_reason not in (None, "no_references", "schema_incomplete"):
+            elif geo_reason not in (None, "no_references", "schema_incomplete", "candidate_references_incomplete"):
                 code = NextStepCode.CHECK_SOURCE
             else:
                 code = NextStepCode.CONSULT_DOCUMENTATION
@@ -112,7 +112,7 @@ class DraftCandidateView:
 
 
 def _valid_revision(database: object) -> bool:
-    return (type(database) is GeoDatabase and type(database.kind) is GeoDatabaseKind
+    return (type(database) is GeoDatabase and any(database.kind is kind for kind in GeoDatabaseKind)
             and valid_document_name(database.reference) and valid_metadata_revision(database.sha256))
 
 
@@ -209,19 +209,23 @@ def _catalog_index(catalogs: tuple[GeoCategoryCatalog, ...]):
     index = {}
     if type(catalogs) is not tuple:
         return None
-    for item in catalogs:
-        if type(item) is not GeoCategoryCatalog or not _valid_revision(item.database):
-            return None
-        categories = item.categories
-        if categories is not None and (
-            type(categories) is not frozenset
-            or any(type(code) is not str or not code or code != code.upper() for code in categories)
-        ):
-            return None
-        key = (item.database.kind, item.database.reference, item.database.sha256)
-        if key in index:
-            return None
-        index[key] = categories
+    try:
+        for item in catalogs:
+            if type(item) is not GeoCategoryCatalog or not _valid_revision(item.database):
+                return None
+            categories = item.categories
+            if categories is not None and (
+                type(categories) is not frozenset
+                or any(type(code) is not str or not code or code != code.upper() for code in categories)
+            ):
+                return None
+            key = (item.database.kind, item.database.reference, item.database.sha256)
+            if key in index:
+                return None
+            index[key] = categories
+    except AttributeError:
+        # Отсутствующий слот повреждённой модели не подтверждает состояние базы.
+        return None
     return index
 
 
@@ -244,33 +248,38 @@ def _geo_check(refs: CandidateReferences, revisions: tuple[GeoDatabase, ...],
         return _check(code, CheckStatus.NOT_CHECKED, inventory.code)
     evidence = _catalog_index(catalogs)
     expected = {(item.kind, item.reference): item.sha256 for item in revisions}
-    incomplete = "schema_incomplete" if refs.schema_invalid else None
+    incomplete = {"schema_incomplete"} if refs.schema_invalid else set()
     for resolution in GeoDataState(inventory, references).resolve():
         ref = resolution.reference
         kind = GeoDatabaseKind.GEOIP if ref.family is ConditionFamily.IP else GeoDatabaseKind.GEOSITE
         file = resolution.file
         if file is None:
-            incomplete = "file_not_inventoried"
+            incomplete.add("file_not_inventoried")
             continue
         if not file.present:
             return _check(code, CheckStatus.FAILED, "missing_geo_file")
         if not file.size:
             return _check(code, CheckStatus.FAILED, "corrupt_geo_file")
         revision = expected.get((kind, file.name))
-        if revision is not None and revision != file.sha256:
+        if revision is None:
+            incomplete.add("geo_revision_unknown")
+        elif revision != file.sha256:
             return _check(code, CheckStatus.FAILED, "geo_revision_changed")
         key = (kind, file.name, file.sha256)
         if evidence is None or key not in evidence:
-            incomplete = "geo_categories_unverified"
+            incomplete.add("geo_categories_unverified")
             continue
         if evidence[key] is None:
             return _check(code, CheckStatus.FAILED, "corrupt_geo_file")
+        if not ref.set_name.isascii():
+            incomplete.add("candidate_references_incomplete")
+            continue
         if ref.code not in evidence[key]:
             return _check(code, CheckStatus.FAILED, "geo_category_missing")
-        if revision is None:
-            incomplete = "geo_revision_unknown"
-    if incomplete:
-        return _check(code, CheckStatus.NOT_CHECKED, incomplete)
+    for reason in ("file_not_inventoried", "geo_categories_unverified", "geo_revision_unknown",
+                   "candidate_references_incomplete", "schema_incomplete"):
+        if reason in incomplete:
+            return _check(code, CheckStatus.NOT_CHECKED, reason)
     return _check(code)
 
 
@@ -296,11 +305,15 @@ class CheckDraftCandidateHandler:
         name = CheckDraftCandidate.name
         if type(command) is not CheckDraftCandidate:
             return failed(operation_id, name, invalid_command())
-        error = check_contract_version(command.contract_version)
+        try:
+            version, draft_id, revision = command.contract_version, command.draft_id, command.expected_revision
+            candidate = command.candidate
+        except AttributeError:
+            return failed(operation_id, name, invalid_command())
+        error = check_contract_version(version)
         if error is not None:
             return failed(operation_id, name, error)
-        candidate = command.candidate
-        if not valid_expected_draft(command.draft_id, command.expected_revision) or not _valid_candidate(candidate):
+        if not valid_expected_draft(draft_id, revision) or not _valid_candidate(candidate):
             return failed(operation_id, name, invalid_command())
         scheme, declarations = inspect_routing_declarations(candidate.xray)
         refs = candidate_references(candidate.xray)
@@ -308,7 +321,7 @@ class CheckDraftCandidateHandler:
         geo = _geo_check(refs, candidate.geo_revisions, self._geodata, self._catalogs)
         dns = port_53_mode_check(candidate.init, candidate.port_exclude, candidate.port_proxying)
         # Сверка последней обнаруживает и изменение во время чтения инвентаря геобаз.
-        current = check_draft_current(self._store, self._fingerprints, command.draft_id, command.expected_revision)
+        current = check_draft_current(self._store, self._fingerprints, draft_id, revision)
         if isinstance(current, ErrorDetail):
             return failed(operation_id, name, current)
         return succeeded(operation_id, name, DraftCandidateView(ChecksView(False, (*routing, geo, dns)), warnings))

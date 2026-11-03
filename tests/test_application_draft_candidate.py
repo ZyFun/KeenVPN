@@ -12,7 +12,7 @@ from keenvpn.application.draft_candidate import (
     CheckDraftCandidate, CheckDraftCandidateHandler, DraftCandidate, GeoCategoryCatalog,
 )
 from keenvpn.domain.config_document import ConfigDocument
-from keenvpn.domain.geodata import GeoDatabaseInventory
+from keenvpn.domain.geodata import GeoDatabaseInventory, GeoDataError, GeoDataErrorCode
 from keenvpn.domain.routing import GeoDatabase, GeoDatabaseKind
 from keenvpn.domain.routing_import import ImportReason, import_routing_scheme, inspect_routing_declarations
 from keenvpn.domain.routing_order import OverlapKind, RuleOverlap, rule_overlaps
@@ -63,6 +63,100 @@ class DraftCandidateTests(unittest.TestCase):
         self.assertEqual(self.store.create_calls, ())
         self.assertEqual(self.store.remove_calls, ())
         return result
+
+    def test_geodata_error_with_unregistered_code_has_no_private_chain(self):
+        xray = config(rules({"domain": "geosite:TEST_SITE", "outboundTag": OUT["tag"]}))
+        error = GeoDataError(GeoDataErrorCode.INVENTORY)
+        error.args = ("TEST_private_source",)
+        error.__cause__ = OSError("TEST_private_cause")
+        error.code = None
+        self.files.outcome = error
+        result = self.run_check(xray=xray)
+        self.check_item(result, "candidate_geo_categories", "not_checked", "invalid_geo_databases")
+        self.assertFalse(any(isinstance(item, BaseException) for item in reachable(result)))
+        self.assertNotIn("TEST_", json.dumps(result.to_dict()))
+
+    def test_unicode_geo_reference_cannot_match_another_ascii_category(self):
+        db = self.files.outcome.standard(GeoDatabaseKind.GEOSITE).database(GeoDatabaseKind.GEOSITE)
+        self.catalogs = (GeoCategoryCatalog(db, frozenset({"SS"})),)
+        xray = config({**rules(), "dns": {"servers": [{"address": "198.51.100.1", "domains": ["geosite:ß"]}]}})
+        result = self.run_check(xray=xray, geo_revisions=(db,))
+        self.check_item(result, "candidate_geo_categories", "not_checked", "candidate_references_incomplete")
+        self.assertEqual(result.data.outcome, "incomplete")
+        self.assertIs(result.data.next_step.code, NextStepCode.CONSULT_DOCUMENTATION)
+
+    def test_geo_incompleteness_priority_is_independent_of_reference_order(self):
+        db = self.files.outcome.standard(GeoDatabaseKind.GEOSITE).database(GeoDatabaseKind.GEOSITE)
+        self.catalogs = (GeoCategoryCatalog(db, frozenset({"TEST_SITE"})),)
+        for first, second, reason, step in (
+            ("ext:TEST_extra.dat:A", "geosite:ß", "file_not_inventoried", NextStepCode.CHECK_SOURCE),
+            ("geosite:TEST_SITE", "geosite:ß", "geo_revision_unknown", NextStepCode.REVIEW_DRAFT),
+        ):
+            for domains in ((first, second), (second, first)):
+                with self.subTest(domains=domains):
+                    dns = {"servers": [{"address": "198.51.100.1", "domains": list(domains)}]}
+                    result = self.run_check(xray=config({**rules(), "dns": dns}))
+                    self.check_item(result, "candidate_geo_categories", "not_checked", reason)
+                    self.assertIs(result.data.next_step.code, step)
+
+    def test_derived_document_fields_cannot_override_candidate_bytes(self):
+        class ForeignText(str):
+            def __ne__(self, other):
+                return False
+
+        invalid = config(rules({"ip": "198.51.100.1", "outboundTag": "TEST_missing"}))
+        good = config(rules()).parts[0]
+        for field in ("_snapshot", "sha256"):
+            with self.subTest(field=field):
+                doc = ConfigDocument(invalid.parts[0].name, invalid.parts[0].content)
+                candidate = XrayConfigSet((doc,))
+                object.__setattr__(doc, field, ForeignText(getattr(good, field)))
+                self.assertEqual(self.run_check(xray=candidate).error.code, "invalid_command")
+
+    def test_unregistered_geo_kind_cannot_supply_evidence_or_a_revision(self):
+        db = self.files.outcome.standard(GeoDatabaseKind.GEOSITE).database(GeoDatabaseKind.GEOSITE)
+        forged = replace(db, kind=str.__new__(GeoDatabaseKind, db.kind.value))
+        xray = config(rules({"domain": "geosite:TEST_SITE", "outboundTag": OUT["tag"]}))
+        self.catalogs = (GeoCategoryCatalog(forged, frozenset({"TEST_SITE"})),)
+        self.check_item(self.run_check(xray=xray, geo_revisions=(db,)), "candidate_geo_categories",
+                        "not_checked", "geo_categories_unverified")
+        self.catalogs = (GeoCategoryCatalog(db, frozenset({"TEST_SITE"})),)
+        self.assertEqual(self.run_check(xray=xray, geo_revisions=(forged,)).error.code, "invalid_command")
+
+    def test_incomplete_catalog_model_gives_an_unverified_category(self):
+        db = self.files.outcome.standard(GeoDatabaseKind.GEOSITE).database(GeoDatabaseKind.GEOSITE)
+        xray = config(rules({"domain": "geosite:TEST_SITE", "outboundTag": OUT["tag"]}))
+        for field in ("database", "categories", "kind", "sha256", "reference"):
+            with self.subTest(field=field):
+                catalog = GeoCategoryCatalog(replace(db), frozenset({"TEST_SITE"}))
+                owner = catalog if field in ("database", "categories") else catalog.database
+                object.__delattr__(owner, field)
+                self.catalogs = (catalog,)
+                result = self.run_check(xray=xray, geo_revisions=(db,))
+                self.assertEqual(result.data.outcome, "incomplete")
+                self.check_item(result, "candidate_geo_categories", "not_checked", "geo_categories_unverified")
+
+    def test_missing_command_fields_are_rejected_before_reads(self):
+        handler = CheckDraftCandidateHandler(self.store, self.sources, self.files, operation_ids=lambda: OPERATION)
+        for field in ("contract_version", "draft_id", "expected_revision", "candidate"):
+            with self.subTest(field=field):
+                command = CheckDraftCandidate(draft_id=FIRST_ID, expected_revision=token(self.raw),
+                                              candidate=self.candidate)
+                object.__delattr__(command, field)
+                with forbid_external_effects():
+                    result = handler.execute(command)
+                self.assertEqual(result.error.code, "invalid_command")
+                self.assertIsNone(result.data)
+        self.assertFalse(self.sources.calls or self.files.calls or self.store.read_calls)
+
+    def test_unicode_tail_marker_uses_the_same_outbound_replacement_as_ascii(self):
+        first = config(rules()).parts[0]
+        raw = json.dumps({"outbounds": [{"tag": "TEST_next", "protocol": "freedom"},
+                                        {"tag": "TEST_next", "protocol": "blackhole"}]}).encode()
+        for name in ("02_TAIL.json", "02_TAİL.json"):
+            with self.subTest(name=name):
+                candidate = XrayConfigSet((first, ConfigDocument(name, raw)))
+                self.assertEqual(self.run_check(xray=candidate).data.outcome, "passed")
 
     def test_valid_candidate_and_effective_routing_only(self):
         replaced = rules({"domain": "geosite:TEST_missing", "outboundTag": "TEST_missing"})

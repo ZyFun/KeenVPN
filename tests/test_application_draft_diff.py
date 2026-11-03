@@ -116,6 +116,21 @@ class DraftDiffTests(unittest.TestCase):
         self.assertEqual(self.sources.calls, tuple(Source))
         self.assertEqual(self.store.content, self.raw)
 
+    def test_candidate_part_order_is_visible_and_original_order_must_match_the_directory(self):
+        parts = xray(("01_TEST.json", b'{"routing":{"rules":[]}}'),
+                     ("02_TEST.json", b'{"routing":{"rules":[{"outboundTag":"TEST_out"}]}}'))
+        self.original = replace(self.original, xray_configs=parts)
+        self.use_original()
+        reversed_parts = XrayConfigSet(tuple(reversed(parts.parts)))
+        changed = replace(self.original, xray_configs=reversed_parts)
+        self.assertEqual(self.entries(changed), [(Source.XRAY_CONFIGS, "part", "reordered", None, None)])
+        self.reject(self.run_diff(original=changed), "invalid_diff_snapshot")
+        updated = xray(("02_TEST.json", b'{"routing":{"rules":[]}}'), ("01_TEST.json", parts.parts[0].content))
+        self.assertEqual(self.entries(replace(self.original, xray_configs=updated)), [
+            (Source.XRAY_CONFIGS, "part", "reordered", None, None),
+            (Source.XRAY_CONFIGS, "routing_rules", "removed", 1, 0),
+        ])
+
     def test_secret_only_change_and_untouched_service_fields(self):
         candidate = replace(self.original, xray_configs=config(proxy("TEST_new_password")))
         self.assertEqual(self.entries(candidate), [(Source.XRAY_CONFIGS, "credentials", "changed", 0, 0)])

@@ -211,6 +211,9 @@ def snapshot_changes(original: PreparedSnapshot, candidate: PreparedSnapshot) ->
     """Перечислить только безопасные записи в порядке источников и имён частей."""
     for source in Source:
         old, new = original.sources[source], candidate.sources[source]
+        # Исходный каталог упорядочен по имени. Равенство dict не учитывает порядок загрузки.
+        if source is Source.XRAY_CONFIGS and new is not None and list(new) != sorted(new):
+            yield DiffEntry(source, "part", DiffOperation.REORDERED)
         if old == new:
             continue
         if old is None or new is None:
@@ -232,7 +235,7 @@ def snapshot_changes(original: PreparedSnapshot, candidate: PreparedSnapshot) ->
                     yield DiffEntry(source, area, operation, ordinal, position)
         elif source is Source.XRAY_CONFIGS:
             old_indexes = {name: index for index, name in enumerate(old)}
-            new_indexes = {name: index for index, name in enumerate(new)}
+            new_indexes = {name: index for index, name in enumerate(sorted(new))}
             for name in sorted(old.keys() | new.keys()):
                 if name not in old:
                     yield DiffEntry(source, "part", DiffOperation.ADDED, new_indexes[name])

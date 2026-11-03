@@ -16,7 +16,7 @@ from keenvpn.application.xray_candidate import XrayTestInput, XrayTestOutcome as
 from keenvpn.domain.config_document import valid_document_name
 from keenvpn.domain.manager_metadata import valid_storage_path
 from keenvpn.domain.routing import GeoDatabaseKind
-from keenvpn.domain.xray_config import XRAY_TAIL_MARKER
+from keenvpn.domain.xray_config import is_xray_tail_part
 
 
 XRAY_BINARY = "/opt/sbin/xray"
@@ -338,7 +338,7 @@ class StagedXrayTest:
             argv = [XRAY_BINARY, "run", "-test", "-format", "json"]
             for index, (original, content) in enumerate(candidate.parts):
                 # Config.Override учитывает «tail» в имени. Другие исходные значения в argv не нужны.
-                marker = "-tail" if XRAY_TAIL_MARKER in original.replace("İ", "i").lower() else ""
+                marker = "-tail" if is_xray_tail_part(original) else ""
                 name = f"{index:03d}{marker}.json"
                 part_entries[name] = stack.enter_context(_new_file(parts, name, content))
                 argv.extend(("-c", "parts/" + name))

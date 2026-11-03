@@ -78,7 +78,7 @@ class CompareDraftHandler:
         stored = read_expected_draft(self._store, draft_id, revision)
         if isinstance(stored, ErrorDetail):
             return failed(operation_id, name, stored)
-        original = prepare_snapshot(old_snapshot)
+        original = prepare_snapshot(old_snapshot, require_sorted_parts=True)
         candidate = prepare_snapshot(new_snapshot)
         if original is None or candidate is None:
             return failed(operation_id, name, _INVALID_SNAPSHOT)

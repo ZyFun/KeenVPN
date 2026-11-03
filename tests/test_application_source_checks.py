@@ -8,6 +8,11 @@ import unittest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from keenvpn.application import keenetic_state, proxy_config
+from keenvpn.application.keenetic_policies import POLICIES_CHECK
+from keenvpn.domain.config_document import ConfigDocumentError, ConfigDocumentErrorCode
+from keenvpn.domain.keenetic_policy import KeeneticPolicyError, KeeneticPolicyErrorCode
+from tests.support.privacy import reachable
 from keenvpn.application.contract import ErrorCategory, ErrorDetail
 from keenvpn.application.ports import RouterReadError, RouterReadFailure
 from keenvpn.application.source_checks import SourceCheck, check_source_model, read_source_checked, unavailable
@@ -38,7 +43,8 @@ def _validate(model: object) -> None:
 
 
 def _check(validate=_validate, domain_errors=(_DomainError,)) -> SourceCheck:
-    return SourceCheck("invalid_test_model", _Model, validate, "Неподдерживаемый формат.", "Некорректные данные.", domain_errors)
+    return SourceCheck("invalid_test_model", _Model, validate, "Неподдерживаемый формат.", "Некорректные данные.",
+                       domain_errors, tuple(_Code))
 
 
 class UnavailableTests(unittest.TestCase):
@@ -140,6 +146,28 @@ class ReadSourceCheckedTests(unittest.TestCase):
         error.failure = "TEST_SECRET_PATH"
         detail = self.read(error)
         self.assertEqual(detail, ErrorDetail(ErrorCategory.SOURCE_FAILED, "test_unavailable", "Не удалось прочитать."))
+
+    def test_router_source_checks_only_report_registered_reason_members(self):
+        class ForeignCode(StrEnum):
+            PRIVATE = "TEST_private_enum"
+
+        groups = (
+            (proxy_config._CHECKS.values(), ConfigDocumentError, ConfigDocumentErrorCode.DOCUMENT),
+            ((*keenetic_state._CHECKS.values(), POLICIES_CHECK), KeeneticPolicyError, next(iter(KeeneticPolicyErrorCode))),
+        )
+        for checks, error_type, known in groups:
+            for check in checks:
+                for code in (None, "TEST_private_string", ForeignCode.PRIVATE, str.__new__(type(known), known.value), known):
+                    with self.subTest(check=check.code, code_type=type(code)):
+                        error = error_type(known)
+                        error.code = code
+                        error.args = ("TEST_private_source",)
+                        error.__cause__ = OSError("TEST_private_cause")
+                        detail = self.read(error, check)
+                        self.assertEqual(detail.code, check.code)
+                        self.assertEqual(detail.reason, known.value if code is known else None)
+                        self.assertFalse(any(isinstance(item, BaseException) for item in reachable(detail)))
+                        self.assertNotIn("TEST_", repr(detail.to_dict()))
 
     def test_domain_error_while_reading_is_invalid_source_data_with_its_code(self):
         self.assertEqual(self.read(_DomainError(_Code.BROKEN)), ErrorDetail(

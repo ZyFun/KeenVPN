@@ -20,7 +20,7 @@ POLICIES_UNAVAILABLE = unavailable("keenetic_policies_unavailable", "Не уда
 POLICIES_CHECK = SourceCheck(
     "invalid_keenetic_policies", KeeneticPolicySet, validate_policy_set,
     "Источник вернул политики Keenetic в неподдерживаемом формате.",
-    "Источник вернул некорректный список политик Keenetic.", (KeeneticPolicyError,),
+    "Источник вернул некорректный список политик Keenetic.", (KeeneticPolicyError,), tuple(KeeneticPolicyErrorCode),
 )
 """Проверка ответа источника политик; повторная проверка ловит данные, изменённые после создания модели."""
 

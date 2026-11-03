@@ -63,6 +63,11 @@ _OBSERVATORY_FIELDS = frozenset({"subjectSelector"})
 """Поля, которые читает структурная сводка, по объектам; варианты их регистра сводка не читает."""
 
 
+def is_xray_tail_part(name: str) -> bool:
+    """Распознать tail по простому приведению регистра Go, включая İ → i."""
+    return XRAY_TAIL_MARKER in name.replace("İ", "i").lower()
+
+
 def _absent(item: dict[str, object], key: str) -> bool:
     """Поле отсутствует либо `null`: указательное поле Xray остаётся `nil`."""
     return item.get(key) is None

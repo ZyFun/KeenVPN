@@ -261,6 +261,19 @@ class StagingTests(unittest.TestCase):
         self.assertEqual(self.execute(cmd).data.status.value, "passed")
         self.assertTrue(self.runner.reaped)
 
+    def test_explicit_lower_memory_limit_reaches_the_runner_unchanged(self):
+        staged = adapter.StagedXrayTest(str(self.parent), self.runner, memory_limit=128 * 1024 * 1024)
+        self.handler = CheckInstalledXrayHandler(self.store, current_fingerprints(), staged)
+        self.assertEqual(self.execute().data.status.value, 'passed')
+        self.assertEqual(self.runner.request.memory_limit, 128 * 1024 * 1024)
+
+    def test_invalid_or_increased_memory_limit_has_no_staging_effects(self):
+        for limit in (True, 0, -1, 268435457, 128.0, None):
+            staged = adapter.StagedXrayTest(str(self.parent), self.runner, memory_limit=limit)
+            self.assertIs(staged.test(None), Outcome.ISOLATION)
+        self.assertEqual(list(self.parent.iterdir()), [])
+        self.assertEqual(self.runner.calls, 0)
+
     def test_fake_loader_rejects_missing_category_and_corrupt_candidate(self):
         def inspect(req):
             for _, name, code in req.categories:

@@ -22,7 +22,13 @@ from keenvpn.domain.xray_config import is_xray_tail_part
 XRAY_BINARY = "/opt/sbin/xray"
 XRAY_VERSION = "26.3.27"
 OUTPUT_LIMIT = 64 * 1024
+MEMORY_LIMIT = 256 * 1024 * 1024
 TIMEOUT = 30.0
+
+
+def valid_memory_limit(value: object) -> bool:
+    """Вызывающий может только уменьшить общий потолок памяти проверочного Xray."""
+    return type(value) is int and 0 < value <= MEMORY_LIMIT
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -37,14 +43,19 @@ class XrayTestFile:
 
 @dataclass(frozen=True, slots=True, repr=False)
 class XrayTestInvocation:
-    """Один новый процесс. Пути частей и assets относятся к файловому пространству из переданного манифеста."""
+    """Один новый процесс в файловом пространстве переданного манифеста.
+
+    memory_limit ограничивает сумму резидентных пользовательских страниц Xray и потомков;
+    общее адресное пространство потоков учитывается один раз. Координатор, подготовка
+    временных файлов и неотображённый в эти процессы файловый кэш ОС находятся вне метрики.
+    """
 
     job: str
     files: tuple[XrayTestFile, ...]
     argv: tuple[str, ...]
     categories: tuple[tuple[GeoDatabaseKind, str, str], ...]
     deadline: float
-    memory_limit: int = 256 * 1024 * 1024
+    memory_limit: int = MEMORY_LIMIT
     output_limit: int = OUTPUT_LIMIT
     required_version: str = XRAY_VERSION
     environment: tuple[tuple[str, str], ...] = (("XRAY_LOCATION_ASSET", "assets"),)
@@ -61,11 +72,19 @@ class XrayTestExit:
 
 
 class IsolatedXrayRunner(Protocol):
-    def reserve_staging(self, job: str, parent_fd: int) -> bool:
-        """До mkdir исключить постороннюю запись, в том числе с тем же UID, в подготовку через этот каталог.
+    """Изоляция проверочного процесса в доверенном окружении хоста.
 
-        Только True означает эксклюзивное владение на весь срок до release_staging. Права 0700
-        или рекомендательная блокировка сами по себе этого не обеспечивают. Без гарантии вернуть False.
+    Координатор, ядро ОС и администратор хоста с полными полномочиями доверены.
+    Проверочный Xray, его потомки и процессы без административных полномочий
+    ограничены контрактом, в том числе если используют тот же UID.
+    """
+
+    def reserve_staging(self, job: str, parent_fd: int) -> bool:
+        """До mkdir исключить запись посторонних процессов без административных полномочий.
+
+        Это относится и к процессам с тем же UID. Только True означает эксклюзивное владение
+        на весь срок до release_staging. Права 0700 или рекомендательная блокировка сами по себе
+        этого не обеспечивают. Без гарантии вернуть False.
         """
         ...
 
@@ -75,8 +94,11 @@ class IsolatedXrayRunner(Protocol):
         Из закреплённых дескрипторов манифеста создать неизменяемое файловое пространство cwd;
         сверить размер и SHA-256 именно доступных ядру байтов до запуска. Пути хоста не открывать.
         Среда задаётся целиком. Запретить сеть, слушатели, запись, внешние конфиги, кэши и файлы.
-        Бинарник и необходимые библиотеки предоставляет исполнитель. stdin и чужие дескрипторы закрыты.
-        До запуска ограничить память всей группы, включая потомков, общим memory_limit.
+        Бинарник и необходимые библиотеки предоставляет исполнитель. Чужие дескрипторы закрыты;
+        stdin — собственный канал с немедленным EOF без внешнего ввода. При входе в Xray
+        проверить принадлежность и назначение всех трёх стандартных каналов.
+        До запуска обеспечить общий memory_limit для резидентных пользовательских страниц
+        Xray и потомков; общее адресное пространство потоков учитывать один раз.
         Другая версия — UnsupportedXrayVersion, невозможность обеспечить изоляцию — IsolationUnavailable.
         """
         ...
@@ -292,12 +314,14 @@ def _directory_stamp(fd: int) -> tuple[int, int]:
 class StagedXrayTest:
     """Готовит один временный каталог внутри явно заданного приватного родителя."""
 
-    def __init__(self, directory: str, runner: IsolatedXrayRunner | None = None) -> None:
+    def __init__(self, directory: str, runner: IsolatedXrayRunner | None = None, *,
+                 memory_limit: int = MEMORY_LIMIT) -> None:
         self._directory = directory
         self._runner = runner
+        self._memory_limit = memory_limit
 
     def test(self, candidate: XrayTestInput) -> Outcome:
-        if self._runner is None:
+        if self._runner is None or not valid_memory_limit(self._memory_limit):
             return Outcome.ISOLATION
         path = self._directory
         if not valid_storage_path(path) or any(path == p or path.startswith(p + "/") for p in PROTECTED_DIRECTORIES):
@@ -361,6 +385,7 @@ class StagedXrayTest:
                 for area, entries in (("parts", part_entries), ("assets", asset_entries))
                 for name, entry in entries.items()
             )
-            request = XrayTestInvocation(job, files, tuple(argv), candidate.categories, monotonic() + TIMEOUT)
+            request = XrayTestInvocation(job, files, tuple(argv), candidate.categories, monotonic() + TIMEOUT,
+                                         memory_limit=self._memory_limit)
             result = _run(self._runner, request)
             return result if intact() else Outcome.CHANGED

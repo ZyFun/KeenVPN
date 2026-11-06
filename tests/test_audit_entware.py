@@ -49,17 +49,21 @@ def package(entries):
     return data, {"Size": str(len(data)), "SHA256sum": hashlib.sha256(data).hexdigest()}
 
 
-def write_snapshot(directory, version):
+def write_snapshot(directory, version, *, separate_ctypes=False):
     """Подготовить целостный искусственный набор IPK с заданной версией Python."""
     library = 'opt/lib/python' + '.'.join(version.split('.')[:2])
     modules = [(library + '/' + name.replace('.', '/') + '.pyc', b'test-only')
-               for name in requirements.REQUIRED_MODULES]
+               for name in requirements.REQUIRED_MODULES if not separate_ctypes or name != 'ctypes']
     modules += [(library + '/lib-dynload/' + name + '.cpython-test.so', b'test-only')
                 for name in ('_ssl', '_hashlib', '_uuid')]
     certificate = Path(__file__).with_name('fixtures').joinpath('ca-test.crt').read_bytes()
     records = []
-    for name in audit.ROOT_PACKAGES:
+    names = audit.ROOT_PACKAGES + (('python3-ctypes',) if separate_ctypes else ())
+    for name in names:
         entries = modules if name == 'python3-light' else []
+        if name == 'python3-ctypes':
+            entries = [(library + '/ctypes/__init__.pyc', b'test-only'),
+                       (library + '/lib-dynload/_ctypes.cpython-test.so', b'test-only')]
         if name == 'ca-bundle':
             entries = [('opt/etc/ssl/certs/ca-certificates.crt', certificate)]
         data, record = package(entries)
@@ -77,6 +81,21 @@ def write_snapshot(directory, version):
 
 
 class DependencyTests(unittest.TestCase):
+    def test_base_audit_excludes_separately_packaged_ctypes(self):
+        """Отдельный пакет есть в индексе и на диске, но не входит в базовое замыкание."""
+        with tempfile.TemporaryDirectory() as directory:
+            index = write_snapshot(directory, '3.13.9-2', separate_ctypes=True)
+            records = audit.parse_index(index.read_bytes())
+            files, _ = audit.inspect_ipk(Path(directory, 'python3-ctypes.ipk').read_bytes(),
+                                         records['python3-ctypes'])
+            for module in ('ctypes', '_ctypes'):
+                self.assertEqual(audit.module_owners(module, {'python3-ctypes': files}), ['python3-ctypes'])
+            report = audit.audit(index.read_bytes(), directory)
+            self.assertNotIn('python3-ctypes', report['packages'])
+            self.assertNotIn('ctypes', report['module_owners'])
+            with self.assertRaises(audit.AuditError):
+                audit.audit(index.read_bytes(), directory, required_modules=('ctypes',))
+
     def test_realistic_package_names_and_duplicate_rejection(self):
         """Регистр и подчёркивания допустимы, неоднозначная запись пакета — нет."""
         data = b"Package: cJSON\nVersion: 1\n\nPackage: boost-date_time\nVersion: 2\n"

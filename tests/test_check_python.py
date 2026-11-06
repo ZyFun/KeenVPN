@@ -70,6 +70,12 @@ class RequirementTests(unittest.TestCase):
                 self.assertNotIn("Контекст TLS с проверкой имени и сертификата", report)
                 self.assertNotIn("TEST_SECRET", repr(report))
 
+    def test_base_check_does_not_require_isolated_executor_ctypes(self):
+        """Отсутствие дополнительного пакета исполнителя не ломает базовую диагностику."""
+        report = self.check_with({"ctypes": ModuleNotFoundError("TEST_SECRET")})
+        self.assertTrue(all(report.values()), report)
+        self.assertNotIn("Импорт ctypes", report)
+
     def test_successful_import_does_not_hide_missing_api(self):
         """Облегчённый модуль может импортироваться, но не содержать нужное API."""
         for name, label in (

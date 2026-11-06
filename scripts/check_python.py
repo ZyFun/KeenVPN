@@ -19,6 +19,7 @@ REQUIRED_MODULES = (
     "pathlib", "os", "stat", "shutil", "tempfile", "io",
     "hashlib", "hmac", "secrets", "uuid",
     "fcntl", "subprocess", "signal", "errno", "time", "datetime",
+    "resource", "select", "struct",
     "socket", "ssl", "urllib.request", "urllib.error", "http.client",
     "tarfile", "gzip", "zlib",
 )

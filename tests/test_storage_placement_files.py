@@ -151,9 +151,9 @@ class FixtureSource(files.StoragePlacementFiles):
 
 class SourceTests(FailureCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="keenvpn-storage-", dir="/private/tmp")
+        self.temporary = tempfile.TemporaryDirectory(prefix="keenvpn-storage-")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.calls = []
         self.outputs = {f"/dev/sda{index}": f'/dev/sda{index}: LABEL="sample" UUID="{value}"\n'.encode()
                         for index, value in enumerate(UUIDS, 1)}

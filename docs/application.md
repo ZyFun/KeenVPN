@@ -942,6 +942,7 @@ outbound и балансировщиков показываются только
 читает их; `ImportStoragePlacementHandler(source, store)` дополнительно получает
 порт `StoragePlacementSource.current_storage_placement() -> StoragePlacement` —
 обнаруженное размещение собственных данных, истории и копий и лимиты истории.
+Реальный источник — [StoragePlacementFiles](storage-placement-source.md), без изменения контракта импорта.
 Источник только читает, не выбирает значения по умолчанию и сообщает об
 отказе исключением.
 

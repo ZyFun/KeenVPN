@@ -45,6 +45,8 @@ class UnavailableReason(StrEnum):
     """Сценария для пункта в этой версии нет."""
     SOURCE_NOT_CONNECTED = "source_not_connected"
     """Сценарий есть, но источник чтения при сборке не подключён."""
+    STORAGE_NOT_CONFIRMED = "storage_not_confirmed"
+    """Размещение DATA или собственные каталоги не прошли проверку подключения."""
     INPUT_REQUIRED = "input_required"
     """Сценарий есть, но пункту нужен ввод значений, которого это меню не принимает."""
 
@@ -55,6 +57,10 @@ REASON_MESSAGES: Mapping[UnavailableReason, str] = MappingProxyType({
     ),
     UnavailableReason.SOURCE_NOT_CONNECTED: (
         "Источник чтения роутера не подключён: показать данные нельзя, настройки не меняются."
+    ),
+    UnavailableReason.STORAGE_NOT_CONFIRMED: (
+        "Хранилища не подключены: размещение роли data или выбранные каталоги не прошли проверку; "
+        "настройки не меняются."
     ),
     UnavailableReason.INPUT_REQUIRED: (
         "Пункт требует ввода значений, который это меню не принимает: действие не выполняется."

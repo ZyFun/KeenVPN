@@ -26,7 +26,11 @@ EXIT_INTERRUPTED = 130
 INTERRUPTED_MESSAGE = "Прервано."
 FAILURE_MESSAGE = "Меню завершилось с внутренней ошибкой; настройки не менялись."
 READ_ROUTER_FLAG = "--read-router"
-"""Флаг `vpn-menu`: подключить источники чтения роутера. Без него ничего не подключается."""
+"""Флаг `vpn-menu`: подключить источники чтения роутера.
+
+`vpn-menu` без флага источники не подключает; `vpn-setup` использует
+источники чтения роутера без аргументов.
+"""
 
 Assembler = Callable[[], MenuAssembly]
 
@@ -64,4 +68,4 @@ def vpn_setup(argv: Sequence[str], stdin: TextInput, stdout: TextOutput, stderr:
     if len(argv):
         stderr.write("vpn-setup не принимает аргументов.\n")
         return EXIT_USAGE
-    return _run(lambda: assemble_setup_menu(default_sources()), stdin, stdout, stderr)
+    return _run(lambda: assemble_setup_menu(router_sources()), stdin, stdout, stderr)

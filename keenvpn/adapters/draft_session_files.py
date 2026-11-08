@@ -6,7 +6,7 @@
 700/600, обход без ссылок, атомарная публикация через временный файл под
 эксклюзивной блокировкой каталога, запрет каталогов конфигураций Xray
 и XKeen и каталога init. Создание не перезаписывает существующий черновик,
-удаление сверяет ревизию и удаляет только файл сессии. Хранилище ничего
+замена и удаление сверяют ревизию и меняют только файл сессии. Хранилище ничего
 не применяет: конфигурация Xray и XKeen, Keenetic и службы не затрагиваются.
 """
 
@@ -66,6 +66,17 @@ class DraftSessionFiles(PrivateFileStore[StoredDraftSession]):
         if not valid_metadata_revision(expected_revision):
             raise DraftSessionError(DraftSessionErrorCode.REVISION)
         self._remove_file(expected_revision)
+
+    def replace_draft(self, session: DraftSession, expected_revision: str) -> str:
+        """Заменить сессию по SHA-256 файла, сохранив общую блокировку и проверки.
+
+        Неверная ревизия или модель отклоняются до файловых обращений.
+        Повреждённый файл не перезаписывается. Совпадающие байты повторно
+        закрепляются fsync без переименования; возвращается их ревизия.
+        """
+        if not valid_metadata_revision(expected_revision):
+            raise DraftSessionError(DraftSessionErrorCode.REVISION)
+        return self._write_file(encode_draft_session(session), expected_revision)
 
     def confirm_draft_absent(self) -> None:
         """Закрепить на диске отсутствие черновика под той же блокировкой, ничего не удаляя.

@@ -4,9 +4,9 @@
 Xray и XKeen. Модуль ничего не читает с диска и не записывает: он разбирает
 и собирает байты файла, ревизия — SHA-256 этих байтов, как у метаданных
 менеджера. Версия схемы 1 содержит идентификатор черновика, время его
-создания и необязательный раздел `baseline` — исходные отпечатки управляемых
-источников (`source_baseline`); изменений и состояния в ней нет: наличие
-файла означает открытую сессию. Будущие разделы добавляются как
+создания, необязательный `baseline` — исходные отпечатки управляемых
+источников, и `candidate` — полные исходный и изменённый снимки.
+Наличие файла означает открытую сессию. Разделы добавляются как
 необязательные поля верхнего уровня; неизвестные поля сохраняются
 и записываются обратно после известных. Разбор строгий: UTF-8, без
 комментариев, дублей ключей, NaN и Infinity, с ограничением размера
@@ -22,6 +22,9 @@ import re
 from typing import NoReturn
 
 from keenvpn.domain.config_document import ConfigDocumentError, parse_strict_json_object, valid_json_tree
+from keenvpn.domain.draft_candidate_state import (
+    DraftCandidateState, DraftCandidateStateError, rebuild_draft_candidate,
+)
 from keenvpn.domain.manager_metadata import (
     ManagerMetadataError, UnknownFields, metadata_revision, rebuild_unknown_fields, valid_metadata_revision,
 )
@@ -39,7 +42,7 @@ MAX_DRAFT_SIZE = 1024 * 1024
 
 _DRAFT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _CREATED_AT = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z")
-_TOP_KEYS = ("format", "schema_version", "draft_id", "created_at", "baseline")
+_TOP_KEYS = ("format", "schema_version", "draft_id", "created_at", "baseline", "candidate")
 
 
 class DraftSessionErrorCode(StrEnum):
@@ -53,6 +56,7 @@ class DraftSessionErrorCode(StrEnum):
     CREATED_AT = "invalid_draft_created_at"
     UNKNOWN_FIELDS = "invalid_unknown_fields"
     BASELINE = "invalid_draft_baseline"
+    CANDIDATE = "invalid_draft_candidate"
     REVISION = "invalid_draft_revision"
     SESSION = "invalid_draft_session"
 
@@ -66,6 +70,7 @@ _MESSAGES = {
     DraftSessionErrorCode.CREATED_AT: "Время создания черновика должно быть моментом UTC с точностью до секунды.",
     DraftSessionErrorCode.UNKNOWN_FIELDS: "Неизвестные поля черновика нельзя сохранить без изменения.",
     DraftSessionErrorCode.BASELINE: "Раздел исходных отпечатков черновика повреждён.",
+    DraftSessionErrorCode.CANDIDATE: "Раздел кандидата черновика повреждён или неполон.",
     DraftSessionErrorCode.REVISION: "Ревизия черновика должна быть SHA-256 в нижнем регистре.",
     DraftSessionErrorCode.SESSION: "Сессия черновика повреждена.",
 }
@@ -156,6 +161,17 @@ def _baseline(value: object) -> SourceBaseline:
     return baseline
 
 
+def _candidate(value: object) -> DraftCandidateState:
+    candidate = None
+    try:
+        candidate = DraftCandidateState(value)
+    except DraftCandidateStateError:
+        pass
+    if candidate is None:
+        _fail(DraftSessionErrorCode.CANDIDATE, "candidate")
+    return candidate
+
+
 @dataclass(frozen=True, slots=True)
 class DraftSession:
     """Сессия черновика текущей версии схемы.
@@ -165,12 +181,14 @@ class DraftSession:
     если их в файле нет. Значения неизвестных полей — данные другой версии
     менеджера: `repr` показывает только их число. Хеши, будущая полезная
     нагрузка изменений не должны попадать в `repr` и диагностику.
+    `candidate` — приватный полный раздел либо None у прежнего черновика.
     """
 
     draft_id: str
     created_at: datetime
     extra: UnknownFields = field(default_factory=_no_fields)
     baseline: SourceBaseline | None = None
+    candidate: DraftCandidateState | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not valid_draft_id(self.draft_id):
@@ -181,6 +199,8 @@ class DraftSession:
             _fail(DraftSessionErrorCode.UNKNOWN_FIELDS)
         if self.baseline is not None and type(self.baseline) is not SourceBaseline:
             _fail(DraftSessionErrorCode.BASELINE, "baseline")
+        if self.candidate is not None and type(self.candidate) is not DraftCandidateState:
+            _fail(DraftSessionErrorCode.CANDIDATE, "candidate")
 
     def to_diagnostic(self) -> dict[str, object]:
         """Версия схемы, идентификатор, время создания, число неизвестных полей и состояния источников.
@@ -251,8 +271,9 @@ def decode_draft_session(content: bytes) -> StoredDraftSession:
         _fail(DraftSessionErrorCode.DRAFT_ID, "draft_id")
     created_at = _parse_created_at(document["created_at"])
     baseline = _baseline(document["baseline"]) if "baseline" in document else None
+    candidate = _candidate(document["candidate"]) if "candidate" in document else None
     extra = _unknown_fields({key: value for key, value in document.items() if key not in _TOP_KEYS})
-    session = DraftSession(document["draft_id"], created_at, extra, baseline)
+    session = DraftSession(document["draft_id"], created_at, extra, baseline, candidate)
     return StoredDraftSession(session, draft_revision(content))
 
 
@@ -271,6 +292,7 @@ def validate_draft_session(session: DraftSession) -> None:
         DraftSession(
             session.draft_id, session.created_at, rebuild_unknown_fields(session.extra),
             None if baseline is None else rebuild_source_baseline(baseline),
+            None if session.candidate is None else rebuild_draft_candidate(session.candidate),
         )
     except DraftSessionError as error:
         code, name = error.code, error.field
@@ -278,6 +300,8 @@ def validate_draft_session(session: DraftSession) -> None:
         code = DraftSessionErrorCode.UNKNOWN_FIELDS
     except SourceBaselineError:
         code, name = DraftSessionErrorCode.BASELINE, "baseline"
+    except DraftCandidateStateError:
+        code, name = DraftSessionErrorCode.CANDIDATE, "candidate"
     except Exception:
         # Повреждённая модель: атрибут не того типа, испорченный снимок и подобное.
         code = DraftSessionErrorCode.SESSION
@@ -303,6 +327,11 @@ def encode_draft_session(session: DraftSession) -> bytes:
         if not valid_json_tree({"baseline": baseline}):
             _fail(DraftSessionErrorCode.BASELINE, "baseline")
         document["baseline"] = baseline
+    if session.candidate is not None:
+        candidate = session.candidate.export()
+        if not valid_json_tree({"candidate": candidate}):
+            _fail(DraftSessionErrorCode.CANDIDATE, "candidate")
+        document["candidate"] = candidate
     # Неизвестные поля верхнего уровня: их глубину уже проверил снимок `UnknownFields`.
     document.update(session.extra.export())
     content = (json.dumps(document, ensure_ascii=True, allow_nan=False, indent=2) + "\n").encode("ascii")

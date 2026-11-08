@@ -9,6 +9,7 @@ import io
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -208,12 +209,13 @@ class EntrypointExitTests(unittest.TestCase):
         # Хранилище прочитала только шапка корня.
         self.assertEqual(store.read_calls, 1)
 
-    def test_default_launch_reports_that_the_draft_was_not_checked(self):
+    def test_launch_without_connected_storage_reports_that_draft_was_not_checked(self):
         for entry in (vpn_menu, vpn_setup):
             for text in ("0\n", ""):
                 with self.subTest(entry=entry.__name__, text=text):
                     stdout, stderr = io.StringIO(), io.StringIO()
-                    with forbid_external_effects():
+                    with patch("keenvpn.interfaces.cli.entrypoints.router_sources", return_value=MenuSources()), \
+                            forbid_external_effects():
                         code = entry([], io.StringIO(text), stdout, stderr)
                     self.assertEqual((code, stderr.getvalue()), (0, ""))
                     self.assertTrue(stdout.getvalue().endswith(DRAFT_NOT_CONNECTED + "\n"))

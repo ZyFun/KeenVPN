@@ -29,7 +29,8 @@ class Interrupting:
 
 def call(entry, argv, text):
     stdout, stderr = io.StringIO(), io.StringIO()
-    with forbid_external_effects():
+    with patch("keenvpn.interfaces.cli.composition.StoragePlacementFiles.current_storage_placement", return_value=None), \
+            forbid_external_effects():
         code = entry(argv, io.StringIO(text), stdout, stderr)
     return code, stdout.getvalue(), stderr.getvalue()
 
@@ -87,11 +88,16 @@ class EntrypointTests(unittest.TestCase):
             self.assertEqual((code, err), (EXIT_OK, ""))
             sources.assert_not_called()
             self.assertIn("  Ядро Xray: не проверено\n", out)
+            sources.reset_mock()
+            code, out, err = call(vpn_setup, [], "0\n")
+            self.assertEqual((code, err), (EXIT_OK, ""))
+            sources.assert_called_once_with()
 
     def test_keyboard_interrupt_gives_fixed_message_and_130(self):
         for entry in (vpn_menu, vpn_setup):
             stdout, stderr = io.StringIO(), io.StringIO()
-            with forbid_external_effects():
+            with patch("keenvpn.interfaces.cli.composition.StoragePlacementFiles.current_storage_placement", return_value=None), \
+                    forbid_external_effects():
                 code = entry([], Interrupting(), stdout, stderr)
             self.assertEqual(code, EXIT_INTERRUPTED)
             self.assertEqual(stderr.getvalue(), INTERRUPTED_MESSAGE + "\n")

@@ -255,10 +255,12 @@ class RunLoopTests(unittest.TestCase):
 
 class CompositionTests(unittest.TestCase):
     def test_router_sources_connect_entware_files_process_and_local_rci(self):
-        # Создание источников и сборка меню ничего не читают: файлы, процесс и RCI читаются при выборе пункта.
-        with forbid_external_effects():
+        # Сборка читает размещение; остальные файлы, процесс и RCI — только в сценариях.
+        with patch("keenvpn.interfaces.cli.composition.StoragePlacementFiles.current_storage_placement",
+                   return_value=None) as placement, forbid_external_effects():
             sources = router_sources()
             assembly = assemble_main_menu(sources)
+        placement.assert_called_once_with()
         expected = {
             "policies": KeeneticPoliciesRci, "hotspot": KeeneticHotspotSettingsRci,
             "registrations": KeeneticRegistrationsRci, "runtime": KeeneticHotspotRuntimeRci, "xray": XrayConfigFiles,
@@ -274,8 +276,8 @@ class CompositionTests(unittest.TestCase):
             "failsafe.port53_check", "devices.list",
         ):
             self.assertIsNone(found[action_id], action_id)
-        # Хранилище метаданных в этой версии не подключается.
-        self.assertIs(found["settings.storage"], UnavailableReason.SOURCE_NOT_CONNECTED)
+        # Неподтверждённое размещение не подключает хранилища.
+        self.assertIs(found["settings.storage"], UnavailableReason.STORAGE_NOT_CONFIRMED)
 
     def test_menu_over_router_files_shows_results_without_private_values(self):
         root = Path(os.path.realpath(tempfile.mkdtemp(prefix="keenvpn-menu-router-")))

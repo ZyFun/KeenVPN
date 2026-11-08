@@ -407,26 +407,33 @@ class ImportStoragePlacementHandler:
 
     def _detect(self) -> StoragePlacement | ErrorDetail:
         """Прочитать источник один раз и проверить размещение вместе с вложенными объектами."""
-        try:
-            placement = self._source.current_storage_placement()
-        except Exception:
-            # Текст и цепочка исключения источника могут содержать пути и вывод команд.
-            return _PLACEMENT_UNAVAILABLE
-        if type(placement) is not StoragePlacement:
-            return _INVALID_PLACEMENT_TYPE
-        reason = None
-        try:
-            metadata = ManagerMetadata(storage=placement)
-            validate_manager_metadata(metadata)
-            if metadata.to_diagnostic()["unknown_field_count"]:
-                # Источник сообщает только понятое: чужой JSON не попадает в файл менеджера.
-                reason = ManagerMetadataErrorCode.UNKNOWN_FIELDS.value
-        except ManagerMetadataError as error:
-            reason = error.code.value
-        except Exception:
-            reason = ManagerMetadataErrorCode.METADATA.value
-        if reason is not None:
-            return ErrorDetail(
-                ErrorCategory.INVALID_SOURCE_DATA, _INVALID_PLACEMENT, _INVALID_PLACEMENT_MESSAGE, reason=reason,
-            )
-        return placement
+        return read_storage_placement(self._source)
+
+
+def read_storage_placement(source: StoragePlacementSource) -> StoragePlacement | ErrorDetail:
+    """Прочитать размещение и проверить контракт; общее для импорта и подключения хранилищ.
+
+    Источник сообщает только понятое. Чужой JSON, текст исключений, пути
+    и вывод команд не попадают в безопасное описание отказа.
+    """
+    try:
+        placement = source.current_storage_placement()
+    except Exception:
+        return _PLACEMENT_UNAVAILABLE
+    if type(placement) is not StoragePlacement:
+        return _INVALID_PLACEMENT_TYPE
+    reason = None
+    try:
+        metadata = ManagerMetadata(storage=placement)
+        validate_manager_metadata(metadata)
+        if metadata.to_diagnostic()["unknown_field_count"]:
+            reason = ManagerMetadataErrorCode.UNKNOWN_FIELDS.value
+    except ManagerMetadataError as error:
+        reason = error.code.value
+    except Exception:
+        reason = ManagerMetadataErrorCode.METADATA.value
+    if reason is not None:
+        return ErrorDetail(
+            ErrorCategory.INVALID_SOURCE_DATA, _INVALID_PLACEMENT, _INVALID_PLACEMENT_MESSAGE, reason=reason,
+        )
+    return placement

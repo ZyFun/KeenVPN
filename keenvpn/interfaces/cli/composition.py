@@ -3,11 +3,11 @@
 Единственный модуль интерфейса, которому разрешён импорт конкретных адаптеров.
 Сборка по умолчанию не подключает ни одного источника: пункты, сценарию
 которых нужен источник, показываются недоступными. Чтение роутера включается
-явно (`vpn-menu --read-router`): тогда подключаются источники файлов Xray,
+при запуске `vpn-menu --read-router` или `vpn-setup`: подключаются источники файлов Xray,
 XKeen и геобаз Entware, наблюдения процесса Xray и состояния Keenetic через
-локальный RCI. Хранилище метаданных, хранилище черновика и членство в наборах
-геобаз в этой версии не подключаются ни в одном режиме: каталог черновика по
-умолчанию не выбран, хранилище передаётся сборке только явно. Объяснение маршрута открывает запрос значения
+локальный RCI. Черновик и метаданные подключаются только по подтверждённой
+роли data; отказ подключения показывается без путей и UUID. Членство в наборах
+геобаз не подключается. Объяснение маршрута открывает запрос значения
 и передаёт введённую строку сценарию без разбора. Сводка состояния и быстрая проверка допускают
 неподключённые источники, поэтому пункты «Сводка» и «Быстрая проверка без изменений» и шапка
 главного меню доступны всегда и показывают такие области и проверки «не проверено». Каждое действие выполняет сценарий
@@ -27,7 +27,9 @@ from keenvpn.adapters.router_sources import (
     GeoDatabaseFiles, KeeneticHotspotRuntimeRci, KeeneticHotspotSettingsRci, KeeneticPoliciesRci,
     KeeneticRegistrationsRci, XKeenInitFile, XKeenListFiles, XKeenSettingsFile, XrayConfigFiles, XrayProcessObserver,
 )
-from keenvpn.application.contract import OperationIdFactory, new_operation_id
+from keenvpn.adapters.router_manager_files import connect_router_manager_files
+from keenvpn.adapters.storage_placement_files import StoragePlacementFiles
+from keenvpn.application.contract import ErrorDetail, OperationIdFactory, new_operation_id
 from keenvpn.application.keenetic_devices import ListKeeneticDevices, ListKeeneticDevicesHandler
 from keenvpn.application.keenetic_state import InspectKeeneticStateHandler
 from keenvpn.application.manager_metadata import InspectManagerMetadata, InspectManagerMetadataHandler
@@ -79,6 +81,8 @@ class MenuSources:
     """Источник членства в наборах GeoIP и GeoSite для объяснения маршрута; без него условия геобаз «неизвестны»."""
     drafts: DraftSessionStore | None = None
     """Хранилище черновика для области «Черновик» и решения о выходе; сценарии его только читают."""
+    storage_error: ErrorDetail | None = None
+    """Безопасная причина неподключённых хранилищ при неподтверждённом размещении DATA."""
 
     @property
     def keenetic_connected(self) -> bool:
@@ -107,20 +111,21 @@ def default_sources() -> MenuSources:
 
 
 def router_sources() -> MenuSources:
-    """Источники запуска с флагом `--read-router`: файлы Entware, процесс Xray и локальный RCI проверенной платформы.
+    """Источники `vpn-menu --read-router` и `vpn-setup` для чтения проверенной платформы.
 
-    Источники только читают. Хранилище метаданных, хранилище черновика
-    и членство в наборах геобаз не подключаются: зависящие от них пункты
-    остаются с пометкой, правила показываются без названий и идентификаторов,
-    область «Черновик» — «не проверено», а выход сообщает, что черновик не
-    проверялся. Создание источников ничего
-    не читает: файлы, процесс и RCI читаются при выполнении сценария.
+    Подключаются файлы Entware, процесс Xray и локальный RCI.
+    При сборке читается размещение DATA для подключения приватных файлов.
+    При отказе оба хранилища остаются неподключёнными с безопасной причиной.
+    Остальные источники читаются при выполнении сценария. Членство в наборах
+    геобаз не подключается. Записей, создания каталогов и импорта нет.
     """
+    stores = connect_router_manager_files(StoragePlacementFiles())
     return MenuSources(
         policies=KeeneticPoliciesRci(), hotspot=KeeneticHotspotSettingsRci(), registrations=KeeneticRegistrationsRci(),
         runtime=KeeneticHotspotRuntimeRci(), xray=XrayConfigFiles(), xkeen_settings=XKeenSettingsFile(),
         xkeen_init=XKeenInitFile(), xkeen_lists=XKeenListFiles(), geodata=GeoDatabaseFiles(),
         process=XrayProcessObserver(),
+        drafts=stores.drafts, metadata=stores.metadata, storage_error=stores.error,
     )
 
 
@@ -145,6 +150,11 @@ def _bindings(
         action_id: UnavailableReason.SOURCE_NOT_CONNECTED for action_id in BOUND_SCENARIOS
     }
     actions: dict[str, Action] = {}
+    storage_notice = [] if sources.storage_error is None else [
+        "Хранилища не подключены: " + sources.storage_error.message,
+    ]
+    if storage_notice:
+        states["settings.storage"] = UnavailableReason.STORAGE_NOT_CONFIRMED
 
     def bind(action_id: str, action: Action) -> None:
         states[action_id] = None
@@ -152,16 +162,19 @@ def _bindings(
 
     # Сводка допускает неподключённые источники: пункт и шапка — один сценарий, который читает то, что подключено.
     summary = InspectStatusSummaryHandler(proxy, sources.process, drafts=sources.drafts, operation_ids=operation_ids)
-    bind("status.summary", lambda: present_result(summary.execute(InspectStatusSummary()), present_status_summary))
+    bind("status.summary", lambda: [
+        *present_result(summary.execute(InspectStatusSummary()), present_status_summary), *storage_notice,
+    ])
 
     def header() -> list[str]:
-        return present_result(summary.execute(InspectStatusSummary()), present_status_header)
+        return [*present_result(summary.execute(InspectStatusSummary()), present_status_header), *storage_notice]
 
     # Решение о выходе принимает сценарий; меню только показывает его строки и задаёт вопрос, если он нужен.
     menu_exit = InspectMenuExitHandler(sources.drafts, operation_ids=operation_ids)
 
     def exit_check() -> ExitNotice:
-        return present_menu_exit(menu_exit.execute(InspectMenuExit()))
+        notice = present_menu_exit(menu_exit.execute(InspectMenuExit()))
+        return ExitNotice((*notice.lines, *storage_notice), notice.confirm)
 
     # Быстрая проверка читает те же источники теми же функциями, что сводка, и дополнительно инвентарь геобаз.
     quick_check = QuickCheckHandler(proxy, sources.process, sources.geodata, operation_ids=operation_ids)

@@ -152,6 +152,8 @@ LITERAL_PAIRS = sorted({
     ("unsupported", "draft_exists"),
     ("unsupported", "draft_mismatch"),
     ("invalid_source_data", "invalid_draft_store_result"),
+    ("invalid_source_data", "invalid_draft_candidate"),
+    ("invalid_source_data", "draft_original_mismatch"),
     ("source_failed", "draft_store_failed"),
     ("source_failed", "draft_store_unavailable"),
     ("source_failed", "draft_store_unsafe"),

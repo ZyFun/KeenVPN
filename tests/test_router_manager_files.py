@@ -266,6 +266,7 @@ class RouterManagerFilesTests(unittest.TestCase):
         stores = self.connect()
         revision = "0" * 64
         calls = [(lambda: stores.drafts.create_draft(draft_fixture.session()), DraftSessionStoreError),
+                 (lambda: stores.drafts.replace_draft(draft_fixture.session(), revision), DraftSessionStoreError),
                  (lambda: stores.drafts.remove_draft(revision), DraftSessionStoreError),
                  (stores.drafts.confirm_draft_absent, DraftSessionStoreError),
                  (lambda: stores.metadata.write_metadata(ManagerMetadata(), None), ManagerMetadataStoreError)]

@@ -112,6 +112,8 @@
 
 ## Файловое хранилище
 
+При записи по ожидаемой существующей ревизии отсутствие собственного каталога даёт конфликт без его создания.
+
 `ManagerMetadataFiles(directory, *, protected_directories=PROTECTED_DIRECTORIES)` реализует `ManagerMetadataStore`. Механика приватного файла, описанная ниже, — общий модуль `keenvpn.adapters.private_files` (`PrivateFileStore`, `PROTECTED_DIRECTORIES`); его же использует [хранилище сессии черновика](draft-session.md#файловое-хранилище):
 
 - `directory` — абсолютный нормализованный путь собственного каталога, например `/tmp/mnt/<UUID>/keenvpn`. Значения по умолчанию нет. Каталог, совпадающий с `/opt/etc/xray`, `/opt/etc/xkeen` или `/opt/etc/init.d` либо вложенный в них, отклоняется до обращения к файловой системе.

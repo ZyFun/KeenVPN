@@ -175,7 +175,9 @@ class PrivateFileStore[StoredT: StoredFile]:
         revision = self.revision_of(content)
         parent_path, name = self._location()
         with self._walk(parent_path) as parent:
-            directory = self._open_directory(parent, name, create=True)
+            directory = self._open_directory(parent, name, create=expected_revision is None, sync_parent=True)
+            if directory is None:
+                self._raise(StoreFailure.CONFLICT)
             try:
                 self._lock(directory)
                 self._remove_stale(directory)
@@ -236,7 +238,7 @@ class PrivateFileStore[StoredT: StoredFile]:
         except OSError:
             self._raise(StoreFailure.UNAVAILABLE, StoreReason.IO_ERROR)
 
-    def _open_directory(self, parent: int, name: str, *, create: bool) -> int | None:
+    def _open_directory(self, parent: int, name: str, *, create: bool, sync_parent: bool = False) -> int | None:
         created = False
         if create:
             try:
@@ -264,7 +266,7 @@ class PrivateFileStore[StoredT: StoredFile]:
                 info = os.fstat(descriptor)
             if stat.S_IMODE(info.st_mode) != _DIRECTORY_MODE:
                 self._raise(StoreFailure.UNSAFE, StoreReason.PERMISSIONS)
-            if create:
+            if create or sync_parent:
                 # Предыдущая попытка могла оставить каталог после отказа fsync родителя.
                 os.fsync(parent)
         except BaseException as error:

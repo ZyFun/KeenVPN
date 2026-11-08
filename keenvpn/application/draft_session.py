@@ -262,10 +262,10 @@ DRAFT_EXISTS = ErrorDetail(
 """Отказ создания: черновик уже есть; его нужно открыть или отменить."""
 DRAFT_MISMATCH = ErrorDetail(
     ErrorCategory.UNSUPPORTED, "draft_mismatch",
-    "Открыт другой черновик: отмена отклонена, черновик не удалён.",
+    "Открыт другой черновик: операция отклонена, черновик не изменён.",
     conflicts=(Conflict(ConflictSubject.DRAFT, ConflictState.PRESENT, ConflictState.CHANGED),),
 )
-"""Отказ отмены: идентификатор команды не совпал с идентификатором существующего черновика."""
+"""Отказ операции: идентификатор команды не совпал с идентификатором существующего черновика."""
 INVALID_STORE_RESULT = ErrorDetail(
     ErrorCategory.INVALID_SOURCE_DATA, "invalid_draft_store_result",
     "Хранилище черновика вернуло некорректный ответ: перечитайте его состояние.",

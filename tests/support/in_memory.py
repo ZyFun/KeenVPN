@@ -374,6 +374,7 @@ class InMemoryDraftSessionStore(DraftSessionStore):
         self.read_calls = 0
         self.changes = 0
         self._create_calls: list[Any] = []
+        self.replace_calls: list[Any] = []
         self._remove_calls: list[Any] = []
         self.confirm_calls = 0
 
@@ -436,6 +437,15 @@ class InMemoryDraftSessionStore(DraftSessionStore):
         if not valid_metadata_revision(expected_revision):
             raise DraftSessionError(DraftSessionErrorCode.REVISION)
         self._change(expected_revision, None)
+
+    def replace_draft(self, session: DraftSession, expected_revision: str) -> str:
+        """Та же замена по ревизии, что у файлового хранилища, без файлов и блокировок."""
+        self.replace_calls.append((session, expected_revision))
+        if not valid_metadata_revision(expected_revision):
+            raise DraftSessionError(DraftSessionErrorCode.REVISION)
+        content = encode_draft_session(session)
+        self._change(expected_revision, content)
+        return draft_revision(content)
 
     def confirm_draft_absent(self) -> None:
         self.confirm_calls += 1

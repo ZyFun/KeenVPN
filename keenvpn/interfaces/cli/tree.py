@@ -28,6 +28,8 @@ BOUND_SCENARIOS: Mapping[str, str] = {
     "devices.list": "list_keenetic_devices",
     "failsafe.port53_check": "inspect_proxy_config",
     "settings.storage": "inspect_manager_metadata",
+    "draft.diff": "compare_saved_draft",
+    "draft.check": "check_saved_draft",
 }
 """Пункты, за которыми закреплён существующий сценарий application: действие → имя команды."""
 

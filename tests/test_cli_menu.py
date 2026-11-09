@@ -14,6 +14,7 @@ from keenvpn.application.proxy_connections import InspectConnections
 from keenvpn.application.quick_check import QuickCheck
 from keenvpn.application.routing import ExplainRoute
 from keenvpn.application.routing_rules import ListRoutingRules
+from keenvpn.application.saved_draft import CompareSavedDraft, CheckSavedDraft
 from keenvpn.interfaces.cli.menu import (
     BACK_NUMBER, MAX_ITEM_NUMBER, MAX_TITLE_LENGTH, REASON_MESSAGES, Menu, MenuAction, MenuError, MenuItem,
     MenuNavigator, Selection, SelectionKind, UnavailableReason, valid_action_id, valid_title,
@@ -299,6 +300,8 @@ class TreeTests(unittest.TestCase):
             "devices.list": ListKeeneticDevices.name,
             "failsafe.port53_check": InspectProxyConfig.name,
             "settings.storage": InspectManagerMetadata.name,
+            "draft.diff": CompareSavedDraft.name,
+            "draft.check": CheckSavedDraft.name,
         })
         self.assertLessEqual(set(BOUND_SCENARIOS) | BUILTIN_ACTIONS, ALL_ACTION_IDS)
         self.assertEqual(BUILTIN_ACTIONS, {"settings.about"})

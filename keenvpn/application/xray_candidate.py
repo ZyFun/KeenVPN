@@ -144,10 +144,12 @@ def _assets(items: tuple[CandidateAsset, ...]) -> tuple[CandidateAsset, ...] | C
     return tuple(copies)
 
 
-def _prepare(config: XrayConfigSet, assets: tuple[CandidateAsset, ...]) -> XrayTestInput | CheckView:
-    resources = _assets(assets)
-    if type(resources) is CheckView:
-        return resources
+def candidate_geo_references(config: XrayConfigSet) -> tuple[tuple[GeoDatabaseKind, str, str], ...] | CheckView:
+    """Зависимости проверенного кандидата для чтения ресурсов и проверки одним правилом.
+
+    Вызывающий передаёт восстановленную из исходных байтов модель. Неполные
+    ссылки не превращаются в запрос произвольного файла или частичный набор.
+    """
     refs = candidate_references(config)
     if refs.schema_invalid or refs.case_variant:
         return _check(CheckStatus.NOT_CHECKED, "candidate_references_incomplete")
@@ -164,9 +166,20 @@ def _prepare(config: XrayConfigSet, assets: tuple[CandidateAsset, ...]) -> XrayT
     required = {(kind, name) for kind, name, _ in categories}
     if not set(STANDARD_FILE_NAMES.items()).issubset(required):
         return _check(CheckStatus.NOT_CHECKED, "both_geo_references_required")
+    return tuple(categories)
+
+
+def _prepare(config: XrayConfigSet, assets: tuple[CandidateAsset, ...]) -> XrayTestInput | CheckView:
+    resources = _assets(assets)
+    if type(resources) is CheckView:
+        return resources
+    categories = candidate_geo_references(config)
+    if type(categories) is CheckView:
+        return categories
+    required = {(kind, name) for kind, name, _ in categories}
     if {(item.kind, item.name) for item in resources} != required:
         return _check(CheckStatus.FAILED, "candidate_assets_mismatch")
-    return XrayTestInput(tuple((p.name, p.content) for p in config.parts), resources, tuple(categories))
+    return XrayTestInput(tuple((p.name, p.content) for p in config.parts), resources, categories)
 
 
 def checked_port_input(value: object) -> XrayTestInput | None:

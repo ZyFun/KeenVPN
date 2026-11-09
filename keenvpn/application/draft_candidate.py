@@ -96,7 +96,8 @@ class DraftCandidateView:
             ), None)
             if geo_reason == "geo_revision_unknown":
                 code = NextStepCode.REVIEW_DRAFT
-            elif geo_reason not in (None, "no_references", "schema_incomplete", "candidate_references_incomplete"):
+            elif geo_reason not in (None, "no_references", "schema_incomplete", "candidate_references_incomplete",
+                                    "geo_categories_unverified"):
                 code = NextStepCode.CHECK_SOURCE
             else:
                 code = NextStepCode.CONSULT_DOCUMENTATION

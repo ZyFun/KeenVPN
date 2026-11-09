@@ -469,7 +469,7 @@ class DraftCandidateTests(unittest.TestCase):
         geo = rules({"ip": "geoip:RU", "outboundTag": OUT["tag"]})
         unsupported = rules({"network": "tcp", "outboundTag": OUT["tag"]})
         limited = rules({"ip": ["198.51.100.1"] * 317, "outboundTag": OUT["tag"]})
-        for document, code in ((invalid, "review_draft"), (geo, "check_source"),
+        for document, code in ((invalid, "review_draft"), (geo, "consult_documentation"),
                                (unsupported, "consult_documentation"), (limited, "consult_documentation")):
             with self.subTest(code=code):
                 data = self.run_check(xray=config(document)).data

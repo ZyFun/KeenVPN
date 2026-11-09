@@ -34,6 +34,7 @@ from keenvpn.adapters.xkeen_files import (
 from keenvpn.adapters.xkeen_runtime import XKEEN_READY_MARKER_PATH, XRAY_PROCESS_NAME, xray_process_from_pidof
 from keenvpn.adapters.xray_configs import XRAY_CONFIG_DIRECTORY, xray_config_from_files
 from keenvpn.application.ports import RouterReadError, RouterReadFailure
+from keenvpn.domain.config_document import valid_document_name
 from keenvpn.domain.geodata import GeoDatabaseInventory
 from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
 from keenvpn.domain.keenetic_policy import KeeneticPolicySet
@@ -208,6 +209,23 @@ class GeoDatabaseFiles:
             self._directory, ".dat", file_limit=GEO_DATABASE_LIMIT, count_limit=GEO_DATABASE_COUNT_LIMIT,
         )
         return geo_inventory_from_digests(files)
+
+
+class GeoCandidateFiles:
+    """Полные кандидатные байты по проверенному имени из того же каталога геобаз.
+
+    Ожидание SHA берётся из сессии, а не пересчитывается для принятия нового
+    файла. Этот источник не выдаёт свидетельств категорий.
+    """
+
+    def __init__(self, *, root: str = "/") -> None:
+        self._directory = _under(root, XRAY_ASSET_DIRECTORY)
+
+    def read_asset(self, name: str, limit: int) -> bytes:
+        """Читать весь файл без ссылок и с контролем подмены; частичный ответ запрещён."""
+        if not valid_document_name(name) or type(limit) is not int or not 0 < limit <= GEO_DATABASE_LIMIT:
+            fail_read(RouterReadFailure.UNSAFE)
+        return read_file(posixpath.join(self._directory, name), limit)
 
 
 class XrayProcessObserver:

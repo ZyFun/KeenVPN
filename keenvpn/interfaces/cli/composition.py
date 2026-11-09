@@ -24,12 +24,14 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from keenvpn.adapters.router_sources import (
-    GeoDatabaseFiles, KeeneticHotspotRuntimeRci, KeeneticHotspotSettingsRci, KeeneticPoliciesRci,
+    GeoCandidateFiles, GeoDatabaseFiles, KeeneticHotspotRuntimeRci, KeeneticHotspotSettingsRci, KeeneticPoliciesRci,
     KeeneticRegistrationsRci, XKeenInitFile, XKeenListFiles, XKeenSettingsFile, XrayConfigFiles, XrayProcessObserver,
+    SourceFingerprints,
 )
 from keenvpn.adapters.router_manager_files import connect_router_manager_files
 from keenvpn.adapters.storage_placement_files import StoragePlacementFiles
 from keenvpn.application.contract import ErrorDetail, OperationIdFactory, new_operation_id
+from keenvpn.application.draft_session import InspectDraft, InspectDraftHandler
 from keenvpn.application.keenetic_devices import ListKeeneticDevices, ListKeeneticDevicesHandler
 from keenvpn.application.keenetic_state import InspectKeeneticStateHandler
 from keenvpn.application.manager_metadata import InspectManagerMetadata, InspectManagerMetadataHandler
@@ -37,8 +39,13 @@ from keenvpn.application.menu_exit import InspectMenuExit, InspectMenuExitHandle
 from keenvpn.application.ports import (
     DraftSessionStore, GeoDatabaseSource, GeoDataSource, KeeneticHotspotRuntimeSource, KeeneticHotspotSettingsSource,
     KeeneticPolicySource, KeeneticRegistrationSource, ManagerMetadataStore, XKeenInitSource, XKeenListSource,
-    XKeenSettingsSource, XrayConfigSource, XrayProcessSource,
+    XKeenSettingsSource, XrayConfigSource, XrayProcessSource, SourceFingerprintSource,
 )
+from keenvpn.application.saved_draft import (
+    CandidateAssetSource, GeoCategorySource, CompareSavedDraft, CompareSavedDraftHandler,
+    CheckSavedDraft, CheckSavedDraftHandler,
+)
+from keenvpn.application.xray_candidate import InstalledXrayPort
 from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler
 from keenvpn.application.proxy_connections import InspectConnections, InspectConnectionsHandler
 from keenvpn.application.quick_check import QuickCheck, QuickCheckHandler
@@ -52,6 +59,7 @@ from keenvpn.interfaces.cli.presenters import (
     present_menu_exit, present_quick_check, present_result, present_route_explanation, present_rule_list,
     present_status_header, present_status_summary,
 )
+from keenvpn.interfaces.cli.draft_presenters import present_draft_diff, present_saved_draft_check
 from keenvpn.interfaces.cli.terminal import Action, ExitCheck, Header
 from keenvpn.interfaces.cli.tree import (
     BOUND_SCENARIOS, BUILTIN_ACTIONS, ActionStates, build_main_menu, build_setup_menu,
@@ -62,8 +70,9 @@ from keenvpn.interfaces.cli.tree import (
 class MenuSources:
     """Порты чтения, доступные меню; `None` — источник не подключён.
 
-    Источники только читают. Их подключение не включает запись, установку
-    или команды XKeen: меню показывает результат сценария и ничего не меняет.
+    Источники конфигурации и хранилища только читают. Отдельный порт проверки
+    Xray создаёт временную область и запускает изолированный config test
+    лишь при выборе проверки черновика. Рабочие настройки не меняются.
     """
 
     policies: KeeneticPolicySource | None = None
@@ -83,6 +92,14 @@ class MenuSources:
     """Хранилище черновика для области «Черновик» и решения о выходе; сценарии его только читают."""
     storage_error: ErrorDetail | None = None
     """Безопасная причина неподключённых хранилищ при неподтверждённом размещении DATA."""
+    fingerprints: SourceFingerprintSource | None = None
+    """Текущие отпечатки всех управляемых источников для проверки сохранённой сессии."""
+    candidate_assets: CandidateAssetSource | None = None
+    """Полные байты геобаз; ожидаемые ревизии всегда берутся из кандидата."""
+    geo_catalogs: GeoCategorySource | None = None
+    """Доверенные свидетельства категорий; отсутствие не подменяется именем или SHA."""
+    installed_xray: InstalledXrayPort | None = None
+    """Изолированный исполнитель; его отсутствие не блокирует статический отчёт."""
 
     @property
     def keenetic_connected(self) -> bool:
@@ -117,15 +134,25 @@ def router_sources() -> MenuSources:
     При сборке читается размещение DATA для подключения приватных файлов.
     При отказе оба хранилища остаются неподключёнными с безопасной причиной.
     Остальные источники читаются при выполнении сценария. Членство в наборах
-    геобаз не подключается. Записей, создания каталогов и импорта нет.
+    геобаз не подключается. При сборке записей, создания каталогов и импорта
+    нет; проверочный процесс и временные файлы возможны только в пункте 7 → 2.
     """
     stores = connect_router_manager_files(StoragePlacementFiles())
+    # Необязательные зависимости runner не должны ломать остальные пункты
+    # меню. Проверки платформы и полномочий выполняет сам порт перед запуском.
+    try:
+        from keenvpn.adapters.xray_isolated_port import IsolatedInstalledXray
+    except ImportError:
+        tester = None
+    else:
+        tester = IsolatedInstalledXray()
     return MenuSources(
         policies=KeeneticPoliciesRci(), hotspot=KeeneticHotspotSettingsRci(), registrations=KeeneticRegistrationsRci(),
         runtime=KeeneticHotspotRuntimeRci(), xray=XrayConfigFiles(), xkeen_settings=XKeenSettingsFile(),
         xkeen_init=XKeenInitFile(), xkeen_lists=XKeenListFiles(), geodata=GeoDatabaseFiles(),
         process=XrayProcessObserver(),
         drafts=stores.drafts, metadata=stores.metadata, storage_error=stores.error,
+        fingerprints=SourceFingerprints(), candidate_assets=GeoCandidateFiles(), installed_xray=tester,
     )
 
 
@@ -154,7 +181,8 @@ def _bindings(
         "Хранилища не подключены: " + sources.storage_error.message,
     ]
     if storage_notice:
-        states["settings.storage"] = UnavailableReason.STORAGE_NOT_CONFIRMED
+        for action_id in ("settings.storage", "draft.diff", "draft.check"):
+            states[action_id] = UnavailableReason.STORAGE_NOT_CONFIRMED
 
     def bind(action_id: str, action: Action) -> None:
         states[action_id] = None
@@ -206,6 +234,27 @@ def _bindings(
             "settings.storage",
             lambda: present_result(metadata.execute(InspectManagerMetadata()), present_manager_metadata),
         )
+    if sources.drafts is not None and sources.fingerprints is not None:
+        inspect_draft = InspectDraftHandler(sources.drafts, operation_ids=operation_ids)
+        compare = CompareSavedDraftHandler(sources.drafts, sources.fingerprints, operation_ids=operation_ids)
+        check = CheckSavedDraftHandler(sources.drafts, sources.fingerprints, sources.geodata,
+            sources.candidate_assets, sources.geo_catalogs, sources.installed_xray, operation_ids=operation_ids)
+
+        def saved_action(handler, command_type, presenter):
+            def action():
+                inspected = inspect_draft.execute(InspectDraft())
+                if not inspected.succeeded:
+                    return present_result(inspected, presenter)
+                view = inspected.data.draft
+                if view is None:
+                    return ["Сохранённого черновика нет."]
+                # ID и токен остаются в состоянии вызова и не выводятся.
+                return present_result(handler.execute(command_type(draft_id=view.draft_id,
+                    expected_revision=view.revision)), presenter)
+            return action
+
+        bind("draft.diff", saved_action(compare, CompareSavedDraft, present_draft_diff))
+        bind("draft.check", saved_action(check, CheckSavedDraft, present_saved_draft_check))
     for action_id in BUILTIN_ACTIONS:
         bind(action_id, present_about)
     return states, actions, header, exit_check

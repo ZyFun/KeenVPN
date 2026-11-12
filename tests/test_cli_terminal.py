@@ -997,6 +997,39 @@ class DevicesFlowTests(unittest.TestCase):
                 self.assertIn(NO_MATCHES, output)
                 self.assertNotIn("Найдено:", output)
 
+    def test_devices_mask_macs_in_registration_names_before_display_and_search(self):
+        colon_mac = "02:aB:Cd:eF:34:56"
+        hyphen_mac = "06-DE-AD-BE-EF-78"
+        sources = synthetic_keenetic_sources()
+        sources["registrations"] = InMemoryKeeneticRegistrationSource(KeeneticRegistrations({
+            f"Тест{colon_mac}метка-{hyphen_mac}": {"mac": DEVICE_MAC_A},
+            f"Гость-{hyphen_mac}": {"mac": DEVICE_MAC_B},
+            "Резерв": {"mac": DEVICE_MAC_B},
+            "Стенд-01-02-03-04-05": {"mac": DEVICE_MAC_C},
+        }))
+        menu_sources = MenuSources(**sources)
+        markers = (*DEVICE_PRIVATE_MARKERS, colon_mac, hyphen_mac, "aB:Cd:eF", "DE-AD-BE")
+        shown = "Тест<MAC скрыт>метка-<MAC скрыт> (имя изменено для показа)"
+        code, output, navigator = self.flow(
+            "5\n1\nметка\n1\n0\n0\n2\n0\nСтенд-01\n3\n0\n0\n0\n0\n0\n", menu_sources, markers,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(navigator.depth, 0)
+        self.assertIn(f"  1. {shown}: явная политика", output)
+        self.assertIn(f"Найдено: 1 из 3.\n  1. {shown}:", output)
+        self.assertIn(f"Регистраций: 1\n  {shown}\n", output)
+        self.assertIn("  2. регистраций 2:", output)
+        self.assertIn("Регистраций: 2\n  Гость-<MAC скрыт> (имя изменено для показа)\n  Резерв\n", output)
+        self.assertIn("Найдено: 1 из 3.\n  3. Стенд-01-02-03-04-05:", output)
+        self.assertIn("Регистраций: 1\n  Стенд-01-02-03-04-05\n", output)
+
+        for query in (colon_mac.upper(), "AB:CD:EF", hyphen_mac.lower(), "de-ad-be", "Гость"):
+            with self.subTest(query=query):
+                code, output, _ = self.flow(f"5\n1\n{query}\n0\n0\n0\n", menu_sources, markers)
+                self.assertEqual(code, 0)
+                self.assertIn(NO_MATCHES, output)
+                self.assertNotIn("Найдено:", output)
+
     def test_many_long_policy_ids_keep_the_devices_menu_running(self):
         # Регрессия review 75-R02: 31 допустимый ID по 64 символа завершал меню кодом 1 при открытии 5 → 1.
         sources = synthetic_keenetic_sources()

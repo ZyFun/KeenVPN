@@ -1132,6 +1132,11 @@ class DeviceListPresenterTests(PresenterAssertions):
             with self.subTest(value=repr(value)):
                 self.assertEqual(device_name(value), HIDDEN)
 
+    def test_device_name_masks_overlapping_mac_substrings(self):
+        # Последняя пара первого MAC одновременно начинает второй MAC.
+        name = "Клиент-02:11:22:33:44:55-66-77-88-99-AA"
+        self.assertEqual(device_name(name), "Клиент-<MAC скрыт> (имя изменено для показа)")
+
     def test_keenetic_state_segment_lines_are_unchanged_after_sharing_the_helper(self):
         lines = present_keenetic_state(self.results["keenetic"].data)
         self.assertEqual(

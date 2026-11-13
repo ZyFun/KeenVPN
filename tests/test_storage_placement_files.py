@@ -45,6 +45,33 @@ class FailureCase(unittest.TestCase):
 
 
 class FormatTests(FailureCase):
+    def test_v4_preserves_settings_and_accepts_independent_limits(self):
+        script, sql = fixture("history-v4.sh"), fixture("history-ingest-v4.sql")
+        result = formats.history_placement(script, sql)
+        self.assertEqual(result, formats.history_placement(fixture("history.sh"), fixture("history-ingest.sql")))
+        changed = formats.history_placement(
+            script.replace(b"-le 131072 ]", b"-le 8192 ]"),
+            sql.replace(b"-864000;", b"-172800;"),
+        )
+        self.assertEqual((changed.size_bytes, changed.retention_seconds), (8388608, 172800))
+
+    def test_history_rejects_mixed_versions_and_modified_v4_structure(self):
+        script, sql = fixture("history-v4.sh"), fixture("history-ingest-v4.sql")
+        cases = (
+            (script, fixture("history-ingest.sql")),
+            (fixture("history.sh"), sql),
+            (script.replace(b"4\\ndelete", b"5\\ndelete"), sql),
+            (script.replace(b"4\\ndelete", b"4\\nwal"), sql),
+            (script, sql.replace(b"'hysteria' THEN 3", b"'hysteria' THEN 2")),
+            (script, sql.replace(b"THEN 3 END", b"THEN 3 ELSE 2 END")),
+            (script, sql.replace(b",'hysteria')", b")")),
+            (script + b"\nunknown_function\n", sql),
+            (script, sql + b"SELECT 'private-secret';\n"),
+        )
+        for index, (writer, ingest) in enumerate(cases):
+            with self.subTest(case=index):
+                self.assert_failure(lambda: formats.history_placement(writer, ingest))
+
     def test_backup_code_fingerprints_match_repository_sources(self):
         sources = (
             ("scripts/router_backup.py", formats.BACKUP_ENTRY_SHA256),
@@ -194,6 +221,22 @@ class SourceTests(FailureCase):
 
     def read(self):
         return self.source.current_storage_placement()
+
+    def test_v4_source_reads_verified_placement_without_writes_or_sqlite(self):
+        expected = self.read()
+        self.put(files.HISTORY_SCRIPT, fixture("history-v4.sh"))
+        self.put(files.HISTORY_INGEST, fixture("history-ingest-v4.sql"))
+        # Содержимое БД не требуется для распознавания размещения.
+        self.put(HISTORY + "/history.sqlite", b"private-secret-not-a-database")
+        def snapshot():
+            return {str(path.relative_to(self.root)): (path.stat().st_mode, path.read_bytes())
+                    for path in self.root.rglob("*") if path.is_file()}
+        before = snapshot()
+        self.calls.clear()
+        with patch("sqlite3.connect", side_effect=AssertionError("SQLite не должна открываться")):
+            self.assertEqual(self.read(), expected)
+        self.assertEqual(snapshot(), before)
+        self.assertEqual(len(self.calls), 6)
 
     def test_real_port_preserves_layout_limits_and_import_idempotence(self):
         placement = self.read()

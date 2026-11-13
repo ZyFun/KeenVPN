@@ -18,6 +18,13 @@ from keenvpn.domain.manager_metadata import MAX_LIMIT_VALUE, valid_storage_id, v
 
 HISTORY_SCRIPT_SHA256 = "efb5d528f0ff86299cc39f71d9698e2016bcac9b5b5c98053b9a9a0302141806"
 HISTORY_INGEST_SHA256 = "0d97b48e0adc2b5d2f99436c0c73cfd7f03f0196e07da201c839635d3b30fccf"
+HISTORY_V4_SCRIPT_SHA256 = "8ec5fe290ba604049a5e7d8c612cf369cfe3afc00d42be1be0fba1f3b87163f4"
+HISTORY_V4_INGEST_SHA256 = "70c62d08163122d1f5b63999d29287ad2f708b8b2ce14fefde3bed5e27e5badd"
+# Версия writer и схема назначения каналов SQL должны составлять одну пару.
+_HISTORY_FORMAT_PAIRS = frozenset({
+    (HISTORY_SCRIPT_SHA256, HISTORY_INGEST_SHA256),
+    (HISTORY_V4_SCRIPT_SHA256, HISTORY_V4_INGEST_SHA256),
+})
 BACKUP_WRAPPER_SHA256 = "d5ec227a074743a90a55a231a6f29454f07af0c5d5d2851300f803212d866dc2"
 BACKUP_ENTRY_SHA256 = "eb164850f8845084251fc240cdc072c3e8be49134b1144bb75966ca20c766ed0"
 BACKUP_ADAPTER_SHA256 = "abef37fbd5f7423a04eed30a15634641ab6c8901eefeac1452539a2f75141a72"
@@ -149,6 +156,7 @@ def history_placement(script: bytes, ingest: bytes) -> HistoryPlacement:
     """Получить размещение и независимые бюджет/срок только после проверки обоих текстов."""
     normalized_script, values = normalized_history(script)
     normalized_sql, retention = normalized_ingest(ingest)
-    confirm_code(normalized_script, HISTORY_SCRIPT_SHA256)
-    confirm_code(normalized_sql, HISTORY_INGEST_SHA256)
+    pair = (hashlib.sha256(normalized_script).hexdigest(), hashlib.sha256(normalized_sql).hexdigest())
+    if pair not in _HISTORY_FORMAT_PAIRS:
+        reject_format()
     return HistoryPlacement(*values, retention)

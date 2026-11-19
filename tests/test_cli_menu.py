@@ -7,8 +7,10 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.application.status_summary import InspectStatusSummary
+from keenvpn.application.draft_session import DiscardDraft
 from keenvpn.application.keenetic_devices import ListKeeneticDevices
 from keenvpn.application.manager_metadata import InspectManagerMetadata
+from keenvpn.application.menu_exit import InspectMenuExit
 from keenvpn.application.proxy_config import InspectProxyConfig
 from keenvpn.application.proxy_connections import InspectConnections
 from keenvpn.application.quick_check import QuickCheck
@@ -302,6 +304,8 @@ class TreeTests(unittest.TestCase):
             "settings.storage": InspectManagerMetadata.name,
             "draft.diff": CompareSavedDraft.name,
             "draft.check": CheckSavedDraft.name,
+            "draft.save_and_exit": InspectMenuExit.name,
+            "draft.discard": DiscardDraft.name,
         })
         self.assertLessEqual(set(BOUND_SCENARIOS) | BUILTIN_ACTIONS, ALL_ACTION_IDS)
         self.assertEqual(BUILTIN_ACTIONS, {"settings.about"})

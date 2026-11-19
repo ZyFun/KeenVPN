@@ -30,6 +30,8 @@ BOUND_SCENARIOS: Mapping[str, str] = {
     "settings.storage": "inspect_manager_metadata",
     "draft.diff": "compare_saved_draft",
     "draft.check": "check_saved_draft",
+    "draft.save_and_exit": "inspect_menu_exit",
+    "draft.discard": "discard_draft",
 }
 """Пункты, за которыми закреплён существующий сценарий application: действие → имя команды."""
 

@@ -6,7 +6,8 @@
 в том числе запросы поиска и введённые значения, не повторяются. Один цикл
 обслуживает все уровни: подменю, список, результаты поиска, карточку элемента
 и запрос значения. Запрос значения передаёт строку действию без разбора:
-проверку выполняет сценарий. Выход из корня и конец ввода сначала выполняют
+проверку выполняет сценарий. Вопрос подтверждения сохраняет выбранное действие
+до ответа. Выход из корня, сохранение с выходом и конец ввода сначала выполняют
 проверку выхода: она возвращает строки и признак вопроса «остаться или
 выйти, сохранив черновик», цикл только показывает их и читает ответ. Цвет
 и скрытый ввод здесь отсутствуют.
@@ -17,14 +18,14 @@ import re
 from typing import Protocol
 
 from keenvpn.interfaces.cli.menu import (
-    REASON_MESSAGES, CardLevel, ExitNotice, InputLevel, ListLevel, MenuError, MenuList, MenuNavigator, SelectionKind,
-    ValueRequest,
+    REASON_MESSAGES, CardLevel, ConfirmationRequest, ExitNotice, InputLevel, ListLevel, MenuError, MenuList,
+    MenuNavigator, SelectionKind, ValueRequest,
 )
 from keenvpn.interfaces.cli.search import MAX_QUERY_CHARS, MAX_QUERY_WORDS, is_number_like, parse_query
 
 
-Action = Callable[[], list[str] | MenuList | ValueRequest]
-"""Доступное действие пункта: возвращает строки для вывода, список элементов или запрос значения, ничего не печатает само."""
+Action = Callable[[], list[str] | MenuList | ValueRequest | ConfirmationRequest | ExitNotice]
+"""Действие возвращает данные для показа или решение о выходе, ничего не печатает само."""
 Header = Callable[[], list[str]]
 """Шапка корня: возвращает строки под заголовком корневого меню, ничего не печатает сама."""
 ExitCheck = Callable[[], ExitNotice]
@@ -50,6 +51,7 @@ STAY_LABEL = "Остаться в меню"
 LEAVE_LABEL = "Выйти, сохранив черновик"
 EXIT_DEFAULT = "Пустая строка — остаться."
 EXIT_HINT = "Введите 1, 2 или пустую строку."
+CONFIRMATION_HINT = "Введите 0, 1, 2 или пустую строку."
 INPUT_ENDED = "Ввод завершён: черновик и настройки не изменены."
 """Строка после вопроса о выходе, если ввод закончился: ответить уже некому, работа завершается."""
 
@@ -212,7 +214,7 @@ def _exit_notice(check: ExitCheck | None) -> ExitNotice | None:
 
 def _menu_step(
     navigator: MenuNavigator, actions: Mapping[str, Action], line: str, root: _RootHeader,
-) -> list[str] | None:
+) -> list[str] | ConfirmationRequest | ExitNotice | None:
     choice = parse_choice(line)
     if choice is None:
         return [HINT, "", *render_menu(navigator, root.lines(navigator))]
@@ -234,6 +236,8 @@ def _menu_step(
         if type(result) is ValueRequest:
             navigator.open_input(selection.item.title, result)
             return ["", *render_input(navigator)]
+        if type(result) in (ConfirmationRequest, ExitNotice):
+            return result
         return ["", *result, "", *render_menu(navigator, root.lines(navigator))]
     return render_level(navigator, root.lines(navigator))
 
@@ -301,11 +305,13 @@ def run_menu(
     каждом возврате в корень; повторный показ корня после подсказки или
     действия в нём выводит те же строки без нового вызова.
 
-    `0` в корне и конец ввода выполняют проверку выхода, если она задана.
-    Без вопроса её строки показываются перед завершением. С вопросом `0`
-    показывает строки и варианты: `2` завершает работу, `1` и пустая строка
-    возвращают в корень с той же шапкой, другая строка даёт подсказку и
+    `0` в корне, пункт сохранения с выходом и конец ввода выполняют проверку выхода.
+    Без вопроса её строки показываются перед завершением. Если нужен вопрос,
+    `2` завершает работу, а `1` и пустая строка
+    возвращают на тот же уровень, другая строка даёт подсказку и
     повтор вопроса, конец ввода завершает работу строкой `INPUT_ENDED`.
+    Запрос подтверждения выполняет действие только при выборе `2`; `0`
+    возвращает в меню, как `1` и пустой ответ.
     Конец ввода в меню вопроса не задаёт: показываются строки проверки и та
     же строка. Код завершения во всех случаях `EXIT_OK`. `KeyboardInterrupt`
     не перехватывается, в том числе во время вопроса: его обрабатывает точка входа.
@@ -329,30 +335,35 @@ def run_menu(
                 show(lines)
         return EXIT_OK
 
-    def leave() -> bool:
-        """Выполнить проверку выхода и, если нужно, вопрос; True — работа завершается."""
-        notice = _exit_notice(exit_check)
-        if notice is None or not notice.confirm:
-            if notice is not None and notice.lines:
-                show(list(notice.lines))
-            return True
-        question = render_exit_question(notice)
+    def confirm(question: list[str], *, allow_back: bool = False) -> bool | None:
+        """Принять подтверждение, отказ или конец ввода."""
+        hint = CONFIRMATION_HINT if allow_back else EXIT_HINT
         show(["", *question])
         while True:
             line, too_long = ask()
             if line is None:
-                stdout.write("\n")
-                show([INPUT_ENDED])
-                return True
+                return None
             if too_long:
                 show([LINE_TOO_LONG, "", *question])
                 continue
             choice = parse_choice(line)
-            if not line.strip() or choice == 1:
+            if not line.strip() or choice == 1 or (allow_back and choice == 0):
                 return False
             if choice == 2:
                 return True
-            show([EXIT_HINT, "", *question])
+            show([hint, "", *question])
+
+    def leave(notice: ExitNotice | None) -> bool:
+        """Показать решение о выходе и при необходимости запросить подтверждение."""
+        if notice is None or not notice.confirm:
+            if notice is not None and notice.lines:
+                show(list(notice.lines))
+            return True
+        decision = confirm(render_exit_question(notice))
+        if decision is None:
+            stdout.write("\n")
+            show([INPUT_ENDED])
+        return decision is not False
 
     root = _RootHeader(header)
     show(render_level(navigator, root.lines(navigator)))
@@ -371,10 +382,18 @@ def run_menu(
         elif type(level) is InputLevel:
             show(_input_step(navigator, line, root))
         else:
-            lines = _menu_step(navigator, actions, line, root)
-            if lines is None:
-                if leave():
+            step = _menu_step(navigator, actions, line, root)
+            if step is None or type(step) is ExitNotice:
+                if leave(_exit_notice(exit_check) if step is None else step):
                     return EXIT_OK
-                lines = ["", *render_level(navigator, root.lines(navigator))]
-            show(lines)
+                show(["", *render_level(navigator, root.lines(navigator))])
+            elif type(step) is ConfirmationRequest:
+                decision = confirm(list(step.lines), allow_back=True)
+                if decision is None:
+                    return input_ended()
+                if decision:
+                    show(["", *step.accept()])
+                show(["", *render_menu(navigator, root.lines(navigator))])
+            else:
+                show(step)
         root.track(navigator)

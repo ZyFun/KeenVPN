@@ -47,6 +47,10 @@ class UnavailableReason(StrEnum):
     """Сценарий есть, но источник чтения при сборке не подключён."""
     STORAGE_NOT_CONFIRMED = "storage_not_confirmed"
     """Размещение DATA или собственные каталоги не прошли проверку подключения."""
+    DRAFT_STORE_NOT_CONNECTED = "draft_store_not_connected"
+    """Хранилище сессии черновика не подключено."""
+    DRAFT_DISCARD_NOT_CONNECTED = "draft_discard_not_connected"
+    """У меню есть источник чтения черновика, но отмена ему не разрешена."""
     INPUT_REQUIRED = "input_required"
     """Сценарий есть, но пункту нужен ввод значений, которого это меню не принимает."""
 
@@ -61,6 +65,12 @@ REASON_MESSAGES: Mapping[UnavailableReason, str] = MappingProxyType({
     UnavailableReason.STORAGE_NOT_CONFIRMED: (
         "Хранилища не подключены: размещение роли data или выбранные каталоги не прошли проверку; "
         "настройки не меняются."
+    ),
+    UnavailableReason.DRAFT_STORE_NOT_CONNECTED: (
+        "Хранилище черновика не подключено. Отмена не выполняется."
+    ),
+    UnavailableReason.DRAFT_DISCARD_NOT_CONNECTED: (
+        "Хранилище черновика подключено только для чтения. Отмена не выполняется."
     ),
     UnavailableReason.INPUT_REQUIRED: (
         "Пункт требует ввода значений, который это меню не принимает: действие не выполняется."
@@ -248,6 +258,18 @@ class ValueRequest:
             "Подсказка запроса значения задаётся непустым tuple печатных строк.",
         )
         _require(callable(self.submit), "Приём значения задаётся вызываемым объектом.")
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmationRequest:
+    """Вопрос перед действием: `2` подтверждает, `0`, `1` и пустой ответ отменяют."""
+
+    lines: tuple[str, ...]
+    accept: Callable[[], list[str]]
+
+    def __post_init__(self) -> None:
+        _require(_valid_lines(self.lines) and bool(self.lines), "Вопрос задаётся непустым tuple печатных строк.")
+        _require(callable(self.accept), "Подтверждаемое действие задаётся вызываемым объектом.")
 
 
 @dataclass(frozen=True, slots=True)

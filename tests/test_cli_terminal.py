@@ -306,12 +306,15 @@ class CompositionTests(unittest.TestCase):
         found = states(assembly)
         self.assertEqual(set(found), set(ALL_ACTION_IDS))
         # Сводка и быстрая проверка допускают неподключённые источники: пункты доступны и показывают «не проверено».
-        self.assertEqual(set(assembly.actions), {"settings.about", "status.summary", "status.quick_check"})
+        available = {"settings.about", "status.summary", "status.quick_check", "draft.save_and_exit"}
+        self.assertEqual(set(assembly.actions), available)
         self.assertIsNone(found["settings.about"])
         self.assertIsNone(found["status.summary"])
         self.assertIsNone(found["status.quick_check"])
+        self.assertIsNone(found["draft.save_and_exit"])
+        self.assertIs(found["draft.discard"], UnavailableReason.DRAFT_STORE_NOT_CONNECTED)
         # Объяснение маршрута читает импортированную схему: без источников Xray и XKeen пункт недоступен.
-        for action_id in set(BOUND_SCENARIOS) - {"status.summary", "status.quick_check"}:
+        for action_id in set(BOUND_SCENARIOS) - available - {"draft.discard"}:
             self.assertIs(found[action_id], UnavailableReason.SOURCE_NOT_CONNECTED, action_id)
         for action_id in set(ALL_ACTION_IDS) - set(BOUND_SCENARIOS) - {"settings.about"}:
             self.assertIs(found[action_id], UnavailableReason.NOT_IMPLEMENTED, action_id)
@@ -331,7 +334,7 @@ class CompositionTests(unittest.TestCase):
         self.assertEqual(
             set(assemble_main_menu(sources).actions),
             {"status.summary", "status.quick_check", "connections.list", "routing.list", "routing.explain", "devices.list",
-             "failsafe.port53_check", "settings.storage", "settings.about"},
+             "failsafe.port53_check", "settings.storage", "settings.about", "draft.save_and_exit"},
         )
 
     def test_partial_sources_enable_only_what_they_cover(self):

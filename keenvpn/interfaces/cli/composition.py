@@ -6,7 +6,8 @@
 при запуске `vpn-menu --read-router` или `vpn-setup`: подключаются источники файлов Xray,
 XKeen и геобаз Entware, наблюдения процесса Xray и состояния Keenetic через
 локальный RCI. Черновик и метаданные подключаются только по подтверждённой
-роли data; отказ подключения показывается без путей и UUID. Членство в наборах
+роли data; отказ подключения показывается без путей и UUID. Отмена требует явно
+подключённого порта удаления, которого нет в режиме чтения. Членство в наборах
 геобаз не подключается. Объяснение маршрута открывает запрос значения
 и передаёт введённую строку сценарию без разбора. Сводка состояния и быстрая проверка допускают
 неподключённые источники, поэтому пункты «Сводка» и «Быстрая проверка без изменений» и шапка
@@ -14,7 +15,7 @@ XKeen и геобаз Entware, наблюдения процесса Xray и с�
 заново при каждом выборе пункта и не хранит результаты между выборами: список,
 который вернуло действие, существует, пока он открыт, а возврат из карточки
 или поиска источники не читает. Шапка выполняет тот же сценарий сводки при
-входе в корень главного меню. Выход из корня обоих меню и конец ввода
+входе в корень главного меню. Выход из корня обоих меню, пункт 7 → 4 и конец ввода
 выполняют сценарий решения о выходе: при неприменённом черновике или отказе
 его хранилища меню спрашивает, остаться ли или выйти, сохранив черновик.
 """
@@ -31,7 +32,7 @@ from keenvpn.adapters.router_sources import (
 from keenvpn.adapters.router_manager_files import connect_router_manager_files
 from keenvpn.adapters.storage_placement_files import StoragePlacementFiles
 from keenvpn.application.contract import ErrorDetail, OperationIdFactory, new_operation_id
-from keenvpn.application.draft_session import InspectDraft, InspectDraftHandler
+from keenvpn.application.draft_session import DiscardDraft, DiscardDraftHandler, InspectDraft, InspectDraftHandler
 from keenvpn.application.keenetic_devices import ListKeeneticDevices, ListKeeneticDevicesHandler
 from keenvpn.application.keenetic_state import InspectKeeneticStateHandler
 from keenvpn.application.manager_metadata import InspectManagerMetadata, InspectManagerMetadataHandler
@@ -53,13 +54,15 @@ from keenvpn.application.routing import ExplainRoute, ExplainRouteHandler
 from keenvpn.application.routing_import import ImportRoutingSchemeHandler
 from keenvpn.application.routing_rules import ListRoutingRules, ListRoutingRulesHandler
 from keenvpn.application.status_summary import InspectStatusSummary, InspectStatusSummaryHandler
-from keenvpn.interfaces.cli.menu import ExitNotice, Menu, MenuError, UnavailableReason, ValueRequest
+from keenvpn.interfaces.cli.menu import ConfirmationRequest, ExitNotice, Menu, MenuError, UnavailableReason, ValueRequest
 from keenvpn.interfaces.cli.presenters import (
     ROUTE_PROMPT, present_about, present_connections, present_device_list, present_manager_metadata, present_port53,
-    present_menu_exit, present_quick_check, present_result, present_route_explanation, present_rule_list,
+    present_error, present_menu_exit, present_quick_check, present_result, present_route_explanation, present_rule_list,
     present_status_header, present_status_summary,
 )
-from keenvpn.interfaces.cli.draft_presenters import present_draft_diff, present_saved_draft_check
+from keenvpn.interfaces.cli.draft_presenters import (
+    NO_SAVED_DRAFT, present_draft_diff, present_draft_discard, present_draft_discard_question, present_saved_draft_check,
+)
 from keenvpn.interfaces.cli.terminal import Action, ExitCheck, Header
 from keenvpn.interfaces.cli.tree import (
     BOUND_SCENARIOS, BUILTIN_ACTIONS, ActionStates, build_main_menu, build_setup_menu,
@@ -68,11 +71,12 @@ from keenvpn.interfaces.cli.tree import (
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class MenuSources:
-    """Порты чтения, доступные меню; `None` — источник не подключён.
+    """Источники и явно разрешённые операции меню; `None` — порт не подключён.
 
-    Источники конфигурации и хранилища только читают. Отдельный порт проверки
-    Xray создаёт временную область и запускает изолированный config test
-    лишь при выборе проверки черновика. Рабочие настройки не меняются.
+    Источники конфигурации только читают. Порт отмены может удалить файл
+    выбранной сессии после подтверждения. Отдельный порт проверки Xray
+    создаёт временную область и запускает изолированный config test
+    при выборе проверки черновика. Рабочие настройки не меняются.
     """
 
     policies: KeeneticPolicySource | None = None
@@ -89,7 +93,9 @@ class MenuSources:
     geo_match: GeoDataSource | None = None
     """Источник членства в наборах GeoIP и GeoSite для объяснения маршрута; без него условия геобаз «неизвестны»."""
     drafts: DraftSessionStore | None = None
-    """Хранилище черновика для области «Черновик» и решения о выходе; сценарии его только читают."""
+    """Хранилище сессии для чтения, если не подключён `draft_discard`."""
+    draft_discard: DraftSessionStore | None = None
+    """Хранилище, разрешённое для отмены; при подключении используется и для всех чтений черновика."""
     storage_error: ErrorDetail | None = None
     """Безопасная причина неподключённых хранилищ при неподтверждённом размещении DATA."""
     fingerprints: SourceFingerprintSource | None = None
@@ -177,19 +183,24 @@ def _bindings(
         action_id: UnavailableReason.SOURCE_NOT_CONNECTED for action_id in BOUND_SCENARIOS
     }
     actions: dict[str, Action] = {}
+    drafts = sources.draft_discard if sources.draft_discard is not None else sources.drafts
+    states["draft.discard"] = (UnavailableReason.DRAFT_STORE_NOT_CONNECTED if drafts is None
+                               else UnavailableReason.DRAFT_DISCARD_NOT_CONNECTED)
     storage_notice = [] if sources.storage_error is None else [
         "Хранилища не подключены: " + sources.storage_error.message,
     ]
     if storage_notice:
         for action_id in ("settings.storage", "draft.diff", "draft.check"):
             states[action_id] = UnavailableReason.STORAGE_NOT_CONFIRMED
+        if drafts is None:
+            states["draft.discard"] = UnavailableReason.STORAGE_NOT_CONFIRMED
 
     def bind(action_id: str, action: Action) -> None:
         states[action_id] = None
         actions[action_id] = action
 
     # Сводка допускает неподключённые источники: пункт и шапка — один сценарий, который читает то, что подключено.
-    summary = InspectStatusSummaryHandler(proxy, sources.process, drafts=sources.drafts, operation_ids=operation_ids)
+    summary = InspectStatusSummaryHandler(proxy, sources.process, drafts=drafts, operation_ids=operation_ids)
     bind("status.summary", lambda: [
         *present_result(summary.execute(InspectStatusSummary()), present_status_summary), *storage_notice,
     ])
@@ -198,11 +209,13 @@ def _bindings(
         return [*present_result(summary.execute(InspectStatusSummary()), present_status_header), *storage_notice]
 
     # Решение о выходе принимает сценарий; меню только показывает его строки и задаёт вопрос, если он нужен.
-    menu_exit = InspectMenuExitHandler(sources.drafts, operation_ids=operation_ids)
+    menu_exit = InspectMenuExitHandler(drafts, operation_ids=operation_ids)
 
     def exit_check() -> ExitNotice:
         notice = present_menu_exit(menu_exit.execute(InspectMenuExit()))
         return ExitNotice((*notice.lines, *storage_notice), notice.confirm)
+
+    bind("draft.save_and_exit", exit_check)
 
     # Быстрая проверка читает те же источники теми же функциями, что сводка, и дополнительно инвентарь геобаз.
     quick_check = QuickCheckHandler(proxy, sources.process, sources.geodata, operation_ids=operation_ids)
@@ -234,10 +247,30 @@ def _bindings(
             "settings.storage",
             lambda: present_result(metadata.execute(InspectManagerMetadata()), present_manager_metadata),
         )
-    if sources.drafts is not None and sources.fingerprints is not None:
-        inspect_draft = InspectDraftHandler(sources.drafts, operation_ids=operation_ids)
-        compare = CompareSavedDraftHandler(sources.drafts, sources.fingerprints, operation_ids=operation_ids)
-        check = CheckSavedDraftHandler(sources.drafts, sources.fingerprints, sources.geodata,
+    if sources.draft_discard is not None:
+        inspect_for_discard = InspectDraftHandler(sources.draft_discard, operation_ids=operation_ids)
+        discard = DiscardDraftHandler(sources.draft_discard, operation_ids=operation_ids)
+
+        def discard_action() -> list[str] | ConfirmationRequest:
+            inspected = inspect_for_discard.execute(InspectDraft())
+            if not inspected.succeeded:
+                return present_error(inspected.error)
+            view = inspected.data.draft
+            if view is None:
+                return [NO_SAVED_DRAFT]
+            # Команда относится к выбранной сессии, показанной до подтверждения.
+            command = DiscardDraft(draft_id=view.draft_id, expected_revision=view.revision)
+            return ConfirmationRequest(
+                present_draft_discard_question(view),
+                lambda: present_result(discard.execute(command), present_draft_discard),
+            )
+
+        bind("draft.discard", discard_action)
+
+    if drafts is not None and sources.fingerprints is not None:
+        inspect_draft = InspectDraftHandler(drafts, operation_ids=operation_ids)
+        compare = CompareSavedDraftHandler(drafts, sources.fingerprints, operation_ids=operation_ids)
+        check = CheckSavedDraftHandler(drafts, sources.fingerprints, sources.geodata,
             sources.candidate_assets, sources.geo_catalogs, sources.installed_xray, operation_ids=operation_ids)
 
         def saved_action(handler, command_type, presenter):
@@ -247,7 +280,7 @@ def _bindings(
                     return present_result(inspected, presenter)
                 view = inspected.data.draft
                 if view is None:
-                    return ["Сохранённого черновика нет."]
+                    return [NO_SAVED_DRAFT]
                 # ID и токен остаются в состоянии вызова и не выводятся.
                 return present_result(handler.execute(command_type(draft_id=view.draft_id,
                     expected_revision=view.revision)), presenter)

@@ -227,6 +227,16 @@ class SavedDraftMenuTests(unittest.TestCase):
         self.assertIsInstance(sources.candidate_assets, GeoCandidateFiles)
         self.assertIsInstance(sources.installed_xray, IsolatedInstalledXray)
         self.assertIsNone(sources.geo_catalogs)
+        self.assertIsNone(sources.draft_discard)
+
+    def test_router_read_only_draft_actions_preserve_saved_session(self):
+        output = self.run_menu('7\n1\n2\n5\n3\n4\n2\n')
+        self.assertIn('Изменений нет: полные снимки совпадают.', output)
+        self.assertIn('Статическая проверка:', output)
+        self.assertIn('Хранилище черновика подключено только для чтения. Отмена не выполняется.', output)
+        self.assertIn('3. Применить с подтверждением [недоступно]', output)
+        self.assertIn('2. Выйти, сохранив черновик', output)
+        self.assertNotIn('2. Удалить черновик', output)
 
     def test_unavailable_optional_runner_dependency_preserves_menu(self):
         original = __import__

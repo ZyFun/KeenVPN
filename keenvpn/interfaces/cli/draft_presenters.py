@@ -1,12 +1,34 @@
 """Вывод только безопасных представлений сохранённого черновика."""
 
 from keenvpn.application.draft_diff import DraftDiffView
+from keenvpn.application.draft_session import DraftDiscardOutcome, DraftDiscardView, DraftView
 from keenvpn.application.saved_draft import SavedDraftCheckView
-from keenvpn.interfaces.cli.presenters import count, identifier, present_error, safe_text, _check_line
+from keenvpn.interfaces.cli.presenters import count, created_at, identifier, present_error, safe_text, _check_line
 
 
 _OPERATIONS = {"added": "добавлено", "removed": "удалено", "changed": "изменено", "reordered": "переставлено"}
 _OUTCOMES = {"passed": "успешно", "failed": "ошибка", "incomplete": "неполная"}
+
+NO_SAVED_DRAFT = "Сохранённого черновика нет."
+
+
+def present_draft_discard_question(view: DraftView) -> tuple[str, ...]:
+    """Показать время создания выбранной сессии и запросить явное подтверждение."""
+    return (
+        f"Удалить черновик, созданный {created_at(view.created_at)}?",
+        "  1. Оставить черновик",
+        "  2. Удалить черновик",
+        "0 или пустая строка — оставить черновик.",
+    )
+
+
+def present_draft_discard(view: DraftDiscardView) -> list[str]:
+    """Показать результат отмены без идентификатора сессии."""
+    if type(view) is not DraftDiscardView:
+        raise TypeError("Ожидается DraftDiscardView.")
+    if DraftDiscardOutcome(view.outcome) is DraftDiscardOutcome.DISCARDED:
+        return ["Черновик отменён. Настройки не изменились."]
+    return [NO_SAVED_DRAFT]
 
 
 def present_draft_diff(view: DraftDiffView) -> list[str]:

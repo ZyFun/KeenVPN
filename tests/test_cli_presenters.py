@@ -455,6 +455,10 @@ class ConnectionsPresenterTests(PresenterAssertions):
         self.assertIn(CONNECTIONS_NOTE, listing.header)
         self.assertIn(CONNECTIONS_HEALTH_NOTE, listing.header)
         self.assertEqual([entry.number for entry in listing.entries], [1, 2, 3, 4])
+        self.assertFalse(listing.split_preview)
+        self.assertEqual(listing.summary[0], "Выходов: 3 · Балансировщиков: 1")
+        self.assertEqual(listing.entries[0].brief, "trojan-out · trojan")
+        self.assertIn("Запасной выход: blocked", listing.entries[-1].preview)
         self.assertEqual(listing.entries[0].label, "outbound: тег trojan-out, протокол trojan, часть 04_outbounds.json, индекс 0")
         self.assertEqual(
             listing.entries[3].label,
@@ -568,6 +572,60 @@ class RuleListPresenterTests(PresenterAssertions):
     def listing(self, view):
         with forbid_external_effects():
             return present_rule_list(view)
+
+    def test_brief_rows_distinguish_configured_target_action_and_service_api(self):
+        view = self.absent
+        listing = self.listing(view)
+        self.assertFalse(listing.split_preview)
+        self.assertEqual(listing.summary[0], "Групп: 8 · Правил модели: 40")
+        self.assertEqual(listing.entries[1].brief, "Домены → DIRECT")
+        self.assertIn("балансировщик vpn-group", listing.entries[2].brief)
+        self.assertIn("Действие: не определено", listing.entries[2].preview)
+        self.assertIn("Имена и ID недоступны: хранилище не прочитано.", self.listing(self.failed).summary)
+        source = view.scheme.groups[0]
+        target = replace(source.target, kind="api", tag="service-api", action=None, reasons=("target_api",))
+        for service in (True, False):
+            group = replace(source, target=target, action=None, api_service=service)
+            scheme = replace(view.scheme, groups=(group, *view.scheme.groups[1:]))
+            shown = self.listing(replace(view, scheme=scheme)).entries[0]
+            self.assertEqual("Служебное API" in shown.brief, service)
+            self.assertEqual("В политику маршрутизации не входит" in " ".join(shown.preview), service)
+            self.assertIn("service-api", shown.brief)
+            self.assertNotIn("UnsupportedRuleCondition", " ".join((shown.brief, *shown.preview)))
+            self.assertTrue(any("UnsupportedRuleCondition" in line for line in shown.card))
+        unsafe = replace(source, target=replace(target, tag="probe.example"), action=None)
+        scheme = replace(view.scheme, groups=(unsafe, *view.scheme.groups[1:]))
+        shown = self.listing(replace(view, scheme=scheme)).entries[0]
+        self.assertIn(HIDDEN, shown.brief)
+        self.assertNotIn("probe.example", " ".join((shown.brief, *shown.preview)))
+
+    def test_brief_rows_and_previews_describe_unresolved_configuration_targets(self):
+        # И разбор правил, и разрешение тегов выполняет настоящий сценарий поверх снимка.
+        from tests.test_xray_api_target import config, FINAL, OUTBOUNDS
+        rule = {"type": "field", "domain": ["domain:example.test"]}
+        rules = [
+            {**rule, "outboundTag": "missing-out", "balancerTag": "some-group"},
+            {**rule, "outboundTag": "missing-out"}, {**rule, "balancerTag": "missing-pool"},
+            {**rule, "outboundTag": "test-proxy"}, rule, 123, {**rule, "outboundTag": 17}, FINAL,
+        ]
+        sources = snapshot_installation_sources().proxy
+        sources.xray.outcome = config(
+            rules=rules, outbounds=[*OUTBOUNDS, {"tag": "test-proxy", "protocol": "freedom", "settings": {}}],
+        )
+        proxy = InspectProxyConfigHandler(sources.xray, sources.settings, sources.init, sources.lists)
+        with forbid_external_effects():
+            result = ListRoutingRulesHandler(ImportRoutingSchemeHandler(proxy), None).execute(ListRoutingRules())
+            self.assertTrue(result.succeeded)
+            listing = present_rule_list(result.data)
+        targets = ("конфликт outboundTag и balancerTag", "выход missing-out не найден",
+                   "балансировщик missing-pool не найден", "тег test-proxy повторяется", "тег назначения не задан",
+                   "сведения о назначении недоступны", "некорректный тег назначения")
+        for entry, target in zip(listing.entries[:-1], targets, strict=True):
+            with self.subTest(target=target):
+                self.assertIn(target, entry.brief)
+                self.assertIn(f"Назначение: {target}", entry.preview)
+                self.assertIn("Действие: не определено", entry.preview)
+        self.assertIn("Действие: DIRECT", listing.entries[-1].preview)
 
     def test_present_metadata_adds_counts_names_and_rule_lines_to_groups(self):
         listing = self.listing(self.present)
@@ -1049,6 +1107,10 @@ class DeviceListPresenterTests(PresenterAssertions):
         self.assertIn("Регистраций без записи: 0; наблюдений без записи: 0; неоднозначных наблюдений: 0; скрытых имён: 0", listing.header)
         self.assertEqual(listing.header[-2:], (DEVICES_NOTE, presenters.SNAPSHOT_NOTE))
         self.assertEqual([entry.number for entry in listing.entries], list(range(1, 20)))
+        self.assertTrue(listing.split_preview)
+        self.assertEqual(listing.summary, ("Записей устройств: 19 · Политик: 3", "Online: 12 · Offline: 7 · Неизвестно: 0"))
+        self.assertIn("offline", listing.entries[5].brief)
+        self.assertIn("Запрет доступа: включён", listing.entries[5].preview)
         self.assertEqual(listing.entries[0].label, "device-01: явная политика Policy10, online, запрет доступа нет, интерфейс Bridge0")
         self.assertEqual(listing.entries[5].label, "device-06: без назначения, offline, запрет доступа да, интерфейс не наблюдался")
         self.assertEqual(listing.entries[11].label, "device-12: наследует политику сегмента, online, запрет доступа нет, интерфейс Bridge0")

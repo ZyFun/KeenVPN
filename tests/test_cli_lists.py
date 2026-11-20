@@ -124,7 +124,8 @@ class ListModelTests(unittest.TestCase):
     def test_levels_check_their_invariants(self):
         source, other = sample_list(), sample_list()
         entries = source.entries
-        for found in ((), [entries[0]], (other.entries[0],), (entries[2], entries[0]), (entries[1], entries[1]), ("x",)):
+        self.assertEqual(ListLevel(source, ()).entries, ())
+        for found in ([entries[0]], (other.entries[0],), (entries[2], entries[0]), (entries[1], entries[1]), ("x",)):
             with self.subTest(found=found), self.assertRaises(MenuError):
                 ListLevel(source, found)
         with self.assertRaises(MenuError):

@@ -762,6 +762,21 @@ def _connection_card(item: object) -> tuple[str, ...]:
     return (HIDDEN,)
 
 
+def _connection_entry(number: int, item: OutboundConnectionView | BalancerConnectionView) -> ListEntry:
+    tag = known_value(item.tag_known, item.tag, identifier, "без тега")
+    if type(item) is OutboundConnectionView:
+        protocol = known_value(item.protocol_known, item.protocol, identifier, "не задан")
+        brief = f"{tag} · {protocol}"
+        preview = ("Выход Xray", f"Тег: {tag}", f"Протокол: {protocol}")
+    else:
+        brief = f"{tag} · балансировщик"
+        fallback = known_value(item.fallback_known, item.fallback_tag, identifier, "не задан")
+        strategy = known_value(item.strategy_known, item.strategy, identifier, "не задана")
+        preview = ("Балансировщик Xray", f"Тег: {tag}", f"Выходов по селекторам: {count(item.selector_match_count)}",
+                   f"Запасной выход: {fallback}", f"Стратегия: {strategy}")
+    return ListEntry(number, _connection_label(item), _connection_card(item), brief=brief, preview=preview)
+
+
 def present_connections(view: ConnectionsView) -> MenuList:
     """Показать outbound и балансировщики списком: номер — позиция в списке сценария, начиная с 1.
 
@@ -780,13 +795,15 @@ def present_connections(view: ConnectionsView) -> MenuList:
         CONNECTIONS_NOTE,
         CONNECTIONS_HEALTH_NOTE,
     ]
+    summary = [f"Выходов: {count(view.outbound_count)} · Балансировщиков: {count(view.balancer_count)}",
+               "Доступность по сети не проверялась."]
     items = view.connections[:MAX_ITEM_NUMBER]
     if len(view.connections) > MAX_ITEM_NUMBER:
         header.append(f"Подключений больше {MAX_ITEM_NUMBER}: в списке первые {MAX_ITEM_NUMBER}, остальные не показываются.")
-    entries = tuple(
-        ListEntry(number, _connection_label(item), _connection_card(item)) for number, item in enumerate(items, start=1)
-    )
-    return MenuList(CONNECTIONS_LIST_TITLE, CONNECTIONS_ITEM_NAME, tuple(header), entries)
+        summary.append(header[-1])
+    entries = tuple(_connection_entry(number, item) for number, item in enumerate(items, start=1))
+    return MenuList(CONNECTIONS_LIST_TITLE, CONNECTIONS_ITEM_NAME, tuple(header), entries,
+                    summary=tuple(summary), split_preview=False)
 
 
 NAMES_PER_LABEL = 10
@@ -879,6 +896,86 @@ def _metadata_lines(view: RuleListView) -> Lines:
     return lines
 
 
+_CONDITION_NAMES = {
+    "DomainCondition": "Домены", "IPCondition": "IP и подсети", "GeoIPCondition": "GeoIP",
+    "GeoSiteCondition": "GeoSite", "UnknownCondition": "Нераспознанные значения",
+    "UnsupportedRuleCondition": "Условие Xray",
+}
+_TARGET_NAMES = {"outbound": "выход", "balancer": "балансировщик", "api": "обработчик API"}
+_ROUTE_ACTIONS = ("DIRECT", "VPN", "BLOCK")
+
+
+def _brief_target(group: RuleGroupView, position: TargetPositionState, tag: str) -> str:
+    """Различать указанный тег и подтверждённое назначение конфигурации."""
+    if position is TargetPositionState.UNSUPPORTED:
+        return "конфликт outboundTag и balancerTag"
+    if position is TargetPositionState.UNAVAILABLE:
+        return "сведения о назначении недоступны"
+    if "target_invalid" in group.target.reasons:
+        return "некорректный тег назначения"
+    if "field_case_variant" in group.target.reasons and group.target.kind == "none":
+        return "регистр поля назначения не поддерживается"
+    if position is TargetPositionState.ABSENT:
+        return "тег назначения не задан"
+    if position is TargetPositionState.AMBIGUOUS:
+        return f"тег {tag} повторяется"
+    named = f"{_TARGET_NAMES.get(group.target.kind, 'тег')} {tag}"
+    if position is TargetPositionState.UNRESOLVED:
+        return f"{named} не найден"
+    return named
+
+
+def _rule_entry(entry: ListEntry, group: RuleGroupView, identity: RuleGroupIdentityView) -> ListEntry:
+    """Собрать краткий обзор только из безопасных полей группы и реально назначенных имён."""
+    if group.api_service is True:
+        subject = "Служебное API"
+    elif group.kind == "final":
+        subject = "Остальной трафик"
+    elif group.fields == ("inboundTag",) and group.unsupported_fields == ("inboundTag",):
+        subject = "Входящий тег Xray"
+    else:
+        types = [_CONDITION_NAMES.get(item.name, "Условие Xray") for item in group.condition_types]
+        subject = ", ".join(dict.fromkeys(types)) or "Группа условий"
+
+    tag = known_value(group.target.tag_known, group.target.tag, identifier, "без тега")
+    target = _brief_target(group, identity.target_position_state, tag)
+    action = group.action if group.action in _ROUTE_ACTIONS else "не определено"
+    if group.api_service is True:
+        destination = tag
+    elif group.action in _ROUTE_ACTIONS:
+        destination = action
+        if group.target.tag_known and tag != HIDDEN and tag.casefold() != action.casefold():
+            destination += f" · {tag}"
+    else:
+        destination = target
+
+    brief = f"{subject} → {destination}"
+    preview = [subject, f"Назначение: {target}"]
+    if group.api_service is True:
+        preview.append("Служебный трафик API Xray. В политику маршрутизации не входит.")
+    else:
+        preview.extend((f"Действие: {action}", f"Условий: {count(group.condition_count)} · "
+                        f"Значений: {count(group.value_count)} · Правил модели: {count(identity.rule_count)}"))
+    if group.read_only is True:
+        preview.append("Только для просмотра.")
+    if group.unsupported_fields:
+        preview.append("KeenVPN не поддерживает поля условий: " + identifiers(group.unsupported_fields))
+    if "outbound_protocol_unsupported" in group.target.reasons:
+        preview.append("KeenVPN не определил действие для протокола выхода.")
+    if "fallback_mixed" in group.target.reasons:
+        preview.append("Запасной выход и выходы балансировщика задают разные действия.")
+    if identity.rules:
+        names = [item for item in identity.rules if item.has_name]
+        if len(identity.rules) == 1 and names:
+            name = _rule_name_text(names[0])
+            brief = f"{name} · {brief}"
+            preview.insert(0, name)
+        elif names:
+            preview.append("Названия правил: " + ", ".join(_rule_name_text(item) for item in names[:NAMES_PER_LABEL]))
+    return ListEntry(entry.number, entry.label + _identity_label(identity), (*entry.card, *_identity_card(identity)),
+                     brief=brief, preview=tuple(preview))
+
+
 def present_rule_list(view: RuleListView) -> MenuList:
     """Показать группы правил в фактическом порядке с названиями и идентификаторами, когда они доступны.
 
@@ -891,11 +988,21 @@ def present_rule_list(view: RuleListView) -> MenuList:
         raise TypeError("Ожидается RuleListView.")
     base = present_routing_scheme(view.scheme)
     header = (*base.header, *_metadata_lines(view))
-    entries = tuple(
-        ListEntry(entry.number, entry.label + _identity_label(group), (*entry.card, *_identity_card(group)))
-        for entry, group in zip(base.entries, view.groups[:MAX_ITEM_NUMBER], strict=True)
-    )
-    return MenuList(base.title, base.item_name, header, entries)
+    scheme = view.scheme
+    summary = [f"Групп: {count(scheme.group_count)} · Правил модели: {count(scheme.rule_count)}"]
+    final = scheme.final_action if scheme.final_action in _ROUTE_ACTIONS else "не определено"
+    summary.append(f"Финальное действие: {final}" + (" · Только просмотр" if scheme.read_only is True else ""))
+    if scheme.policy is None:
+        summary.append("Политика маршрутизации не собрана.")
+    if view.metadata_state in (MetadataState.FAILED, MetadataState.NOT_CONNECTED):
+        summary.append("Имена и ID недоступны: хранилище " +
+                       ("не прочитано." if view.metadata_state is MetadataState.FAILED else "не подключено."))
+    if len(view.groups) > MAX_ITEM_NUMBER:
+        summary.append(f"Показаны первые {MAX_ITEM_NUMBER} групп.")
+    entries = tuple(_rule_entry(entry, group, identity) for entry, group, identity in zip(
+        base.entries, scheme.groups[:MAX_ITEM_NUMBER], view.groups[:MAX_ITEM_NUMBER], strict=True,
+    ))
+    return MenuList(base.title, base.item_name, header, entries, summary=tuple(summary), split_preview=False)
 
 
 ROUTE_PROMPT = (
@@ -1097,6 +1204,21 @@ def _device_card(item: DeviceEntryView) -> tuple[str, ...]:
     )
 
 
+def _device_entry(number: int, item: DeviceEntryView) -> ListEntry:
+    name = _device_name_text(item)
+    presence = _catalog(PRESENCE_LABELS, item.presence)
+    assignment = _device_assignment(item)
+    brief = f"{name} · {presence} · {assignment}"
+    preview = [f"Имя регистрации: {name}", f"Присутствие: {presence}", f"Индивидуальное назначение: {assignment}",
+               "Запрет доступа: " + ("включён" if item.access_denied else "выключен"),
+               f"Наблюдаемый интерфейс: {_device_interface(item)}"]
+    if item.presence_reason is not None:
+        preview.append("Причина состояния: " + _catalog(PRESENCE_REASON_LABELS, item.presence_reason))
+    if item.read_only:
+        preview.append("Только для просмотра.")
+    return ListEntry(number, _device_label(item), _device_card(item), brief=brief, preview=tuple(preview))
+
+
 def present_device_list(view: DeviceListView) -> MenuList:
     """Показать записи устройств списком: номер — позиция записи в `ip/hotspot.host`, начиная с 1.
 
@@ -1128,13 +1250,15 @@ def present_device_list(view: DeviceListView) -> MenuList:
         DEVICES_NOTE,
         SNAPSHOT_NOTE,
     ]
+    summary = [f"Записей устройств: {count(counts.record_count)} · Политик: {count(view.policy_count)}",
+               f"Online: {count(counts.online_count)} · Offline: {count(counts.offline_count)} · "
+               f"Неизвестно: {count(counts.unknown_count)}"]
     items = view.devices[:MAX_ITEM_NUMBER]
     if len(view.devices) > MAX_ITEM_NUMBER:
         header.append(f"Записей больше {MAX_ITEM_NUMBER}: в списке первые {MAX_ITEM_NUMBER}, остальные не показываются.")
-    entries = tuple(
-        ListEntry(number, _device_label(item), _device_card(item)) for number, item in enumerate(items, start=1)
-    )
-    return MenuList(DEVICES_LIST_TITLE, DEVICES_ITEM_NAME, tuple(header), entries)
+        summary.append(header[-1])
+    entries = tuple(_device_entry(number, item) for number, item in enumerate(items, start=1))
+    return MenuList(DEVICES_LIST_TITLE, DEVICES_ITEM_NAME, tuple(header), entries, summary=tuple(summary))
 
 
 def present_manager_metadata(view: ManagerMetadataStatusView) -> Lines:

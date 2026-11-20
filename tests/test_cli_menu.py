@@ -91,7 +91,7 @@ class MenuModelTests(unittest.TestCase):
             MenuItem(1, "Пункт")
         with self.assertRaises(MenuError):
             MenuItem(1, "Пункт", submenu=inner, action=MenuAction("a.b"))
-        self.assertTrue(MenuItem(1, "Пункт", submenu=inner).available)
+        self.assertFalse(MenuItem(1, "Пункт", submenu=inner).available)
         self.assertTrue(leaf(1).available)
 
     def test_item_number_bounds_and_types(self):
@@ -278,7 +278,10 @@ class TreeTests(unittest.TestCase):
         self.assertTrue(all(item.reason is UnavailableReason.NOT_IMPLEMENTED for item in found))
 
     def test_statistics_submenu_is_shared_between_sections_one_and_nine(self):
-        menu = build_main_menu({})
+        closed = MenuNavigator(build_main_menu({}))
+        self.assertEqual(closed.select(9).kind, SelectionKind.UNAVAILABLE)
+        self.assertEqual(closed.depth, 0)
+        menu = build_main_menu({"statistics.period": None})
         from_status = menu.item(1).submenu.item(2)
         from_maintenance = menu.item(9).submenu.item(1)
         self.assertIs(from_status.submenu, from_maintenance.submenu)

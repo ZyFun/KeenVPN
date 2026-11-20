@@ -53,9 +53,12 @@ class UnavailableReason(StrEnum):
     """У меню есть источник чтения черновика, но отмена ему не разрешена."""
     INPUT_REQUIRED = "input_required"
     """Сценарий есть, но пункту нужен ввод значений, которого это меню не принимает."""
+    NO_AVAILABLE_ACTIONS = "no_available_actions"
+    """У потомков раздела несколько разных причин недоступности."""
 
 
 REASON_MESSAGES: Mapping[UnavailableReason, str] = MappingProxyType({
+    UnavailableReason.NO_AVAILABLE_ACTIONS: "В этом режиме в разделе нет доступных действий. Настройки не меняются.",
     UnavailableReason.NOT_IMPLEMENTED: (
         "Пункт не реализован в этой версии меню: действие не выполняется, настройки не меняются."
     ),
@@ -152,13 +155,23 @@ class MenuItem:
 
     @property
     def available(self) -> bool:
-        """Подменю всегда открывается; действие доступно только без причины недоступности."""
-        return self.submenu is not None or self.action.available
+        """Открыть раздел можно, когда в нём доступно хотя бы одно конечное действие."""
+        return self.reason is None
 
     @property
     def reason(self) -> UnavailableReason | None:
-        """Причина недоступности действия; у подменю и доступных действий — None."""
-        return None if self.action is None else self.action.reason
+        """Причина закрытия раздела учитывает реально подключённые сценарии."""
+        if self.action is not None:
+            return self.action.reason
+        reasons = {item.reason for item in self.submenu.items}
+        if None in reasons:
+            return None
+        reasons.discard(UnavailableReason.NOT_IMPLEMENTED)
+        if not reasons:
+            return UnavailableReason.NOT_IMPLEMENTED
+        if len(reasons) == 1:
+            return reasons.pop()
+        return UnavailableReason.NO_AVAILABLE_ACTIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +211,8 @@ class ListEntry:
     number: int
     label: str
     card: tuple[str, ...]
+    brief: str | None = None
+    preview: tuple[str, ...] = ()
     search_text: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -207,6 +222,8 @@ class ListEntry:
         )
         _require(self.label != "" and valid_line(self.label), "Некорректная строка элемента списка.")
         _require(_valid_lines(self.card), "Карточка элемента задаётся tuple печатных строк.")
+        _require(self.brief is None or (valid_line(self.brief) and self.brief != ""), "Некорректная краткая строка.")
+        _require(_valid_lines(self.preview), "Предпросмотр задаётся печатными строками.")
         object.__setattr__(self, "search_text", normalize(self.label))
 
 
@@ -221,11 +238,15 @@ class MenuList:
     item_name: str
     header: tuple[str, ...]
     entries: tuple[ListEntry, ...]
+    summary: tuple[str, ...] = ()
+    split_preview: bool = True
 
     def __post_init__(self) -> None:
         _require(valid_title(self.title), "Некорректный заголовок списка.")
         _require(valid_title(self.item_name), "Некорректное имя элемента списка.")
         _require(_valid_lines(self.header), "Вводные строки списка задаются tuple печатных строк.")
+        _require(_valid_lines(self.summary), "Сводка списка задаётся печатными строками.")
+        _require(type(self.split_preview) is bool, "Признак показа карточки рядом со списком должен быть логическим.")
         _require(
             type(self.entries) is tuple and all(type(entry) is ListEntry for entry in self.entries),
             "Элементы списка задаются tuple объектов ListEntry.",
@@ -318,8 +339,8 @@ class ListLevel:
             return
         listed = {id(entry) for entry in self.source.entries}
         _require(
-            type(self.found) is tuple and len(self.found) > 0 and all(id(entry) in listed for entry in self.found),
-            "Результаты поиска — непустая часть элементов своего списка.",
+            type(self.found) is tuple and all(id(entry) in listed for entry in self.found),
+            "Результаты поиска содержат только элементы своего списка.",
         )
         numbers = [entry.number for entry in self.found]
         _require(
@@ -439,6 +460,13 @@ class MenuNavigator:
         """Заголовки уровней от корня до текущего."""
         return tuple(level.title for level in self._path)
 
+    @property
+    def section_numbers(self) -> tuple[int, ...]:
+        """Номера открытых подменю, включая переходы в общий вложенный раздел."""
+        return tuple(item.number for parent, child in zip(self._path, self._path[1:])
+                     if isinstance(parent, Menu) and isinstance(child, Menu)
+                     for item in parent.items if item.submenu is child)
+
     def open_list(self, source: MenuList) -> None:
         """Открыть список, который вернуло действие текущего подменю."""
         _require(type(source) is MenuList, "Список задаётся объектом MenuList.")
@@ -466,31 +494,32 @@ class MenuNavigator:
         item = level.item(number)
         if item is None:
             return Selection(SelectionKind.UNKNOWN)
+        if not item.available:
+            return Selection(SelectionKind.UNAVAILABLE, item)
         if item.submenu is not None:
             self._path.append(item.submenu)
             return Selection(SelectionKind.ENTERED, item)
-        if item.action.available:
-            return Selection(SelectionKind.ACTION, item)
-        return Selection(SelectionKind.UNAVAILABLE, item)
+        return Selection(SelectionKind.ACTION, item)
 
-    def search(self, query: SearchQuery) -> Selection:
+    def search(self, query: SearchQuery, *, show_empty: bool = False, brief: bool = False) -> Selection:
         """Найти элементы всего открытого списка; новый поиск заменяет прежние результаты.
 
-        Без совпадений положение и показанный набор не меняются. Каждый элемент
-        проверяется один раз: стоимость линейна по числу элементов.
+        При отсутствии совпадений построчный ввод сохраняет прежний список.
+        Интерактивный экран может показать пустую выборку с возвратом к полному списку.
         """
         _require(type(query) is SearchQuery, "Запрос задаётся объектом SearchQuery.")
         level = self.current
         _require(type(level) is ListLevel, "Поиск выполняется только в открытом списке.")
-        found = tuple(entry for entry in level.source.entries if matches(query, entry.search_text))
-        if not found:
+        found = tuple(entry for entry in level.source.entries
+                      if matches(query, normalize(entry.brief) if brief and entry.brief else entry.search_text))
+        if not found and not show_empty:
             return Selection(SelectionKind.NO_MATCHES)
         results = ListLevel(level.source, found)
         if level.filtered:
             self._path[-1] = results
         else:
             self._path.append(results)
-        return Selection(SelectionKind.FOUND)
+        return Selection(SelectionKind.FOUND if found else SelectionKind.NO_MATCHES)
 
     def back(self) -> Selection:
         """Подняться на уровень выше; в корне — выход."""

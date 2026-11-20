@@ -1,5 +1,6 @@
 """Терминальный цикл и сборка меню на внедрённых потоках без терминала, файлов, сети и процессов."""
 
+from dataclasses import replace
 import io
 from pathlib import Path
 import sys
@@ -1068,7 +1069,7 @@ class DevicesFlowTests(unittest.TestCase):
         # Источники RCI, как у `--read-router`, но через подставное соединение без сокетов.
         markers = SNAPSHOT_DEVICE_MARKERS + ("127.0.0.1", "/rci/", "fixture-private")
         script = ScriptedRci()
-        code, output, navigator = self.flow("5\n1\n0\n0\n0\n", MenuSources(**rci_sources(script)), markers)
+        code, output, navigator = self.flow("5\n1\n0\n0\n0\n", replace(self.menu_sources, **rci_sources(script)), markers)
         self.assertEqual((code, navigator.depth), (0, 0))
         self.assertEqual(output, self.flow("5\n1\n0\n0\n0\n")[1])
         self.assertEqual(script.paths, tuple(resource.path for resource in RciResource))

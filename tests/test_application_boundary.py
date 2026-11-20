@@ -45,6 +45,27 @@ DYNAMIC_MODULES = frozenset({"importlib", "pkgutil", "runpy"})
 RAW_IO = frozenset({"os.read", "os.write", "os.open", "builtins.open", "io.open"})
 # Единственный модуль интерфейса, которому разрешены конкретные адаптеры.
 COMPOSITION_MODULE = "keenvpn.interfaces.cli.composition"
+TTY_MODULE = "keenvpn.interfaces.cli.interactive"
+
+
+def tty_frame_writes(tree: ast.Module) -> set[ast.expr]:
+    """Разрешить вывод кадра только через дескриптор stdout в цикле TTY."""
+    targets = set()
+    for function in tree.body:
+        if not isinstance(function, ast.FunctionDef) or function.name != "run_interactive":
+            continue
+        stores = [node for node in ast.walk(function) if isinstance(node, ast.Name)
+                  and node.id == "out_fd" and isinstance(node.ctx, ast.Store)]
+        if len(stores) != 1:
+            continue
+        for statement in function.body:
+            if not isinstance(statement, ast.Assign) or statement.targets != stores:
+                continue
+            if ast.unparse(statement.value) != "stdout.fileno()":
+                continue
+            targets.update(call.func for call in ast.walk(function) if isinstance(call, ast.Call)
+                           and call.args and isinstance(call.args[0], ast.Name) and call.args[0].id == "out_fd")
+    return targets
 
 
 def boundary_violations(source: str, module: str, *, package: bool = False) -> list[str]:
@@ -59,7 +80,8 @@ def boundary_violations(source: str, module: str, *, package: bool = False) -> l
     """
     tree = ast.parse(source)
     allowed = ("keenvpn.domain",)
-    raw_io = RAW_IO
+    raw_io = RAW_IO - {"os.read"} if module == TTY_MODULE else RAW_IO
+    frame_writes = tty_frame_writes(tree) if module == TTY_MODULE else set()
     if module.startswith("keenvpn.application"):
         allowed += ("keenvpn.application",)
     elif module.startswith("keenvpn.adapters"):
@@ -95,7 +117,8 @@ def boundary_violations(source: str, module: str, *, package: bool = False) -> l
             if root == "keenvpn" and name != "keenvpn":
                 if not any(name == prefix or name.startswith(prefix + ".") for prefix in allowed):
                     violations.append(f"{node.lineno}: зависимость от {name}")
-            elif root in PRESENTATION_MODULES or root == "tests" or root in DYNAMIC_MODULES:
+            elif (root in PRESENTATION_MODULES and not (module == TTY_MODULE and root == "termios")
+                  or root == "tests" or root in DYNAMIC_MODULES):
                 violations.append(f"{node.lineno}: зависимость от {name}")
             elif name in raw_io or name in {f"builtins.{builtin}" for builtin in builtins}:
                 violations.append(f"{node.lineno}: терминальный, динамический или прямой вызов {name}")
@@ -103,11 +126,13 @@ def boundary_violations(source: str, module: str, *, package: bool = False) -> l
             violations.append(f"{node.lineno}: builtin {node.id}")
         if isinstance(node, ast.Attribute):
             owner = aliases.get(node.value.id, node.value.id) if isinstance(node.value, ast.Name) else None
-            if node.attr in attributes or f"{owner}.{node.attr}" in raw_io:
+            name = f"{owner}.{node.attr}"
+            permitted_write = name == "os.write" and node in frame_writes
+            if node.attr in attributes or (name in raw_io and not permitted_write):
                 violations.append(f"{node.lineno}: терминальный, динамический или прямой атрибут {node.attr}")
         if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
             escapes = ("\x1b", "\x9b") if isinstance(node.value, str) else (b"\x1b", b"\x9b")
-            if any(escape in node.value for escape in escapes):
+            if module != TTY_MODULE and any(escape in node.value for escape in escapes):
                 violations.append(f"{node.lineno}: управляющая последовательность терминала")
     return violations
 
@@ -189,6 +214,14 @@ class ApplicationDependencyTests(unittest.TestCase):
         for source in ("from keenvpn.domain.routing import RoutingRule", "import sys"):
             with self.subTest(composition=source):
                 self.assertTrue(boundary_violations(source, COMPOSITION_MODULE))
+        self.assertTrue(boundary_violations("import os\nos.write(1, b'x')", TTY_MODULE))
+        self.assertTrue(boundary_violations("from os import write", TTY_MODULE))
+        for source in (
+            "def other(stdout):\n    out_fd = stdout.fileno()\n    os.write(out_fd, b'x')",
+            "def run_interactive(stdout):\n    out_fd = 1\n    os.write(out_fd, b'x')",
+            "def run_interactive(stdout):\n    out_fd = stdout.fileno()\n    out_fd = 1\n    os.write(out_fd, b'x')",
+        ):
+            self.assertTrue(boundary_violations(source, TTY_MODULE), source)
 
     def test_dependency_check_allows_ports_models_and_safe_messages(self):
         source = (

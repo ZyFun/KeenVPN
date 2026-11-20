@@ -9,6 +9,7 @@
 """
 
 from collections.abc import Callable, Sequence
+import os
 
 from keenvpn.interfaces.cli.composition import (
     MenuAssembly, assemble_main_menu, assemble_setup_menu, default_sources, router_sources,
@@ -35,10 +36,20 @@ READ_ROUTER_FLAG = "--read-router"
 Assembler = Callable[[], MenuAssembly]
 
 
-def _run(assemble: Assembler, stdin: TextInput, stdout: TextOutput, stderr: TextOutput) -> int:
+def _run(assemble: Assembler, stdin: TextInput, stdout: TextOutput, stderr: TextOutput, *, interactive: bool = False) -> int:
     try:
         assembly = assemble()
-        return run_menu(
+        runner = run_menu
+        if (interactive and os.environ.get("TERM", "dumb") not in ("", "dumb")
+                and getattr(stdin, "isatty", lambda: False)() and getattr(stdout, "isatty", lambda: False)()):
+            try:
+                from keenvpn.interfaces.cli.interactive import can_use_terminal, run_interactive
+            except ImportError:
+                pass  # В минимальной сборке Python остаётся доступен построчный ввод.
+            else:
+                if can_use_terminal(stdin, stdout):
+                    runner = run_interactive
+        return runner(
             MenuNavigator(assembly.menu), assembly.actions, stdin, stdout, assembly.header, assembly.exit_check,
         )
     except KeyboardInterrupt:
@@ -60,7 +71,7 @@ def vpn_menu(argv: Sequence[str], stdin: TextInput, stdout: TextOutput, stderr: 
     else:
         stderr.write(f"vpn-menu принимает только флаг {READ_ROUTER_FLAG}.\n")
         return EXIT_USAGE
-    return _run(lambda: assemble_main_menu(sources()), stdin, stdout, stderr)
+    return _run(lambda: assemble_main_menu(sources()), stdin, stdout, stderr, interactive=True)
 
 
 def vpn_setup(argv: Sequence[str], stdin: TextInput, stdout: TextOutput, stderr: TextOutput) -> int:

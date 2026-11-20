@@ -228,6 +228,16 @@ class ListEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class ListLayout:
+    """Подписи списка и ссылки на соседние действия для краткой карточки."""
+
+    title: str = ""
+    preview_title: str = ""
+    empty_search: str = "Совпадений нет."
+    related_actions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class MenuList:
     """Список, который вернуло действие: заголовок уровня, имя элемента, вводные строки и элементы.
 

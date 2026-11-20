@@ -10,6 +10,9 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+# vpn-setup импортирует адаптер лениво. Загружаем модуль до запрета exec,
+# чтобы изоляция проверяла сам запуск меню и не зависела от порядка тестов.
+from keenvpn.adapters import xray_isolated_port
 from keenvpn.interfaces.cli.composition import MenuSources
 from keenvpn.interfaces.cli.entrypoints import (
     EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, FAILURE_MESSAGE, INTERRUPTED_MESSAGE, READ_ROUTER_FLAG,

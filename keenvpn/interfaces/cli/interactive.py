@@ -10,9 +10,10 @@ import threading
 import unicodedata
 
 from keenvpn.interfaces.cli.menu import (
-    CardLevel, ConfirmationRequest, ExitNotice, InputLevel, ListLevel, Menu,
+    CardLevel, ConfirmationRequest, ExitNotice, InputLevel, ListLayout, ListLevel, Menu,
     MenuError, MenuItem, MenuList, MenuNavigator, SelectionKind, UnavailableReason, ValueRequest,
 )
+from keenvpn.interfaces.cli.sections import connections, devices, draft, failsafe, routing, settings, status
 from keenvpn.interfaces.cli.search import parse_query
 from keenvpn.interfaces.cli.report_layout import report_layout
 from keenvpn.interfaces.cli.terminal import (
@@ -74,19 +75,11 @@ _SECTION_CAPTIONS = {
     "Настройки меню": "Размещение данных, лимиты истории, параметры вывода и справка.",
 }
 _ACTION_CAPTIONS = {
-    "status.summary": "Состояние семи областей роутера. У непрочитанных источников показан статус проверки.",
-    "status.quick_check": "Статическая сверка источников и проверок без активной сетевой пробы.",
-    "connections.list": "Выходы и балансировщики из конфигурации Xray. Доступны поиск и карточки.",
-    "routing.list": "Группы правил Xray в порядке конфигурации. Названия и ID зависят от метаданных.",
-    "routing.explain": "Предварительный расчёт по импортированной схеме без DNS-запросов и отправки трафика.",
-    "devices.list": "Снимок устройств Keenetic, их присутствия и назначенных политик.",
-    "failsafe.port53_check": "Сверка списков портов и флагов XKeen. Фактический путь DNS проверяется отдельно.",
-    "draft.diff": "Сравнение сохранённого черновика с исходной ревизией. Значения замаскированы.",
-    "draft.check": "Проверка сохранённого черновика. Запуск Xray зависит от кандидата и условий проверки.",
-    "draft.save_and_exit": "Выход с проверкой сохранённого черновика.",
-    "settings.storage": "Сохранённые сведения о размещении данных и лимитах истории.",
-    "settings.about": "Управление меню и версия контракта результатов.",
+    **status.ACTION_CAPTIONS, **connections.ACTION_CAPTIONS, **routing.ACTION_CAPTIONS,
+    **devices.ACTION_CAPTIONS, **failsafe.ACTION_CAPTIONS, **draft.ACTION_CAPTIONS, **settings.ACTION_CAPTIONS,
 }
+_DEFAULT_LIST_LAYOUT = ListLayout()
+_LIST_LAYOUTS = {"devices.list": devices.LIST_LAYOUT}
 
 
 def _palette(color: bool) -> Palette:
@@ -239,7 +232,8 @@ class InteractiveMenu:
         self._report_page = 0
         self._retry: InputLevel | None = None
         self._action_id = ""
-        self._device_actions: tuple[MenuItem, ...] = ()
+        self._list_layout = _DEFAULT_LIST_LAYOUT
+        self._related_actions: tuple[MenuItem, ...] = ()
         self._question: ConfirmationRequest | ExitNotice | None = None
         self._scroll = 0
         self._page = 8
@@ -333,7 +327,9 @@ class InteractiveMenu:
             result = action()
             if type(result) is MenuList:
                 self._detailed_list = False
-                self._device_actions = tuple(item for item in level.items if item.number in (2, 3)) if selected.action_id == "devices.list" else ()
+                self._list_layout = _LIST_LAYOUTS.get(selected.action_id, _DEFAULT_LIST_LAYOUT)
+                self._related_actions = tuple(item for item in level.items
+                                              if item.action and item.action.action_id in self._list_layout.related_actions)
                 self.navigator.open_list(result)
             elif type(result) is ValueRequest:
                 self.navigator.open_input(selected.item.title, result)
@@ -586,8 +582,7 @@ class InteractiveMenu:
             return []
         if isinstance(level, ListLevel):
             entry = level.entry(selected)
-            heading = ("Выбрано устройство" if self._action_id == "devices.list" else
-                       f"{level.source.item_name} {entry.number}" if entry.preview else "Карточка")
+            heading = self._list_layout.preview_title or (f"{level.source.item_name} {entry.number}" if entry.preview else "Карточка")
             body = _cells(entry.preview or entry.card, width)
             if entry.preview:
                 body.extend(_cells(["", "Enter · Полная карточка"], width, "accent"))
@@ -618,7 +613,7 @@ class InteractiveMenu:
         preface = []
         if isinstance(level, ListLevel):
             if level.filtered and not level.entries:
-                empty = "Устройства не найдены." if level.source.item_name == "Устройство" else "Совпадений нет."
+                empty = self._list_layout.empty_search
                 preface = [empty, "Esc — очистить поиск · / — новый запрос"]
             elif level.filtered:
                 preface = [f"Найдено: {len(level.entries)} из {len(level.source.entries)}."]
@@ -626,9 +621,10 @@ class InteractiveMenu:
                 preface = [*(level.source.summary or level.source.header), EMPTY_LIST]
             elif level.source.header:
                 preface = list(level.source.summary or level.source.header)
-        title = level.source.title if isinstance(level, ListLevel) else "Пункты раздела" if self.navigator.depth else "Разделы"
-        if isinstance(level, ListLevel) and self._action_id == "devices.list":
-            title = "Список устройств"
+        if isinstance(level, ListLevel):
+            title = self._list_layout.title or level.source.title
+        else:
+            title = "Пункты раздела" if self.navigator.depth else "Разделы"
         prefix = _cells([title], left, "accent")
         if roomy:
             prefix.append(("─" * left, "accent"))
@@ -721,7 +717,8 @@ class InteractiveMenu:
             lines = (render_exit_question(self._question) if isinstance(self._question, ExitNotice)
                      else list(self._question.lines))
         elif isinstance(level, CardLevel):
-            related = ["5 → " + _item_line(item) for item in self._device_actions]
+            prefix = "".join(f"{number} → " for number in self.navigator.section_numbers)
+            related = [prefix + _item_line(item) for item in self._related_actions]
             heading = "Технические сведения" if self._technical_card else level.title
             lines = level.entry.card if self._technical_card or not level.entry.preview else (*level.entry.preview, *related)
         elif isinstance(level, InputLevel):

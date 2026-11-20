@@ -31,91 +31,14 @@ from keenvpn.adapters.router_sources import (
 )
 from keenvpn.adapters.router_manager_files import connect_router_manager_files
 from keenvpn.adapters.storage_placement_files import StoragePlacementFiles
-from keenvpn.application.contract import ErrorDetail, OperationIdFactory, new_operation_id
-from keenvpn.application.draft_session import DiscardDraft, DiscardDraftHandler, InspectDraft, InspectDraftHandler
-from keenvpn.application.keenetic_devices import ListKeeneticDevices, ListKeeneticDevicesHandler
+from keenvpn.application.contract import OperationIdFactory, new_operation_id
 from keenvpn.application.keenetic_state import InspectKeeneticStateHandler
-from keenvpn.application.manager_metadata import InspectManagerMetadata, InspectManagerMetadataHandler
-from keenvpn.application.menu_exit import InspectMenuExit, InspectMenuExitHandler
-from keenvpn.application.ports import (
-    DraftSessionStore, GeoDatabaseSource, GeoDataSource, KeeneticHotspotRuntimeSource, KeeneticHotspotSettingsSource,
-    KeeneticPolicySource, KeeneticRegistrationSource, ManagerMetadataStore, XKeenInitSource, XKeenListSource,
-    XKeenSettingsSource, XrayConfigSource, XrayProcessSource, SourceFingerprintSource,
-)
-from keenvpn.application.saved_draft import (
-    CandidateAssetSource, GeoCategorySource, CompareSavedDraft, CompareSavedDraftHandler,
-    CheckSavedDraft, CheckSavedDraftHandler,
-)
-from keenvpn.application.xray_candidate import InstalledXrayPort
-from keenvpn.application.proxy_config import InspectProxyConfig, InspectProxyConfigHandler
-from keenvpn.application.proxy_connections import InspectConnections, InspectConnectionsHandler
-from keenvpn.application.quick_check import QuickCheck, QuickCheckHandler
-from keenvpn.application.routing import ExplainRoute, ExplainRouteHandler
-from keenvpn.application.routing_import import ImportRoutingSchemeHandler
-from keenvpn.application.routing_rules import ListRoutingRules, ListRoutingRulesHandler
-from keenvpn.application.status_summary import InspectStatusSummary, InspectStatusSummaryHandler
-from keenvpn.interfaces.cli.menu import ConfirmationRequest, ExitNotice, Menu, MenuError, UnavailableReason, ValueRequest
-from keenvpn.interfaces.cli.presenters import (
-    ROUTE_PROMPT, present_about, present_connections, present_device_list, present_manager_metadata, present_port53,
-    present_error, present_menu_exit, present_quick_check, present_result, present_route_explanation, present_rule_list,
-    present_status_header, present_status_summary,
-)
-from keenvpn.interfaces.cli.draft_presenters import (
-    NO_SAVED_DRAFT, present_draft_diff, present_draft_discard, present_draft_discard_question, present_saved_draft_check,
-)
+from keenvpn.application.proxy_config import InspectProxyConfigHandler
+from keenvpn.interfaces.cli.bindings import MenuSources, SectionActions
+from keenvpn.interfaces.cli.menu import Menu, MenuError, UnavailableReason
+from keenvpn.interfaces.cli.sections import connections, devices, draft, failsafe, routing, settings, status
 from keenvpn.interfaces.cli.terminal import Action, ExitCheck, Header
-from keenvpn.interfaces.cli.tree import (
-    BOUND_SCENARIOS, BUILTIN_ACTIONS, ActionStates, build_main_menu, build_setup_menu,
-)
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class MenuSources:
-    """Источники и явно разрешённые операции меню; `None` — порт не подключён.
-
-    Источники конфигурации только читают. Порт отмены может удалить файл
-    выбранной сессии после подтверждения. Отдельный порт проверки Xray
-    создаёт временную область и запускает изолированный config test
-    при выборе проверки черновика. Рабочие настройки не меняются.
-    """
-
-    policies: KeeneticPolicySource | None = None
-    hotspot: KeeneticHotspotSettingsSource | None = None
-    registrations: KeeneticRegistrationSource | None = None
-    runtime: KeeneticHotspotRuntimeSource | None = None
-    xray: XrayConfigSource | None = None
-    xkeen_settings: XKeenSettingsSource | None = None
-    xkeen_init: XKeenInitSource | None = None
-    xkeen_lists: XKeenListSource | None = None
-    geodata: GeoDatabaseSource | None = None
-    process: XrayProcessSource | None = None
-    metadata: ManagerMetadataStore | None = None
-    geo_match: GeoDataSource | None = None
-    """Источник членства в наборах GeoIP и GeoSite для объяснения маршрута; без него условия геобаз «неизвестны»."""
-    drafts: DraftSessionStore | None = None
-    """Хранилище сессии для чтения, если не подключён `draft_discard`."""
-    draft_discard: DraftSessionStore | None = None
-    """Хранилище, разрешённое для отмены; при подключении используется и для всех чтений черновика."""
-    storage_error: ErrorDetail | None = None
-    """Безопасная причина неподключённых хранилищ при неподтверждённом размещении DATA."""
-    fingerprints: SourceFingerprintSource | None = None
-    """Текущие отпечатки всех управляемых источников для проверки сохранённой сессии."""
-    candidate_assets: CandidateAssetSource | None = None
-    """Полные байты геобаз; ожидаемые ревизии всегда берутся из кандидата."""
-    geo_catalogs: GeoCategorySource | None = None
-    """Доверенные свидетельства категорий; отсутствие не подменяется именем или SHA."""
-    installed_xray: InstalledXrayPort | None = None
-    """Изолированный исполнитель; его отсутствие не блокирует статический отчёт."""
-
-    @property
-    def keenetic_connected(self) -> bool:
-        """Подключены ли все четыре источника состояния Keenetic."""
-        return None not in (self.policies, self.hotspot, self.registrations, self.runtime)
-
-    @property
-    def proxy_connected(self) -> bool:
-        """Подключены ли все четыре источника конфигурации Xray и XKeen."""
-        return None not in (self.xray, self.xkeen_settings, self.xkeen_init, self.xkeen_lists)
+from keenvpn.interfaces.cli.tree import BOUND_SCENARIOS, ActionStates, build_main_menu, build_setup_menu
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,117 +102,22 @@ def _bindings(
             sources.xray, sources.xkeen_settings, sources.xkeen_init, sources.xkeen_lists, operation_ids=operation_ids,
         )
 
-    states: dict[str, UnavailableReason | None] = {
-        action_id: UnavailableReason.SOURCE_NOT_CONNECTED for action_id in BOUND_SCENARIOS
-    }
-    actions: dict[str, Action] = {}
-    drafts = sources.draft_discard if sources.draft_discard is not None else sources.drafts
-    states["draft.discard"] = (UnavailableReason.DRAFT_STORE_NOT_CONNECTED if drafts is None
-                               else UnavailableReason.DRAFT_DISCARD_NOT_CONNECTED)
+    bindings: SectionActions = dict.fromkeys(BOUND_SCENARIOS, UnavailableReason.SOURCE_NOT_CONNECTED)
     storage_notice = [] if sources.storage_error is None else [
         "Хранилища не подключены: " + sources.storage_error.message,
     ]
-    if storage_notice:
-        for action_id in ("settings.storage", "draft.diff", "draft.check"):
-            states[action_id] = UnavailableReason.STORAGE_NOT_CONFIRMED
-        if drafts is None:
-            states["draft.discard"] = UnavailableReason.STORAGE_NOT_CONFIRMED
-
-    def bind(action_id: str, action: Action) -> None:
-        states[action_id] = None
-        actions[action_id] = action
-
-    # Сводка допускает неподключённые источники: пункт и шапка — один сценарий, который читает то, что подключено.
-    summary = InspectStatusSummaryHandler(proxy, sources.process, drafts=drafts, operation_ids=operation_ids)
-    bind("status.summary", lambda: [
-        *present_result(summary.execute(InspectStatusSummary()), present_status_summary), *storage_notice,
-    ])
-
-    def header() -> list[str]:
-        return [*present_result(summary.execute(InspectStatusSummary()), present_status_header), *storage_notice]
-
-    # Решение о выходе принимает сценарий; меню только показывает его строки и задаёт вопрос, если он нужен.
-    menu_exit = InspectMenuExitHandler(drafts, operation_ids=operation_ids)
-
-    def exit_check() -> ExitNotice:
-        notice = present_menu_exit(menu_exit.execute(InspectMenuExit()))
-        return ExitNotice((*notice.lines, *storage_notice), notice.confirm)
-
-    bind("draft.save_and_exit", exit_check)
-
-    # Быстрая проверка читает те же источники теми же функциями, что сводка, и дополнительно инвентарь геобаз.
-    quick_check = QuickCheckHandler(proxy, sources.process, sources.geodata, operation_ids=operation_ids)
-    bind("status.quick_check", lambda: present_result(quick_check.execute(QuickCheck()), present_quick_check))
-
+    header = status.bind_actions(bindings, proxy, sources, operation_ids, storage_notice)
     if proxy is not None:
-        connections = InspectConnectionsHandler(proxy, operation_ids=operation_ids)
-        bind("connections.list", lambda: present_result(connections.execute(InspectConnections()), present_connections))
-        # Список правил и объяснение маршрута допускают неподключённое хранилище метаданных: тогда они показываются
-        # без названий и идентификаторов. Объяснение читает ту же схему тем же обработчиком импорта.
-        routing = ImportRoutingSchemeHandler(proxy, operation_ids=operation_ids)
-        rules = ListRoutingRulesHandler(routing, sources.metadata, operation_ids=operation_ids)
-        bind("routing.list", lambda: present_result(rules.execute(ListRoutingRules()), present_rule_list))
-        explain = ExplainRouteHandler.from_import(routing, sources.metadata, sources.geo_match, operation_ids=operation_ids)
-
-        def explain_route(value: str) -> list[str]:
-            # Строка передаётся сценарию как есть: домен, адрес и их сочетание разбирает домен, меню не разбирает.
-            return present_result(explain.execute(ExplainRoute(destination=value)), present_route_explanation)
-
-        bind("routing.explain", lambda: ValueRequest(ROUTE_PROMPT, explain_route))
-        bind("failsafe.port53_check", lambda: present_result(proxy.execute(InspectProxyConfig()), present_port53))
+        connections.bind_actions(bindings, proxy, operation_ids)
+        routing.bind_actions(bindings, proxy, sources.metadata, sources.geo_match, operation_ids)
+        failsafe.bind_actions(bindings, proxy)
     if keenetic is not None:
-        # Список устройств читает те же четыре источника тем же обработчиком состояния Keenetic.
-        devices = ListKeeneticDevicesHandler(keenetic, operation_ids=operation_ids)
-        bind("devices.list", lambda: present_result(devices.execute(ListKeeneticDevices()), present_device_list))
-    if sources.metadata is not None:
-        metadata = InspectManagerMetadataHandler(sources.metadata, operation_ids=operation_ids)
-        bind(
-            "settings.storage",
-            lambda: present_result(metadata.execute(InspectManagerMetadata()), present_manager_metadata),
-        )
-    if sources.draft_discard is not None:
-        inspect_for_discard = InspectDraftHandler(sources.draft_discard, operation_ids=operation_ids)
-        discard = DiscardDraftHandler(sources.draft_discard, operation_ids=operation_ids)
+        devices.bind_actions(bindings, keenetic, operation_ids)
+    exit_check = draft.bind_actions(bindings, sources, operation_ids, storage_notice)
+    settings.bind_actions(bindings, sources, operation_ids)
 
-        def discard_action() -> list[str] | ConfirmationRequest:
-            inspected = inspect_for_discard.execute(InspectDraft())
-            if not inspected.succeeded:
-                return present_error(inspected.error)
-            view = inspected.data.draft
-            if view is None:
-                return [NO_SAVED_DRAFT]
-            # Команда относится к выбранной сессии, показанной до подтверждения.
-            command = DiscardDraft(draft_id=view.draft_id, expected_revision=view.revision)
-            return ConfirmationRequest(
-                present_draft_discard_question(view),
-                lambda: present_result(discard.execute(command), present_draft_discard),
-            )
-
-        bind("draft.discard", discard_action)
-
-    if drafts is not None and sources.fingerprints is not None:
-        inspect_draft = InspectDraftHandler(drafts, operation_ids=operation_ids)
-        compare = CompareSavedDraftHandler(drafts, sources.fingerprints, operation_ids=operation_ids)
-        check = CheckSavedDraftHandler(drafts, sources.fingerprints, sources.geodata,
-            sources.candidate_assets, sources.geo_catalogs, sources.installed_xray, operation_ids=operation_ids)
-
-        def saved_action(handler, command_type, presenter):
-            def action():
-                inspected = inspect_draft.execute(InspectDraft())
-                if not inspected.succeeded:
-                    return present_result(inspected, presenter)
-                view = inspected.data.draft
-                if view is None:
-                    return [NO_SAVED_DRAFT]
-                # ID и токен остаются в состоянии вызова и не выводятся.
-                return present_result(handler.execute(command_type(draft_id=view.draft_id,
-                    expected_revision=view.revision)), presenter)
-            return action
-
-        bind("draft.diff", saved_action(compare, CompareSavedDraft, present_draft_diff))
-        bind("draft.check", saved_action(check, CheckSavedDraft, present_saved_draft_check))
-    for action_id in BUILTIN_ACTIONS:
-        bind(action_id, present_about)
+    states = {key: value if isinstance(value, UnavailableReason) else None for key, value in bindings.items()}
+    actions = {key: value for key, value in bindings.items() if callable(value)}
     return states, actions, header, exit_check
 
 

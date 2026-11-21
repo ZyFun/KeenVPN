@@ -10,8 +10,11 @@
 не применяет: конфигурация Xray и XKeen, Keenetic и службы не затрагиваются.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 from keenvpn.adapters.private_files import PrivateFileStore, StoreFailure
-from keenvpn.application.ports import DraftSessionStoreError, DraftStoreFailure
+from keenvpn.application.ports import DraftSessionReader, DraftSessionStoreError, DraftStoreFailure
 from keenvpn.domain.draft_session import (
     MAX_DRAFT_SIZE, DraftSession, DraftSessionError, DraftSessionErrorCode, StoredDraftSession, decode_draft_session,
     draft_revision, encode_draft_session,
@@ -37,6 +40,19 @@ class DraftSessionFiles(PrivateFileStore[StoredDraftSession]):
     error_type = DraftSessionStoreError
     failures = {failure: DraftStoreFailure[failure.name] for failure in StoreFailure}
     revision_of = staticmethod(draft_revision)
+
+    @contextmanager
+    def lock_for_apply(self) -> Iterator[DraftSessionReader | None]:
+        """Взять блокировку существующего каталога без создания файлов и каталогов."""
+        with self._locked_directory() as directory:
+            if directory is None:
+                yield None
+                return
+            reader = _LockedDraftReader(self, directory)
+            try:
+                yield reader
+            finally:
+                reader.close()
 
     def read_draft(self) -> StoredDraftSession | None:
         """Прочитать файл без блокировки: создание публикует его одним переименованием.
@@ -95,3 +111,24 @@ class DraftSessionFiles(PrivateFileStore[StoredDraftSession]):
         except DraftSessionError as error:
             code = error.code
         self._raise(StoreFailure.INVALID, code.value)
+
+
+class _LockedDraftReader:
+    """Читать сессию из того же каталога, дескриптор которого держит блокировку."""
+
+    def __init__(self, store: DraftSessionFiles, directory: int) -> None:
+        self._store = store
+        self._directory: int | None = directory
+
+    def read_draft(self) -> StoredDraftSession | None:
+        directory = self._directory
+        if directory is None:
+            raise DraftSessionStoreError(DraftStoreFailure.UNAVAILABLE)
+        self._store._check_identity(directory)
+        stored = self._store._read(directory)
+        self._store._check_identity(directory)
+        return stored
+
+    def close(self) -> None:
+        """Отключить чтение перед закрытием дескриптора владельцем блокировки."""
+        self._directory = None

@@ -30,7 +30,7 @@ from keenvpn.application.contract import (
     check_contract_version, failed, invalid_command, new_operation_id, revision_conflict, succeeded,
 )
 from keenvpn.application.ports import (
-    DraftSessionStore, DraftSessionStoreError, DraftStoreFailure, SourceFingerprintSource, StoreReason,
+    DraftSessionReader, DraftSessionStore, DraftSessionStoreError, DraftStoreFailure, SourceFingerprintSource, StoreReason,
 )
 from keenvpn.application.source_baseline import capture_baseline, compare_baseline
 from keenvpn.application.views import view_dict, view_fields
@@ -358,7 +358,7 @@ def check_expected_draft(stored: StoredDraftSession, draft_id: str, expected_rev
     return None
 
 
-def read_stored_draft(store: DraftSessionStore) -> StoredDraftSession | None | ErrorDetail:
+def read_stored_draft(store: DraftSessionReader) -> StoredDraftSession | None | ErrorDetail:
     """Прочитать черновик один раз и повторно проверить ответ хранилища.
 
     `None` — черновика нет; отказ хранилища и ответ не по контракту
@@ -382,7 +382,7 @@ def read_stored_draft(store: DraftSessionStore) -> StoredDraftSession | None | E
     return stored if valid else INVALID_STORE_RESULT
 
 
-def read_expected_draft(store: DraftSessionStore, draft_id: str, expected_revision: str) -> StoredDraftSession | ErrorDetail:
+def read_expected_draft(store: DraftSessionReader, draft_id: str, expected_revision: str) -> StoredDraftSession | ErrorDetail:
     """Прочитать сессию и сверить её с уже проверенными полями команды."""
     stored = read_stored_draft(store)
     if isinstance(stored, ErrorDetail):
@@ -394,7 +394,7 @@ def read_expected_draft(store: DraftSessionStore, draft_id: str, expected_revisi
 
 
 def check_draft_current(
-    store: DraftSessionStore, fingerprints: SourceFingerprintSource, draft_id: object, expected_revision: object,
+    store: DraftSessionReader, fingerprints: SourceFingerprintSource, draft_id: object, expected_revision: object,
 ) -> StoredDraftSession | ErrorDetail:
     """Проверить, что черновик из команды не устарел: общий помощник проверки и будущего применения.
 

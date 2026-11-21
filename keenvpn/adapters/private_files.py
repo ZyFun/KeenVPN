@@ -13,8 +13,8 @@ Xray и XKeen и каталог init для хранилищ запрещены.
 по UUID и свободное место заранее не проверяются.
 """
 
-from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager
 from enum import StrEnum
 import errno
 import fcntl
@@ -173,22 +173,15 @@ class PrivateFileStore[StoredT: StoredFile]:
         не записываются повторно, но файл и каталог закрепляются fsync.
         """
         revision = self.revision_of(content)
-        parent_path, name = self._location()
-        with self._walk(parent_path) as parent:
-            directory = self._open_directory(parent, name, create=expected_revision is None, sync_parent=True)
+        with self._locked_directory(create=expected_revision is None, sync_parent=True) as directory:
             if directory is None:
                 self._raise(StoreFailure.CONFLICT)
-            try:
-                self._lock(directory)
-                self._remove_stale(directory)
-                current = self._check_revision(directory, expected_revision)
-                if current is None or current.revision != revision:
-                    self._replace(directory, content, expected_revision)
-                else:
-                    self._confirm(directory, expected_revision)
-            finally:
-                # Закрытие дескриптора снимает блокировку.
-                os.close(directory)
+            self._remove_stale(directory)
+            current = self._check_revision(directory, expected_revision)
+            if current is None or current.revision != revision:
+                self._replace(directory, content, expected_revision)
+            else:
+                self._confirm(directory, expected_revision)
         return revision
 
     def _remove_file(self, expected_revision: str) -> None:
@@ -197,17 +190,11 @@ class PrivateFileStore[StoredT: StoredFile]:
         Повреждённый файл и файл другой версии схемы не удаляются: их ревизию
         нельзя сверить. Отсутствие каталога или файла — конфликт ревизии.
         """
-        parent_path, name = self._location()
-        with self._walk(parent_path) as parent:
-            directory = self._open_directory(parent, name, create=False)
+        with self._locked_directory() as directory:
             if directory is None:
                 self._raise(StoreFailure.CONFLICT)
-            try:
-                self._lock(directory)
-                self._remove_stale(directory)
-                self._unlink(directory, expected_revision)
-            finally:
-                os.close(directory)
+            self._remove_stale(directory)
+            self._unlink(directory, expected_revision)
 
     def _confirm_absent(self) -> None:
         """Закрепить на диске отсутствие файла, ничего не меняя в каталоге.
@@ -217,16 +204,32 @@ class PrivateFileStore[StoredT: StoredFile]:
         нечего: хранилище его не удаляет. Появившийся файл не трогается —
         конфликт ревизии.
         """
+        with self._locked_directory() as directory:
+            if directory is None:
+                return
+            self._check_identity(directory)
+            self._check_absent(directory)
+            self._sync_absent(directory)
+
+    @contextmanager
+    def _locked_directory(self, *, create: bool = False, sync_parent: bool = False) -> Iterator[int | None]:
+        """Удерживать эксклюзивную блокировку открытого каталога до выхода из контекста."""
         parent_path, name = self._location()
         with self._walk(parent_path) as parent:
-            directory = self._open_directory(parent, name, create=False)
+            directory = self._open_directory(parent, name, create=create, sync_parent=sync_parent)
             if directory is None:
+                yield None
                 return
             try:
                 self._lock(directory)
-                self._check_identity(directory)
-                self._check_absent(directory)
-                self._sync_absent(directory)
+                owner_pid = os.getpid()
+                try:
+                    yield directory
+                finally:
+                    # После fork дескриптор может остаться открыт у потомка.
+                    # Блокировку снимает тот процесс, который её получил.
+                    if os.getpid() == owner_pid:
+                        fcntl.flock(directory, fcntl.LOCK_UN)
             finally:
                 os.close(directory)
 

@@ -6,6 +6,7 @@
 не переключает уже подключённое хранилище. Файлы и каталоги не создаются.
 """
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 
 from keenvpn.adapters.draft_session_files import DraftSessionFiles
@@ -13,7 +14,7 @@ from keenvpn.adapters.manager_metadata_files import ManagerMetadataFiles
 from keenvpn.adapters.private_files import PROTECTED_DIRECTORIES, StoreFailure
 from keenvpn.application.contract import ErrorCategory, ErrorDetail
 from keenvpn.application.manager_metadata import read_storage_placement
-from keenvpn.application.ports import StoragePlacementSource, StoreReason
+from keenvpn.application.ports import DraftSessionReader, StoragePlacementSource, StoreReason
 from keenvpn.domain.manager_metadata import RoleLocation, ValueState, valid_storage_path
 
 
@@ -84,6 +85,10 @@ class _PlacedReadOnly:
 
 class RouterDraftSessionFiles(_PlacedReadOnly, DraftSessionFiles):
     """Чтение сессии с проверкой DATA; изменяющие методы порта дают read_only."""
+
+    def lock_for_apply(self) -> AbstractContextManager[DraftSessionReader | None]:
+        """Отклонить попытку начать применение через хранилище только для чтения."""
+        self._raise(StoreFailure.UNAVAILABLE, StoreReason.READ_ONLY)
 
 
 class RouterManagerMetadataFiles(_PlacedReadOnly, ManagerMetadataFiles):

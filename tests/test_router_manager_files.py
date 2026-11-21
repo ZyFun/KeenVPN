@@ -269,6 +269,7 @@ class RouterManagerFilesTests(unittest.TestCase):
                  (lambda: stores.drafts.replace_draft(draft_fixture.session(), revision), DraftSessionStoreError),
                  (lambda: stores.drafts.remove_draft(revision), DraftSessionStoreError),
                  (stores.drafts.confirm_draft_absent, DraftSessionStoreError),
+                 (stores.drafts.lock_for_apply, DraftSessionStoreError),
                  (lambda: stores.metadata.write_metadata(ManagerMetadata(), None), ManagerMetadataStoreError)]
         with read_only():
             for callback, error in calls:

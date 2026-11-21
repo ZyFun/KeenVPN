@@ -4,6 +4,7 @@
 Сценарии не импортируют конкретные адаптеры.
 """
 
+from contextlib import AbstractContextManager
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
@@ -378,7 +379,28 @@ class DraftSessionStoreError(Exception):
         super().__init__(_DRAFT_STORE_MESSAGES[failure])
 
 
-class DraftSessionStore(Protocol):
+class DraftSessionReader(Protocol):
+    """Чтение одной сессии черновика вместе с ревизией её байтов."""
+
+    def read_draft(self) -> StoredDraftSession | None:
+        """Вернуть сессию с ревизией или None, если черновика нет; при отказе — DraftSessionStoreError."""
+        ...
+
+
+class DraftApplyLock(Protocol):
+    """Эксклюзивная координация применения и операций записи черновика."""
+
+    def lock_for_apply(self) -> AbstractContextManager[DraftSessionReader | None]:
+        """Удерживать общую блокировку и предоставить чтение сессии под ней.
+
+        При занятой блокировке — DraftSessionStoreError с видом BUSY без
+        ожидания. None означает, что самого хранилища ещё нет. Чтение через
+        возвращённый объект допустимо только внутри контекста.
+        """
+        ...
+
+
+class DraftSessionStore(DraftSessionReader, Protocol):
     """Одна сессия черновика менеджера отдельно от active configs.
 
     Ревизия — SHA-256 байтов файла. Создание не перезаписывает существующий
@@ -386,10 +408,6 @@ class DraftSessionStore(Protocol):
     файла. Отсутствие черновика закрепляется на диске отдельным вызовом.
     Хранилище ничего не применяет к конфигурации.
     """
-
-    def read_draft(self) -> StoredDraftSession | None:
-        """Вернуть сессию с ревизией или None, если черновика нет; при отказе — DraftSessionStoreError."""
-        ...
 
     def create_draft(self, session: DraftSession) -> str:
         """Создать черновик, если его нет, и вернуть ревизию; существующий — `draft_revision_conflict`."""

@@ -139,7 +139,11 @@ def _split(path: str) -> tuple[str, str]:
 
 def _identity(info: os.stat_result) -> tuple[int, ...]:
     """Признаки, по которым видна замена или правка файла между двумя наблюдениями."""
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return (*_metadata(info), info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _metadata(info: os.stat_result) -> tuple[int, ...]:
+    return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
 
 
 def _changed_path(kind: PathFailure) -> NoReturn:
@@ -174,8 +178,8 @@ def _walk(path: str) -> AbstractContextManager[int]:
 
 def _read_entry(
     directory: int, name: str, limit: int, consume: Callable[[bytes], object], *, listed: bool = False,
-) -> int:
-    """Прочитать обычный файл каталога потоком не больше `limit` байт и вернуть размер.
+) -> os.stat_result:
+    """Прочитать обычный файл потоком и вернуть метаданные того же дескриптора.
 
     Файл, изменившийся или заменённый во время чтения, — отказ `changed`;
     исчезновение файла, найденного перечислением каталога (`listed`), — тоже.
@@ -210,10 +214,10 @@ def _read_entry(
         os.close(descriptor)
     if _identity(before) != _identity(after) or size != after.st_size or _identity(current) != _identity(after):
         fail_read(RouterReadFailure.CHANGED)
-    return size
+    return after
 
 
-def _read_single(path: str, limit: int, consume: Callable[[bytes], object]) -> int:
+def _read_single(path: str, limit: int, consume: Callable[[bytes], object]) -> os.stat_result:
     """Прочитать обычный файл по пути потоком и убедиться, что каталог по пути не заменён.
 
     Отсутствие файла в удерживаемом каталоге — `missing`, только если путь
@@ -222,20 +226,25 @@ def _read_single(path: str, limit: int, consume: Callable[[bytes], object]) -> i
     parent, name = _split(path)
     with _walk(parent) as directory:
         try:
-            size = _read_entry(directory, name, limit, consume)
+            info = _read_entry(directory, name, limit, consume)
         except RouterReadError as error:
             if error.failure is RouterReadFailure.MISSING:
                 _confirm_path(parent, directory)
             raise
         _confirm_path(parent, directory)
-    return size
+    return info
 
 
 def read_file(path: str, limit: int) -> bytes:
     """Прочитать обычный файл целиком, не больше `limit` байт."""
+    return read_file_with_metadata(path, limit)[0]
+
+
+def read_file_with_metadata(path: str, limit: int) -> tuple[bytes, os.stat_result]:
+    """Прочитать байты и исходные метаданные одного обычного файла."""
     chunks: list[bytes] = []
-    _read_single(path, limit, chunks.append)
-    return b"".join(chunks)
+    info = _read_single(path, limit, chunks.append)
+    return b"".join(chunks), info
 
 
 def digest_file(path: str, limit: int) -> tuple[int, str]:
@@ -245,8 +254,8 @@ def digest_file(path: str, limit: int) -> tuple[int, str]:
     и каталога во время чтения, подтверждённое отсутствие.
     """
     hasher = hashlib.sha256()
-    size = _read_single(path, limit, hasher.update)
-    return size, hasher.hexdigest()
+    info = _read_single(path, limit, hasher.update)
+    return info.st_size, hasher.hexdigest()
 
 
 def _entries(directory: int, suffix: str, count_limit: int) -> dict[str, tuple[int, ...]]:
@@ -277,32 +286,48 @@ def _entries(directory: int, suffix: str, count_limit: int) -> dict[str, tuple[i
     return entries
 
 
-def _read_directory(
-    path: str, suffix: str, count_limit: int, read: Callable[[int, str], object],
-) -> dict[str, object]:
+def _read_directory[T](
+    path: str, suffix: str, count_limit: int, read: Callable[[int, str], T],
+) -> tuple[os.stat_result, dict[str, T]]:
     """Прочитать файлы каталога по порядку имён и убедиться, что ни набор, ни каталог по пути не изменились."""
     if not valid_storage_path(path):
         fail_read(RouterReadFailure.UNSAFE)
     with _walk(path) as directory:
-        entries = _entries(directory, suffix, count_limit)
-        values = {name: read(directory, name) for name in entries}
-        if _entries(directory, suffix, count_limit) != entries:
+        try:
+            info = os.fstat(directory)
+            entries = _entries(directory, suffix, count_limit)
+            values = {name: read(directory, name) for name in entries}
+            current_entries = _entries(directory, suffix, count_limit)
+            current_info = os.fstat(directory)
+        except OSError:
+            fail_read(RouterReadFailure.IO_ERROR)
+        if current_entries != entries or _metadata(info) != _metadata(current_info):
             fail_read(RouterReadFailure.CHANGED)
         _confirm_path(path, directory)
-    return values
+    return info, values
 
 
 def read_files(path: str, suffix: str, *, file_limit: int, total_limit: int, count_limit: int) -> dict[str, bytes]:
     """Прочитать обычные файлы каталога с окончанием `suffix`: имя — байты, по порядку имён."""
+    _, values = read_files_with_metadata(path, suffix, file_limit=file_limit, total_limit=total_limit,
+                                         count_limit=count_limit)
+    return {name: content for name, (content, _info) in values.items()}
+
+
+def read_files_with_metadata(
+    path: str, suffix: str, *, file_limit: int, total_limit: int, count_limit: int,
+) -> tuple[os.stat_result, dict[str, tuple[bytes, os.stat_result]]]:
+    """Прочитать обычные файлы вместе с метаданными каталога и каждого файла."""
     total = 0
 
-    def read(directory: int, name: str) -> bytes:
+    def read(directory: int, name: str) -> tuple[bytes, os.stat_result]:
         nonlocal total
         chunks: list[bytes] = []
-        total += _read_entry(directory, name, file_limit, chunks.append, listed=True)
+        info = _read_entry(directory, name, file_limit, chunks.append, listed=True)
+        total += info.st_size
         if total > total_limit:
             fail_read(RouterReadFailure.TOO_LARGE)
-        return b"".join(chunks)
+        return b"".join(chunks), info
 
     return _read_directory(path, suffix, count_limit, read)
 
@@ -312,10 +337,10 @@ def digest_files(path: str, suffix: str, *, file_limit: int, count_limit: int) -
 
     def digest(directory: int, name: str) -> tuple[int, str]:
         hasher = hashlib.sha256()
-        size = _read_entry(directory, name, file_limit, hasher.update, listed=True)
-        return size, hasher.hexdigest()
+        info = _read_entry(directory, name, file_limit, hasher.update, listed=True)
+        return info.st_size, hasher.hexdigest()
 
-    return _read_directory(path, suffix, count_limit, digest)
+    return _read_directory(path, suffix, count_limit, digest)[1]
 
 
 def regular_file_exists(path: str) -> bool:

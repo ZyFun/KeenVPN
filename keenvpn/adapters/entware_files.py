@@ -150,7 +150,7 @@ def _changed_path(kind: PathFailure) -> NoReturn:
     fail_read(RouterReadFailure.IO_ERROR if kind is PathFailure.IO_ERROR else RouterReadFailure.CHANGED)
 
 
-def _confirm_path(path: str, directory: int) -> None:
+def confirm_directory_path(path: str, directory: int) -> None:
     """Путь по-прежнему ведёт к удерживаемому каталогу; иначе — отказ `changed`.
 
     Удерживаемый дескриптор видит прежний каталог и после его замены
@@ -173,7 +173,7 @@ def _confirm_path(path: str, directory: int) -> None:
 
 def _walk(path: str) -> AbstractContextManager[int]:
     """Обход пути источника: отсутствие компонента — `missing`, только если каталог перед ним не заменён."""
-    return walk_directory(path, _fail_path, confirm_missing=_confirm_path)
+    return walk_directory(path, _fail_path, confirm_missing=confirm_directory_path)
 
 
 def _read_entry(
@@ -229,9 +229,9 @@ def _read_single(path: str, limit: int, consume: Callable[[bytes], object]) -> o
             info = _read_entry(directory, name, limit, consume)
         except RouterReadError as error:
             if error.failure is RouterReadFailure.MISSING:
-                _confirm_path(parent, directory)
+                confirm_directory_path(parent, directory)
             raise
-        _confirm_path(parent, directory)
+        confirm_directory_path(parent, directory)
     return info
 
 
@@ -303,7 +303,7 @@ def _read_directory[T](
             fail_read(RouterReadFailure.IO_ERROR)
         if current_entries != entries or _metadata(info) != _metadata(current_info):
             fail_read(RouterReadFailure.CHANGED)
-        _confirm_path(path, directory)
+        confirm_directory_path(path, directory)
     return info, values
 
 
@@ -351,7 +351,7 @@ def regular_file_exists(path: str) -> bool:
             try:
                 info = os.stat(name, dir_fd=directory, follow_symlinks=False)
             except FileNotFoundError:
-                _confirm_path(parent, directory)
+                confirm_directory_path(parent, directory)
                 return False
             except PermissionError:
                 fail_read(RouterReadFailure.PERMISSION_DENIED)

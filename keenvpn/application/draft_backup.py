@@ -44,6 +44,7 @@ class BackupXrayDirectory:
 
 
 type BackupSourceContent = BackupFile | BackupXrayDirectory | bytes | None
+type PreparedSnapshotCheck = Callable[[PreparedSnapshot, PreparedSnapshot], ErrorDetail | None]
 
 
 class DraftBackupSource(Protocol):
@@ -87,6 +88,21 @@ class VerifiedDraftBackup:
     backup_id: str
     draft_revision: str
     sha256: str
+    files: tuple[tuple[BaselineSource, str | None, FileMetadata | None], ...] = ()
+
+
+def _file_metadata_index(changes: dict[str, object]) -> tuple[tuple[BaselineSource, str | None, FileMetadata | None], ...]:
+    """Связать затронутые файлы и их исходные метаданные с проверенной копией."""
+    files = []
+    for which in BaselineSource:
+        if which.value not in changes or which in (BaselineSource.KEENETIC_POLICIES,
+                                                   BaselineSource.KEENETIC_HOTSPOT_SETTINGS):
+            continue
+        record = changes[which.value]
+        entries = record["parts"].items() if which is BaselineSource.XRAY_CONFIGS else ((None, record),)
+        for name, entry in entries:
+            files.append((which, name, None if entry is None else FileMetadata(**entry["metadata"])))
+    return tuple(files)
 
 
 _INVALID_CANDIDATE = ErrorDetail(
@@ -192,6 +208,7 @@ def prepare_draft_backup(
     stored: StoredDraftSession, source: DraftBackupSource, storage: DraftBackupStorage,
     recheck_sources: Callable[[], ErrorDetail | None],
     recheck_revision: Callable[[], ErrorDetail | None],
+    *, check_prepared: PreparedSnapshotCheck | None = None,
 ) -> VerifiedDraftBackup | ErrorDetail:
     """Подготовить копию внутри блокировки применения для уже сверенной сессии."""
     state = stored.session.candidate
@@ -204,6 +221,10 @@ def prepare_draft_backup(
     error = compare_baseline(original, stored.session.baseline)
     if error is not None:
         return error
+    if check_prepared is not None:
+        error = check_prepared(original, candidate)
+        if error is not None:
+            return error
 
     changes = _read_changes(original, candidate, source)
     if isinstance(changes, ErrorDetail):
@@ -251,4 +272,4 @@ def prepare_draft_backup(
         return _UNVERIFIED
     if confirmed is not None:
         return _UNVERIFIED
-    return VerifiedDraftBackup(backup_id, stored.revision, actual)
+    return VerifiedDraftBackup(backup_id, stored.revision, actual, _file_metadata_index(changes))

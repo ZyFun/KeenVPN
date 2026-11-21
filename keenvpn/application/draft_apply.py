@@ -5,7 +5,7 @@ from contextlib import ExitStack
 
 from keenvpn.application.contract import ConflictState, ErrorDetail, invalid_command
 from keenvpn.application.draft_backup import (
-    DraftBackupSource, DraftBackupStorage, VerifiedDraftBackup, prepare_draft_backup,
+    DraftBackupSource, DraftBackupStorage, PreparedSnapshotCheck, VerifiedDraftBackup, prepare_draft_backup,
 )
 from keenvpn.application.draft_session import (
     DRAFT_CHANGED, DRAFT_GONE, check_draft_current, read_stored_draft, store_error_detail, valid_expected_draft,
@@ -32,7 +32,7 @@ def run_draft_apply[T](
     return _with_current_draft(lock, fingerprints, draft_id, expected_revision, lambda _reader, stored: apply(stored))
 
 
-def run_draft_apply_with_backup[T](
+def run_draft_apply_with_backup[T, R](
     lock: DraftApplyLock,
     fingerprints: SourceFingerprintSource,
     draft_id: object,
@@ -40,12 +40,18 @@ def run_draft_apply_with_backup[T](
     source: DraftBackupSource,
     storage: DraftBackupStorage,
     apply: Callable[[StoredDraftSession, VerifiedDraftBackup], T],
-) -> T | ErrorDetail:
+    *,
+    check_prepared: PreparedSnapshotCheck | None = None,
+    on_lock_release_error: Callable[[T | ErrorDetail], R] | None = None,
+) -> T | ErrorDetail | R:
     """Вызвать исполнителя подтверждённой ревизии после проверки её копии.
 
     Проверки кандидата и подтверждение команды принадлежат вызывающему.
     Копирование и повторная сверка сессии и источников выполняются под
-    общей блокировкой. При отказе исполнитель не вызывается.
+    общей блокировкой. check_prepared может проверить файловые ограничения
+    по сверенным снимкам перед копированием. При отказе исполнитель не вызывается.
+    on_lock_release_error получает готовый результат, если не удалось выйти
+    из контекста блокировки. Исключения самого исполнителя передаются вызывающему.
     """
     def with_backup(reader: DraftSessionReader, stored: StoredDraftSession) -> T | ErrorDetail:
         def recheck_sources() -> ErrorDetail | None:
@@ -62,21 +68,27 @@ def run_draft_apply_with_backup[T](
                 return DRAFT_GONE
             return None if current.revision == stored.revision else DRAFT_CHANGED
 
-        backup = prepare_draft_backup(stored, source, storage, recheck_sources, recheck_revision)
+        backup = prepare_draft_backup(
+            stored, source, storage, recheck_sources, recheck_revision, check_prepared=check_prepared,
+        )
         if isinstance(backup, ErrorDetail):
             return backup
         return apply(stored, backup)
 
-    return _with_current_draft(lock, fingerprints, draft_id, expected_revision, with_backup)
+    return _with_current_draft(
+        lock, fingerprints, draft_id, expected_revision, with_backup, on_lock_release_error=on_lock_release_error,
+    )
 
 
-def _with_current_draft[T](
+def _with_current_draft[T, R](
     lock: DraftApplyLock,
     fingerprints: SourceFingerprintSource,
     draft_id: object,
     expected_revision: object,
     apply: Callable[[DraftSessionReader, StoredDraftSession], T],
-) -> T | ErrorDetail:
+    *,
+    on_lock_release_error: Callable[[T | ErrorDetail], R] | None = None,
+) -> T | ErrorDetail | R:
     if not valid_expected_draft(draft_id, expected_revision):
         return invalid_command()
     with ExitStack() as stack:
@@ -85,8 +97,13 @@ def _with_current_draft[T](
         except Exception as error:
             return store_error_detail(error, ConflictState.PRESENT)
         if reader is None:
-            return DRAFT_GONE
-        stored = check_draft_current(reader, fingerprints, draft_id, expected_revision)
-        if isinstance(stored, ErrorDetail):
-            return stored
-        return apply(reader, stored)
+            result = DRAFT_GONE
+        else:
+            stored = check_draft_current(reader, fingerprints, draft_id, expected_revision)
+            result = stored if isinstance(stored, ErrorDetail) else apply(reader, stored)
+        if on_lock_release_error is not None:
+            try:
+                stack.close()
+            except Exception:
+                return on_lock_release_error(result)
+        return result

@@ -16,11 +16,13 @@ from collections.abc import Callable
 import os
 import posixpath
 import selectors
+import stat
 import subprocess
 import time
 
 from keenvpn.adapters.entware_files import (
-    digest_file, digest_files, fail_read, read_file, read_files, regular_file_exists,
+    digest_file, digest_files, fail_read, read_file, read_file_with_metadata, read_files, read_files_with_metadata,
+    regular_file_exists,
 )
 from keenvpn.adapters.geodata_files import XRAY_ASSET_DIRECTORY, geo_inventory_from_digests
 from keenvpn.adapters.keenetic_rci import (
@@ -33,13 +35,16 @@ from keenvpn.adapters.xkeen_files import (
 )
 from keenvpn.adapters.xkeen_runtime import XKEEN_READY_MARKER_PATH, XRAY_PROCESS_NAME, xray_process_from_pidof
 from keenvpn.adapters.xray_configs import XRAY_CONFIG_DIRECTORY, xray_config_from_files
+from keenvpn.application.draft_backup import BackupFile, BackupSourceContent, BackupXrayDirectory, FileMetadata
 from keenvpn.application.ports import RouterReadError, RouterReadFailure
 from keenvpn.domain.config_document import valid_document_name
 from keenvpn.domain.geodata import GeoDatabaseInventory
 from keenvpn.domain.keenetic_native import KeeneticHotspotRuntime, KeeneticHotspotSettings, KeeneticRegistrations
 from keenvpn.domain.keenetic_policy import KeeneticPolicySet
 from keenvpn.domain.manager_metadata import valid_storage_path
-from keenvpn.domain.source_baseline import BaselineSource, FingerprintState, SourceFingerprint, native_fingerprint
+from keenvpn.domain.source_baseline import (
+    BaselineSource, FingerprintState, SourceFingerprint, canonical_native_bytes, native_fingerprint,
+)
 from keenvpn.domain.xkeen_config import XKeenInitParameters, XKeenList, XKeenListName, XKeenSettings
 from keenvpn.domain.xray_config import XrayConfigSet
 from keenvpn.domain.xray_process import XrayProcessObservation
@@ -70,6 +75,10 @@ CommandRunner = Callable[[tuple[str, ...], float, int], tuple[int, bytes]]
 """Запуск команды чтения: аргументы, таймаут, предел вывода → код возврата и stdout; отказ — RouterReadError."""
 RciReader = Callable[[RciResource], dict[str, object]]
 """Чтение одного ресурса RCI → разобранный JSON-объект; отказ — RouterReadError."""
+
+
+def _file_metadata(info: os.stat_result) -> FileMetadata:
+    return FileMetadata(stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid)
 
 
 def _collect_output(process: subprocess.Popen, deadline: float, limit: int, chunks: list[bytes]) -> RouterReadFailure | None:
@@ -347,3 +356,26 @@ class SourceFingerprints(_RciSource):
             if error.failure is not RouterReadFailure.MISSING:
                 raise
         return SourceFingerprint(source, FingerprintState.ABSENT)
+
+    def read_backup_source(self, source: BaselineSource) -> BackupSourceContent:
+        """Прочитать свежие байты и метаданные для копии по штатным путям."""
+        if type(source) is not BaselineSource:
+            raise TypeError("Источник копии задаётся BaselineSource.")
+        if source in self._resources:
+            return canonical_native_bytes(self._payload(self._resources[source]))
+        try:
+            if source is BaselineSource.XRAY_CONFIGS:
+                directory, files = read_files_with_metadata(
+                    self._xray, ".json", file_limit=XRAY_PART_LIMIT, total_limit=XRAY_PARTS_TOTAL_LIMIT,
+                    count_limit=XRAY_PART_COUNT_LIMIT,
+                )
+                return BackupXrayDirectory({
+                    name: BackupFile(content, _file_metadata(info)) for name, (content, info) in files.items()
+                }, _file_metadata(directory))
+            path, limit = self._files[source]
+            content, info = read_file_with_metadata(path, limit)
+            return BackupFile(content, _file_metadata(info))
+        except RouterReadError as error:
+            if error.failure is not RouterReadFailure.MISSING:
+                raise
+        return None

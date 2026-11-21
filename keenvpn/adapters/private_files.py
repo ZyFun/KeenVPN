@@ -25,6 +25,7 @@ import stat
 from typing import ClassVar, NoReturn, Protocol
 
 from keenvpn.adapters.entware_files import DIRECTORY_FLAGS, PathFailure, classify_open_failure, walk_directory
+from keenvpn.adapters.file_writes import write_all
 from keenvpn.adapters.xkeen_files import XKEEN_INIT_PATH, XKEEN_LIST_DIRECTORY
 from keenvpn.adapters.xray_configs import XRAY_CONFIG_DIRECTORY
 from keenvpn.application.ports import StoreReason
@@ -433,12 +434,7 @@ class PrivateFileStore[StoredT: StoredFile]:
             )
             created = True
             os.fchmod(descriptor, _FILE_MODE)
-            view = memoryview(content)
-            while view:
-                written = os.write(descriptor, view)
-                if written <= 0:
-                    raise OSError(errno.EIO, "short write")
-                view = view[written:]
+            write_all(descriptor, content)
             os.fsync(descriptor)
             self._check_identity(directory)
             # Писатели через хранилище исключены блокировкой. Правку в обход неё, сделанную

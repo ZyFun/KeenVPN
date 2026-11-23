@@ -156,6 +156,7 @@ Keenetic, конфигурации Xray и XKeen и существующей у�
 | `invalid_source_data` / `invalid_stored_draft` | `preserve_file` |
 | `unsupported` / `draft_exists`, `draft_mismatch` | `open_view` |
 | `source_failed` / `draft_baseline_changed` | `recreate_draft`: повтор не поможет, устаревший черновик не применяется |
+| `source_failed` / `draft_process_changed` | `open_view` |
 
 Остальные коды, включая `metadata_store_unavailable`, `metadata_write_failed`,
 `draft_store_unavailable`, `draft_write_failed`, `draft_baseline_unavailable`,

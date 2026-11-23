@@ -13,6 +13,7 @@ from keenvpn.application.ports import StoreReason
 from keenvpn.application.source_baseline import compare_baseline
 from keenvpn.domain.draft_session import StoredDraftSession
 from keenvpn.domain.draft_snapshot import PreparedSnapshot, prepare_snapshot
+from keenvpn.domain.manager_metadata import valid_metadata_revision
 from keenvpn.domain.source_baseline import BaselineSource
 
 
@@ -91,6 +92,21 @@ class VerifiedDraftBackup:
     files: tuple[tuple[BaselineSource, str | None, FileMetadata | None], ...] = ()
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class DraftProcessBackup:
+    """Подтверждённое прежнее состояние службы для копии применения."""
+
+    running: bool
+    autostart: bool
+    revision: str
+
+    def export(self) -> dict[str, object]:
+        if (type(self.running) is not bool or type(self.autostart) is not bool
+                or not valid_metadata_revision(self.revision)):
+            raise ValueError("Некорректный снимок службы.")
+        return {"running": self.running, "autostart": self.autostart, "revision": self.revision}
+
+
 def _file_metadata_index(changes: dict[str, object]) -> tuple[tuple[BaselineSource, str | None, FileMetadata | None], ...]:
     """Связать затронутые файлы и их исходные метаданные с проверенной копией."""
     files = []
@@ -108,6 +124,10 @@ def _file_metadata_index(changes: dict[str, object]) -> tuple[tuple[BaselineSour
 _INVALID_CANDIDATE = ErrorDetail(
     ErrorCategory.INVALID_SOURCE_DATA, "draft_backup_invalid_candidate",
     "Для резервной копии требуется полный кандидат с исходным снимком и файловым порядком частей Xray.",
+)
+_INVALID_PROCESS = ErrorDetail(
+    ErrorCategory.INVALID_SOURCE_DATA, "draft_backup_invalid_process",
+    "Для резервной копии требуется подтверждённое исходное состояние службы.",
 )
 _NO_CHANGES = ErrorDetail(
     ErrorCategory.UNSUPPORTED, "draft_backup_no_changes", "В черновике нет изменений для применения.",
@@ -208,7 +228,7 @@ def prepare_draft_backup(
     stored: StoredDraftSession, source: DraftBackupSource, storage: DraftBackupStorage,
     recheck_sources: Callable[[], ErrorDetail | None],
     recheck_revision: Callable[[], ErrorDetail | None],
-    *, check_prepared: PreparedSnapshotCheck | None = None,
+    *, check_prepared: PreparedSnapshotCheck | None = None, process_before: DraftProcessBackup | None = None,
 ) -> VerifiedDraftBackup | ErrorDetail:
     """Подготовить копию внутри блокировки применения для уже сверенной сессии."""
     state = stored.session.candidate
@@ -229,18 +249,29 @@ def prepare_draft_backup(
     changes = _read_changes(original, candidate, source)
     if isinstance(changes, ErrorDetail):
         return changes
-    if not changes:
+    process_record = None
+    if process_before is not None:
+        if type(process_before) is not DraftProcessBackup:
+            return _INVALID_PROCESS
+        try:
+            process_record = process_before.export()
+        except ValueError:
+            return _INVALID_PROCESS
+    if not changes and process_record is None:
         return _NO_CHANGES
 
     backup_id = str(uuid4())
-    content = json.dumps({
+    record = {
         "format": "keenvpn-draft-backup",
         "schema_version": 1,
         "backup_id": backup_id,
         "draft_id": stored.session.draft_id,
         "draft_revision": stored.revision,
         "sources": changes,
-    }, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    }
+    if process_record is not None:
+        record["process_before"] = process_record
+    content = json.dumps(record, ensure_ascii=True, separators=(",", ":")).encode("ascii")
     expected = hashlib.sha256(content).hexdigest()
     try:
         actual = storage.save(backup_id, content)

@@ -30,13 +30,25 @@ class DraftFileChange:
     target: DraftFileTarget
     content: bytes | None
     original_metadata: FileMetadata | None
+    restore_metadata: FileMetadata | None = None
+    expected_version: tuple[int, ...] | None = None
+    expected_parent: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True, slots=True, repr=False)
-class _PlannedFileChange:
+class PlannedFileChange:
     target: DraftFileTarget
+    before: bytes | None
     content: bytes | None
-    original_present: bool
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class FilePublication:
+    """Идентичность каталога и подтверждённое состояние записи или удаления."""
+
+    parent_identity: tuple[int, int]
+    metadata: FileMetadata | None
+    version: tuple[int, ...] | None
 
 
 class FileStepFailure(StrEnum):
@@ -52,6 +64,7 @@ class FileStepResult:
 
     code: FileStepFailure | None
     cleanup_failed: bool
+    published: FilePublication | None = None
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -126,7 +139,7 @@ _INIT_PRESENCE_CHANGE = ErrorDetail(
 )
 
 
-def _check_source(
+def check_file_source(
     files: SourceFingerprintSource, expected: SourceFingerprint,
 ) -> FileStepFailure | None:
     try:
@@ -141,9 +154,9 @@ def _check_source(
     return None
 
 
-def _plan(
+def plan_draft_files(
     original: PreparedSnapshot, candidate: PreparedSnapshot, files: DraftConfigFileSource,
-) -> tuple[_PlannedFileChange, ...] | ErrorDetail:
+) -> tuple[PlannedFileChange, ...] | ErrorDetail:
     changes = []
     for source, before in original.sources.items():
         after = candidate.sources[source]
@@ -169,14 +182,14 @@ def _plan(
                 return _INVALID_FILE_NAME
             if new is not None and len(new) > files.file_size_limit(target):
                 return _FILE_TOO_LARGE
-            changes.append(_PlannedFileChange(target, new, old is not None))
-    if any(not item.original_present for item in changes) and not files.supports_exclusive_rename():
+            changes.append(PlannedFileChange(target, old, new))
+    if any(item.before is None for item in changes) and not files.supports_exclusive_rename():
         return _EXCLUSIVE_RENAME_UNAVAILABLE
     return tuple(changes)
 
 
-def _bind_backup(
-    plan: tuple[_PlannedFileChange, ...], revision: str, backup: VerifiedDraftBackup,
+def bind_draft_files(
+    plan: tuple[PlannedFileChange, ...], revision: str, backup: VerifiedDraftBackup,
 ) -> tuple[DraftFileChange, ...] | ErrorDetail:
     if backup.draft_revision != revision:
         return _INVALID_BACKUP
@@ -186,45 +199,66 @@ def _bind_backup(
     changes = []
     for item in plan:
         key = item.target.source, item.target.part
-        if key not in metadata or (metadata[key] is not None) != item.original_present:
+        if key not in metadata or (metadata[key] is None) != (item.before is None):
             return _INVALID_BACKUP
         changes.append(DraftFileChange(item.target, item.content, metadata.pop(key)))
     return _INVALID_BACKUP if metadata else tuple(changes)
 
 
+def check_file_creations(
+    changes: tuple[DraftFileChange, ...], files: DraftConfigFileSource, *, include_restores: bool = False,
+) -> ErrorDetail | None:
+    targets = tuple(item.target for item in changes
+                    if item.original_metadata is None or (include_restores and item.content is None))
+    if targets and ((include_restores and not files.supports_exclusive_rename())
+                    or not files.supports_exclusive_rename_in(targets)):
+        return _EXCLUSIVE_RENAME_UNAVAILABLE
+    return None
+
+
+def fingerprint_after_file(expected: SourceFingerprint, change: DraftFileChange) -> SourceFingerprint:
+    """Изменить ожидаемый отпечаток ровно на один подтверждённый файловый шаг."""
+    part, content = change.target.part, change.content
+    digest = None if content is None else hashlib.sha256(content).hexdigest()
+    if part is None:
+        state = FingerprintState.ABSENT if digest is None else FingerprintState.PRESENT
+        return SourceFingerprint(expected.source, state, sha256=digest)
+    parts = dict(expected.parts or ())
+    if digest is None:
+        del parts[part]
+    else:
+        parts[part] = digest
+    return SourceFingerprint(expected.source, FingerprintState.PRESENT, parts=tuple(sorted(parts.items())))
+
+
 def _apply_draft_files(
     stored: StoredDraftSession, backup: VerifiedDraftBackup, files: DraftConfigFileSource,
-    plan: tuple[_PlannedFileChange, ...],
+    plan: tuple[PlannedFileChange, ...],
 ) -> DraftFileApplyResult | ErrorDetail:
-    changes = _bind_backup(plan, stored.revision, backup)
+    changes = bind_draft_files(plan, stored.revision, backup)
     if isinstance(changes, ErrorDetail):
         return changes
-    additions = tuple(item.target for item in plan if not item.original_present)
-    if additions and not files.supports_exclusive_rename_in(additions):
-        return _EXCLUSIVE_RENAME_UNAVAILABLE
+    error = check_file_creations(changes, files)
+    if error is not None:
+        return error
 
     # У каждой нетронутой части ожидается исходный SHA-256. Для подтверждённых
     # шагов учитываем только собственное изменение, не принимая чужой снимок.
-    xray_before = stored.session.baseline.fingerprint(BaselineSource.XRAY_CONFIGS)
-    xray_expected = dict(xray_before.parts or ())
+    xray_expected = stored.session.baseline.fingerprint(BaselineSource.XRAY_CONFIGS)
     completed = []
     for change in changes:
         target = change.target
         expected = stored.session.baseline.fingerprint(target.source)
         if target.part is not None:
-            expected = SourceFingerprint(target.source, FingerprintState.PRESENT,
-                                         parts=tuple(sorted(xray_expected.items())))
-        step = files.write_draft_file(change, lambda: _check_source(files, expected))
+            expected = xray_expected
+        step = files.write_draft_file(change, lambda: check_file_source(files, expected))
         if step.code is None:
             completed.append(target)
         if step.code is not None or step.cleanup_failed:
             failure = DraftFileFailure(target, step.code, step.cleanup_failed)
             return DraftFileApplyResult(backup, tuple(completed), failure)
         if target.part is not None:
-            if change.content is None:
-                del xray_expected[target.part]
-            else:
-                xray_expected[target.part] = hashlib.sha256(change.content).hexdigest()
+            xray_expected = fingerprint_after_file(expected, change)
     return DraftFileApplyResult(backup, tuple(completed))
 
 
@@ -237,11 +271,11 @@ def run_draft_file_apply(
     Проверка кандидата и подтверждение команды принадлежат вызывающему.
     Если менялись только native-ресурсы, файловый результат пуст.
     """
-    plan: tuple[_PlannedFileChange, ...] | None = None
+    plan: tuple[PlannedFileChange, ...] | None = None
 
     def check_prepared(original: PreparedSnapshot, candidate: PreparedSnapshot) -> ErrorDetail | None:
         nonlocal plan
-        prepared = _plan(original, candidate, files)
+        prepared = plan_draft_files(original, candidate, files)
         if isinstance(prepared, ErrorDetail):
             return prepared
         plan = prepared

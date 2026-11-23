@@ -18,7 +18,9 @@ from keenvpn.adapters.entware_files import (
 from keenvpn.adapters.file_writes import rename_new_file, write_all
 from keenvpn.adapters.router_sources import XRAY_PART_LIMIT, SourceFingerprints
 from keenvpn.application.draft_backup import FileMetadata
-from keenvpn.application.draft_file_apply import DraftFileChange, DraftFileTarget, FileStepFailure, FileStepResult
+from keenvpn.application.draft_file_apply import (
+    DraftFileChange, DraftFileTarget, FilePublication, FileStepFailure, FileStepResult,
+)
 from keenvpn.application.ports import RouterReadError, RouterReadFailure
 from keenvpn.domain.source_baseline import BaselineSource, valid_part_name
 
@@ -269,28 +271,71 @@ class DraftConfigFiles(SourceFingerprints):
             return False
         return True
 
+    def supports_file_restore_metadata(self, target: DraftFileTarget, metadata: FileMetadata) -> bool:
+        """Проверить возврат исходного владельца и прав на временном файле."""
+        path, _, _ = self._location(target)
+        cleanup = _StageCleanup()
+        try:
+            with walk_directory(path, _unavailable) as parent:
+                with _stage(parent, b"", metadata, cleanup):
+                    confirm_directory_path(path, parent)
+        except (OSError, RouterReadError):
+            return False
+        return not cleanup.failed
+
     def write_draft_file(
         self, change: DraftFileChange, check_current: Callable[[], FileStepFailure | None],
     ) -> FileStepResult:
         cleanup = _StageCleanup()
-        code = self._publish_file(change, check_current, cleanup)
-        return FileStepResult(code, cleanup.failed)
+        result = self._publish_file(change, check_current, cleanup)
+        if isinstance(result, FilePublication):
+            return FileStepResult(None, cleanup.failed, result)
+        return FileStepResult(result, cleanup.failed)
+
+    def check_draft_file_publication(
+        self, target: DraftFileTarget, expected: FilePublication,
+    ) -> FileStepFailure | None:
+        """Сверить версию опубликованного файла или подтверждённое удаление."""
+        path, name, _ = self._location(target)
+        try:
+            with walk_directory(path, _unavailable) as parent:
+                info = os.fstat(parent)
+                if (info.st_dev, info.st_ino) != expected.parent_identity:
+                    return FileStepFailure.CONFLICT
+                current = _entry(parent, name)
+                if (_version(current) != expected.version
+                        or not _matches_original(parent, name, current, expected.metadata)):
+                    return FileStepFailure.CONFLICT
+                confirm_directory_path(path, parent)
+                if _version(_entry(parent, name)) != expected.version:
+                    return FileStepFailure.CONFLICT
+        except RouterReadError as error:
+            if error.failure is RouterReadFailure.CHANGED:
+                return FileStepFailure.CONFLICT
+            return FileStepFailure.READ_FAILED
+        except OSError:
+            return FileStepFailure.READ_FAILED
+        return None
 
     def _publish_file(
         self, change: DraftFileChange, check_current: Callable[[], FileStepFailure | None], cleanup: _StageCleanup,
-    ) -> FileStepFailure | None:
+    ) -> FileStepFailure | FilePublication:
         path, name, limit = self._location(change.target)
         publication_attempted = False
         try:
             with walk_directory(path, _unavailable) as parent:
                 try:
+                    info = os.fstat(parent)
+                    parent_identity = info.st_dev, info.st_ino
                     original = _entry(parent, name)
                     matches = _matches_original(parent, name, original, change.original_metadata)
                 except OSError:
                     return FileStepFailure.READ_FAILED
-                if not matches:
+                if (not matches or (change.expected_parent is not None and parent_identity != change.expected_parent)
+                        or (change.expected_version is not None and _version(original) != change.expected_version)):
                     return FileStepFailure.CONFLICT
-                with _stage(parent, change.content, change.original_metadata, cleanup) as (staging, staged):
+                metadata = change.restore_metadata or change.original_metadata
+                with _stage(parent, change.content, metadata, cleanup) as (staging, staged):
                     failure = check_current()
                     if failure is not None:
                         return failure
@@ -318,8 +363,7 @@ class DraftConfigFiles(SourceFingerprints):
                     if staging is not None:
                         os.fsync(staging)
                     os.fsync(parent)
-                    if not self._confirmed(path, parent, name, limit, change, staged):
-                        return FileStepFailure.UNCONFIRMED
+                    observed = self._confirmed(path, parent, name, limit, change, staged)
         except RouterReadError as error:
             if publication_attempted:
                 return FileStepFailure.UNCONFIRMED
@@ -328,21 +372,24 @@ class DraftConfigFiles(SourceFingerprints):
             return FileStepFailure.READ_FAILED
         except OSError:
             return FileStepFailure.UNCONFIRMED if publication_attempted else FileStepFailure.WRITE_FAILED
-        return None
+        metadata = None if observed is None else _metadata(observed)
+        return FilePublication(parent_identity, metadata, _version(observed))
 
     @staticmethod
     def _confirmed(
         path: str, parent: int, name: str, limit: int, change: DraftFileChange,
         descriptor_info: os.stat_result | None,
-    ) -> bool:
+    ) -> os.stat_result | None:
         before = _entry(parent, name)
         if change.content is not None:
             _, digest = digest_file(posixpath.join(path, name), limit)
             if digest != hashlib.sha256(change.content).hexdigest():
-                return False
+                raise OSError(errno.EIO, "Не удалось подтвердить байты файла после публикации.")
         confirm_directory_path(path, parent)
         final = _entry(parent, name)
-        if descriptor_info is None:
-            return final is None
-        return (final is not None and _version(final) == _version(before) and os.path.samestat(final, descriptor_info)
-                and _metadata(final) == _metadata(descriptor_info))
+        if descriptor_info is None and final is None:
+            return None
+        if (descriptor_info is not None and final is not None and _version(final) == _version(before)
+                and os.path.samestat(final, descriptor_info) and _metadata(final) == _metadata(descriptor_info)):
+            return final
+        raise OSError(errno.EIO, "Не удалось подтвердить итоговый файл после публикации.")

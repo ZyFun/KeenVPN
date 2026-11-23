@@ -72,6 +72,7 @@ EXPECTED_CODE_STEPS = {
     (ErrorCategory.UNSUPPORTED, "draft_exists"): NextStepCode.OPEN_VIEW,
     (ErrorCategory.UNSUPPORTED, "draft_mismatch"): NextStepCode.OPEN_VIEW,
     (ErrorCategory.SOURCE_FAILED, "draft_baseline_changed"): NextStepCode.RECREATE_DRAFT,
+    (ErrorCategory.SOURCE_FAILED, "draft_process_changed"): NextStepCode.OPEN_VIEW,
 }
 EXPECTED_STORE_STEPS = {
     MetadataStoreFailure.UNAVAILABLE: NextStepCode.CHECK_SOURCE,
@@ -154,6 +155,7 @@ LITERAL_PAIRS = sorted({
     ("unsupported", "draft_candidate_missing"),
     ("invalid_source_data", "draft_check_input_unavailable"),
     ("invalid_source_data", "draft_backup_invalid_candidate"),
+    ("invalid_source_data", "draft_backup_invalid_process"),
     ("unsupported", "draft_backup_no_changes"),
     ("source_failed", "draft_backup_source_unavailable"),
     ("source_failed", "draft_backup_source_changed"),
@@ -165,6 +167,12 @@ LITERAL_PAIRS = sorted({
     ("invalid_source_data", "draft_files_too_large"),
     ("unsupported", "draft_files_init_presence_change"),
     ("unsupported", "draft_files_xray_directory_change"),
+    ("unsupported", "draft_native_apply_unavailable"),
+    ("unsupported", "draft_process_apply_unavailable"),
+    ("unsupported", "draft_process_autostart_in_init"),
+    ("source_failed", "draft_process_changed"),
+    ("source_failed", "draft_file_restore_unavailable"),
+    ("source_failed", "draft_journal_preflight_failed"),
     ("source_failed", "draft_assets_unavailable"),
     ("source_failed", "draft_catalogs_unavailable"),
     ("invalid_source_data", "invalid_draft_store_result"),

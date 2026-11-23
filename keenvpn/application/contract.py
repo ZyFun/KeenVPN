@@ -190,6 +190,7 @@ CODE_NEXT_STEPS: Mapping[tuple[ErrorCategory, str], NextStepCode | None] = Mappi
     (ErrorCategory.UNSUPPORTED, "draft_mismatch"): NextStepCode.OPEN_VIEW,
     # Устаревший черновик: повтор не поможет, применять его поверх нового состояния нельзя.
     (ErrorCategory.SOURCE_FAILED, "draft_baseline_changed"): NextStepCode.RECREATE_DRAFT,
+    (ErrorCategory.SOURCE_FAILED, "draft_process_changed"): NextStepCode.OPEN_VIEW,
 })
 """Переопределения по паре «категория, код»; остальные коды получают шаг категории. Таблица только для чтения."""
 

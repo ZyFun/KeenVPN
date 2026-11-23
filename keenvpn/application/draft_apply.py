@@ -2,16 +2,26 @@
 
 from collections.abc import Callable
 from contextlib import ExitStack
+from dataclasses import dataclass
 
 from keenvpn.application.contract import ConflictState, ErrorDetail, invalid_command
 from keenvpn.application.draft_backup import (
-    DraftBackupSource, DraftBackupStorage, PreparedSnapshotCheck, VerifiedDraftBackup, prepare_draft_backup,
+    DraftBackupSource, DraftBackupStorage, DraftProcessBackup, PreparedSnapshotCheck, VerifiedDraftBackup,
+    prepare_draft_backup,
 )
 from keenvpn.application.draft_session import (
     DRAFT_CHANGED, DRAFT_GONE, check_draft_current, read_stored_draft, store_error_detail, valid_expected_draft,
 )
 from keenvpn.application.ports import DraftApplyLock, DraftSessionReader, SourceFingerprintSource
 from keenvpn.domain.draft_session import StoredDraftSession
+
+
+@dataclass(frozen=True, slots=True)
+class DraftApplyRecheck:
+    """Сверки под уже захваченной блокировкой до первой активной записи."""
+
+    sources: Callable[[], ErrorDetail | None]
+    revision: Callable[[], ErrorDetail | None]
 
 
 def run_draft_apply[T](
@@ -53,6 +63,33 @@ def run_draft_apply_with_backup[T, R](
     on_lock_release_error получает готовый результат, если не удалось выйти
     из контекста блокировки. Исключения самого исполнителя передаются вызывающему.
     """
+    return run_draft_apply_with_backup_recheck(
+        lock, fingerprints, draft_id, expected_revision, source, storage,
+        lambda stored, backup, _recheck: apply(stored, backup),
+        check_prepared=check_prepared, on_lock_release_error=on_lock_release_error,
+    )
+
+
+def run_draft_apply_with_backup_recheck[T, R](
+    lock: DraftApplyLock,
+    fingerprints: SourceFingerprintSource,
+    draft_id: object,
+    expected_revision: object,
+    source: DraftBackupSource,
+    storage: DraftBackupStorage,
+    apply: Callable[[StoredDraftSession, VerifiedDraftBackup, DraftApplyRecheck], T],
+    *,
+    check_prepared: PreparedSnapshotCheck | None = None,
+    process_before: DraftProcessBackup | None = None,
+    on_lock_release_error: Callable[[T | ErrorDetail], R] | None = None,
+) -> T | ErrorDetail | R:
+    """Передать исполнителю копию и возможность повторной сверки под той же блокировкой.
+
+    Сверки используют захваченный DraftSessionReader. Перед началом записи
+    можно сверить исходные отпечатки и полную ревизию, а у точки первой
+    записи перечитать только ревизию. Обе сверки доступны до выхода из
+    исполнителя.
+    """
     def with_backup(reader: DraftSessionReader, stored: StoredDraftSession) -> T | ErrorDetail:
         def recheck_sources() -> ErrorDetail | None:
             current = check_draft_current(reader, fingerprints, draft_id, expected_revision)
@@ -70,10 +107,11 @@ def run_draft_apply_with_backup[T, R](
 
         backup = prepare_draft_backup(
             stored, source, storage, recheck_sources, recheck_revision, check_prepared=check_prepared,
+            process_before=process_before,
         )
         if isinstance(backup, ErrorDetail):
             return backup
-        return apply(stored, backup)
+        return apply(stored, backup, DraftApplyRecheck(recheck_sources, recheck_revision))
 
     return _with_current_draft(
         lock, fingerprints, draft_id, expected_revision, with_backup, on_lock_release_error=on_lock_release_error,

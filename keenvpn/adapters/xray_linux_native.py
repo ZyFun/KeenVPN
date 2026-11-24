@@ -19,6 +19,7 @@ NT_PRSTATUS = 1
 NT_ARM_SYSTEM_CALL = 0x404
 TRACE_OPTIONS = 0x100019  # TRACESYSGOOD | TRACECLONE | TRACEEXEC | EXITKILL.
 UINT64_MAX = (1 << 64) - 1
+XRAY_CANCEL_SIGNALS = frozenset((signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT))
 # CAP_SYS_RESOURCE (24) нужен также для чтения prlimit процесса другого UID.
 REQUIRED_CAPABILITIES = sum(1 << bit for bit in (1, 5, 6, 7, 18, 19, 21, 24))
 
@@ -135,7 +136,7 @@ class LinuxAarch64:
         # На критических участках fork/передачи fd блокируются именно эти сигналы.
         # Другой Python-обработчик мог бы бросить исключение до учёта нового PID/fd.
         for number in signal.valid_signals():
-            if number not in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP) and callable(signal.getsignal(number)):
+            if number not in XRAY_CANCEL_SIGNALS and callable(signal.getsignal(number)):
                 raise IsolationUnavailable
         action = _KernelSigaction()
         self._call(134, 17, 0, ctypes.addressof(action), 8)

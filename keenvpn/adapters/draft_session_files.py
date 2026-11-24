@@ -12,21 +12,60 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+import os
+import stat
 
+from keenvpn.adapters.file_writes import exclusive_rename_available, read_linux_inode_flags, rename_new_file
 from keenvpn.adapters.private_files import PrivateFileStore, StoreFailure
-from keenvpn.application.ports import DraftSessionReader, DraftSessionStoreError, DraftStoreFailure
+from keenvpn.application.ports import DraftSessionStoreError, DraftStoreFailure, LockedDraftSession, StoreReason
 from keenvpn.domain.draft_session import (
     MAX_DRAFT_SIZE, DraftSession, DraftSessionError, DraftSessionErrorCode, StoredDraftSession, decode_draft_session,
-    draft_revision, encode_draft_session,
+    draft_revision, encode_draft_session, valid_draft_id,
 )
 from keenvpn.domain.manager_metadata import valid_metadata_revision
 
 
 DRAFT_FILE_NAME = "draft-session.json"
 """Имя файла сессии черновика в собственном каталоге."""
+_CLOSED_DRAFT_PREFIX = "draft-close-"
+_SYSTEM = os.uname()
+_LINUX_ARCH = _SYSTEM.machine if _SYSTEM.sysname == "Linux" else None
+_LINUX_RENAME_BLOCKING_FLAGS = 0x10 | 0x20  # FS_IMMUTABLE_FL и FS_APPEND_FL
+_BSD_RENAME_BLOCKING_FLAGS = (
+    stat.UF_IMMUTABLE | stat.SF_IMMUTABLE | stat.UF_APPEND | stat.SF_APPEND | stat.UF_NOUNLINK | stat.SF_NOUNLINK
+)
 
 
-class DraftSessionFiles(PrivateFileStore[StoredDraftSession]):
+def _rename_blocked_by_flags(descriptor: int) -> bool:
+    flags = getattr(os.fstat(descriptor), "st_flags", 0)
+    return bool(flags & _BSD_RENAME_BLOCKING_FLAGS
+                or read_linux_inode_flags(descriptor, _LINUX_ARCH) & _LINUX_RENAME_BLOCKING_FLAGS)
+
+
+class _DraftFile(PrivateFileStore[StoredDraftSession]):
+    max_size = MAX_DRAFT_SIZE
+    error_type = DraftSessionStoreError
+    failures = {failure: DraftStoreFailure[failure.name] for failure in StoreFailure}
+    revision_of = staticmethod(draft_revision)
+
+    def _decode(self, content: bytes) -> StoredDraftSession:
+        code = None
+        try:
+            return decode_draft_session(content)
+        except DraftSessionError as error:
+            code = error.code
+        self._raise(StoreFailure.INVALID, code.value)
+
+
+class _ClosedDraftFile(_DraftFile):
+    """Приватный файл сессии, снятой с активного места при применении."""
+
+    def __init__(self, directory: str, protected: tuple[str, ...], operation_id: str) -> None:
+        self.file_name = f"{_CLOSED_DRAFT_PREFIX}{operation_id}.json"
+        super().__init__(directory, protected_directories=protected)
+
+
+class DraftSessionFiles(_DraftFile):
     """Реализация `DraftSessionStore` на файловой системе.
 
     `directory` — абсолютный нормализованный путь собственного каталога
@@ -36,23 +75,81 @@ class DraftSessionFiles(PrivateFileStore[StoredDraftSession]):
     """
 
     file_name = DRAFT_FILE_NAME
-    max_size = MAX_DRAFT_SIZE
-    error_type = DraftSessionStoreError
-    failures = {failure: DraftStoreFailure[failure.name] for failure in StoreFailure}
-    revision_of = staticmethod(draft_revision)
 
     @contextmanager
-    def lock_for_apply(self) -> Iterator[DraftSessionReader | None]:
+    def lock_for_apply(self) -> Iterator[LockedDraftSession | None]:
         """Взять блокировку существующего каталога без создания файлов и каталогов."""
         with self._locked_directory() as directory:
             if directory is None:
                 yield None
                 return
-            reader = _LockedDraftReader(self, directory)
+            session = _LockedDraftSession(self, directory)
             try:
-                yield reader
+                yield session
             finally:
-                reader.close()
+                session.close()
+
+    def _close_applied_draft(self, directory: int, expected_revision: str, operation_id: str) -> None:
+        """Закрепить перенос и перечитать ревизию по новому имени, сохраняя файл."""
+        if not valid_metadata_revision(expected_revision):
+            raise DraftSessionError(DraftSessionErrorCode.REVISION)
+        if not valid_draft_id(operation_id):
+            self._raise(StoreFailure.CONFLICT)
+        closed = _ClosedDraftFile(self._directory, self._protected, operation_id)
+        self._check_identity(directory)
+        descriptor = self._open_current(directory)
+        try:
+            self._check_revision(directory, expected_revision)
+            self._check_file_identity(directory, descriptor)
+            try:
+                rename_new_file(self.file_name, closed.file_name, src_dir_fd=directory, dst_dir_fd=directory)
+            except FileExistsError:
+                self._raise(StoreFailure.CONFLICT)
+            try:
+                moved = closed._open_current(directory)
+                try:
+                    closed._check_file_identity(directory, moved)
+                    os.fsync(moved)
+                finally:
+                    os.close(moved)
+            finally:
+                self._sync_absent(directory)
+            closed._check_file_identity(directory, descriptor)
+            closed._check_revision(directory, expected_revision)
+            closed._check_file_identity(directory, descriptor)
+            self._check_identity(directory)
+            self._check_absent(directory)
+        except OSError:
+            self._raise(StoreFailure.WRITE_UNCONFIRMED, StoreReason.IO_ERROR)
+        finally:
+            os.close(descriptor)
+
+    def _check_close_applied_draft(self, directory: int, expected_revision: str, operation_id: str | None) -> None:
+        """Отклонить известные препятствия переносу без побочных записей."""
+        self._check_identity(directory)
+        try:
+            if (not os.access(".", os.W_OK | os.X_OK, dir_fd=directory, effective_ids=True)
+                    or _rename_blocked_by_flags(directory)):
+                self._raise(StoreFailure.WRITE_FAILED, StoreReason.PERMISSION_DENIED)
+            descriptor = self._open_current(directory)
+            try:
+                self._check_revision(directory, expected_revision)
+                self._check_file_identity(directory, descriptor)
+                if _rename_blocked_by_flags(descriptor):
+                    self._raise(StoreFailure.WRITE_FAILED, StoreReason.PERMISSION_DENIED)
+            finally:
+                os.close(descriptor)
+            if operation_id is None:
+                if not exclusive_rename_available(rename_new_file):
+                    self._raise(StoreFailure.WRITE_FAILED, StoreReason.IO_ERROR)
+            else:
+                if not valid_draft_id(operation_id):
+                    self._raise(StoreFailure.CONFLICT)
+                closed = _ClosedDraftFile(self._directory, self._protected, operation_id)
+                closed._check_absent(directory)
+            self._check_identity(directory)
+        except (NotImplementedError, OSError):
+            self._raise(StoreFailure.UNAVAILABLE, StoreReason.IO_ERROR)
 
     def read_draft(self) -> StoredDraftSession | None:
         """Прочитать файл без блокировки: создание публикует его одним переименованием.
@@ -104,17 +201,9 @@ class DraftSessionFiles(PrivateFileStore[StoredDraftSession]):
         """
         self._confirm_absent()
 
-    def _decode(self, content: bytes) -> StoredDraftSession:
-        code = None
-        try:
-            return decode_draft_session(content)
-        except DraftSessionError as error:
-            code = error.code
-        self._raise(StoreFailure.INVALID, code.value)
 
-
-class _LockedDraftReader:
-    """Читать сессию из того же каталога, дескриптор которого держит блокировку."""
+class _LockedDraftSession:
+    """Работать с сессией по дескриптору заблокированного каталога."""
 
     def __init__(self, store: DraftSessionFiles, directory: int) -> None:
         self._store = store
@@ -129,6 +218,18 @@ class _LockedDraftReader:
         self._store._check_identity(directory)
         return stored
 
+    def close_applied_draft(self, expected_revision: str, operation_id: str) -> None:
+        directory = self._directory
+        if directory is None:
+            raise DraftSessionStoreError(DraftStoreFailure.UNAVAILABLE)
+        self._store._close_applied_draft(directory, expected_revision, operation_id)
+
+    def check_close_applied_draft(self, expected_revision: str, operation_id: str | None = None) -> None:
+        directory = self._directory
+        if directory is None:
+            raise DraftSessionStoreError(DraftStoreFailure.UNAVAILABLE)
+        self._store._check_close_applied_draft(directory, expected_revision, operation_id)
+
     def close(self) -> None:
-        """Отключить чтение перед закрытием дескриптора владельцем блокировки."""
+        """Отключить операции перед закрытием дескриптора владельцем блокировки."""
         self._directory = None

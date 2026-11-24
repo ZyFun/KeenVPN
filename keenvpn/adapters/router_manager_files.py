@@ -8,18 +8,26 @@
 
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+import os
 
+from keenvpn.adapters.draft_backup_files import DraftBackupFiles
+from keenvpn.adapters.draft_config_files import DraftConfigFiles
+from keenvpn.adapters.draft_journal_files import DraftJournalFiles
 from keenvpn.adapters.draft_session_files import DraftSessionFiles
+from keenvpn.adapters.entware_files import walk_directory
 from keenvpn.adapters.manager_metadata_files import ManagerMetadataFiles
 from keenvpn.adapters.private_files import PROTECTED_DIRECTORIES, StoreFailure
+from keenvpn.adapters.xray_configs import XRAY_CONFIG_DIRECTORY
 from keenvpn.application.contract import ErrorCategory, ErrorDetail
 from keenvpn.application.manager_metadata import read_storage_placement
-from keenvpn.application.ports import DraftSessionReader, StoragePlacementSource, StoreReason
+from keenvpn.application.ports import LockedDraftSession, StoragePlacementSource, StoreReason
 from keenvpn.domain.manager_metadata import RoleLocation, ValueState, valid_storage_path
 
 
 DRAFT_DIRECTORY = "keenvpn-drafts"
 METADATA_DIRECTORY = "keenvpn-metadata"
+APPLY_BACKUP_DIRECTORY = "keenvpn-apply-backups"
+APPLY_JOURNAL_DIRECTORY = "keenvpn-apply-journal"
 """Имена собственных каталогов внутри подтверждённого пути роли DATA."""
 
 
@@ -86,9 +94,25 @@ class _PlacedReadOnly:
 class RouterDraftSessionFiles(_PlacedReadOnly, DraftSessionFiles):
     """Чтение сессии с проверкой DATA; изменяющие методы порта дают read_only."""
 
-    def lock_for_apply(self) -> AbstractContextManager[DraftSessionReader | None]:
+    def lock_for_apply(self) -> AbstractContextManager[LockedDraftSession | None]:
         """Отклонить попытку начать применение через хранилище только для чтения."""
         self._raise(StoreFailure.UNAVAILABLE, StoreReason.READ_ONLY)
+
+
+class RouterDraftApplyFiles(RouterDraftSessionFiles):
+    """Разрешить блокировку и завершение применённой ревизии внутри неё."""
+
+    def lock_for_apply(self) -> AbstractContextManager[LockedDraftSession | None]:
+        reason = self._guard.check()
+        if reason is not None:
+            self._raise(StoreFailure.UNAVAILABLE, reason)
+        return DraftSessionFiles.lock_for_apply(self)
+
+    def _close_applied_draft(self, directory: int, expected_revision: str, operation_id: str) -> None:
+        reason = self._guard.check()
+        if reason is not None:
+            self._raise(StoreFailure.UNAVAILABLE, reason)
+        super()._close_applied_draft(directory, expected_revision, operation_id)
 
 
 class RouterManagerMetadataFiles(_PlacedReadOnly, ManagerMetadataFiles):
@@ -130,3 +154,65 @@ def connect_router_manager_files(source: StoragePlacementSource, *, root: str = 
         RouterDraftSessionFiles(prefix + paths[0], guard, protected),
         RouterManagerMetadataFiles(prefix + paths[1], guard, protected),
     )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class RouterDraftApplyPorts:
+    drafts: RouterDraftApplyFiles
+    files: DraftConfigFiles
+    backup: DraftBackupFiles
+    journal: DraftJournalFiles
+    guard: _PlacementGuard
+    data: str
+    identity: tuple[int, int]
+
+    def readiness(self) -> ErrorDetail | None:
+        """Проверить прежнее размещение и права без создания файлов."""
+        if self.guard.check() is not None:
+            return _unavailable("data_placement_unverified", "Размещение DATA изменилось или недоступно.")
+        try:
+            if _writable_directory(self.data) != self.identity:
+                return _unavailable("data_placement_unverified", "Каталог DATA заменён.")
+            _writable_directory(XRAY_CONFIG_DIRECTORY)
+        except OSError:
+            return _unavailable("draft_apply_permissions", "Не подтверждены права записи в DATA или каталог Xray.")
+        if not self.backup.directory_writable():
+            return _unavailable("draft_apply_permissions", "Не подтверждён доступ к приватному каталогу копий применения.")
+        if not self.journal.directory_writable():
+            return _unavailable("draft_apply_permissions", "Не подтверждён доступ к приватному каталогу журнала применения.")
+        return None
+
+
+def _writable_directory(path: str) -> tuple[int, int]:
+    def unavailable(_failure):
+        raise OSError("Каталог не подтверждён.")
+
+    with walk_directory(path, unavailable) as directory:
+        if not os.access(".", os.W_OK | os.X_OK, dir_fd=directory):
+            raise OSError("Нет прав записи в каталог.")
+        info = os.fstat(directory)
+        return info.st_dev, info.st_ino
+
+
+def connect_router_draft_apply(source: StoragePlacementSource) -> RouterDraftApplyPorts | ErrorDetail:
+    """Собрать явно разрешённую запись на подтверждённой DATA."""
+    role = _data_role(source)
+    if isinstance(role, ErrorDetail):
+        return role
+    data = role.path.value
+    paths = tuple(f"{data}/{name}" for name in (DRAFT_DIRECTORY, APPLY_BACKUP_DIRECTORY, APPLY_JOURNAL_DIRECTORY))
+    if any(not valid_storage_path(path) or any(
+        path == protected or path.startswith(protected + "/") for protected in PROTECTED_DIRECTORIES
+    ) for path in paths):
+        return _unavailable("data_directory_unsafe", "Каталоги применения не прошли проверку размещения.")
+    try:
+        identity = _writable_directory(data)
+    except OSError:
+        return _unavailable("draft_apply_permissions", "Не подтверждены права записи в DATA.")
+    guard = _PlacementGuard(source, role)
+    ports = RouterDraftApplyPorts(
+        RouterDraftApplyFiles(paths[0], guard, PROTECTED_DIRECTORIES), DraftConfigFiles(),
+        DraftBackupFiles(paths[1], parent_identity=identity), DraftJournalFiles(paths[2], parent_identity=identity),
+        guard, data, identity,
+    )
+    return ports.readiness() or ports

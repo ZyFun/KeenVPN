@@ -63,7 +63,7 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(err, "")
 
     def test_arguments_are_rejected_without_opening_the_menu(self):
-        expected = {"vpn-menu": "vpn-menu принимает только флаг --read-router.\n", "vpn-setup": "vpn-setup не принимает аргументов.\n"}
+        expected = {"vpn-menu": "vpn-menu принимает один из флагов --read-router или --apply-draft.\n", "vpn-setup": "vpn-setup не принимает аргументов.\n"}
         for entry, command in ((vpn_menu, "vpn-menu"), (vpn_setup, "vpn-setup")):
             for argv in (
                 ["--help"], ["0"], ["a", "b"], ("x",), ["--read-router", "--read-router"], ["--read-router=1"],
@@ -145,7 +145,7 @@ class ScriptTests(unittest.TestCase):
         completed = self.run_script("vpn_menu.py", argv=["--version"], text="0\n")
         self.assertEqual(completed.returncode, EXIT_USAGE)
         self.assertEqual(completed.stdout, "")
-        self.assertEqual(completed.stderr, "vpn-menu принимает только флаг --read-router.\n")
+        self.assertEqual(completed.stderr, "vpn-menu принимает один из флагов --read-router или --apply-draft.\n")
 
 
 if __name__ == "__main__":

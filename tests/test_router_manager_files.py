@@ -12,12 +12,15 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from keenvpn.adapters import router_manager_files
 from keenvpn.adapters.draft_session_files import DRAFT_FILE_NAME, DraftSessionFiles
 from keenvpn.adapters.manager_metadata_files import METADATA_FILE_NAME, ManagerMetadataFiles
 from keenvpn.adapters.private_files import PROTECTED_DIRECTORIES
 from keenvpn.adapters.router_manager_files import (
-    DRAFT_DIRECTORY, METADATA_DIRECTORY, connect_router_manager_files,
+    APPLY_BACKUP_DIRECTORY, APPLY_JOURNAL_DIRECTORY, DRAFT_DIRECTORY, METADATA_DIRECTORY,
+    connect_router_draft_apply, connect_router_manager_files,
 )
+from keenvpn.application.contract import ErrorDetail
 from keenvpn.application.ports import DraftSessionStoreError, ManagerMetadataStoreError
 from keenvpn.domain.manager_metadata import (
     ManagerMetadata, RoleLocation, TrackedValue, UnknownFields, ValueState, decode_manager_metadata,
@@ -64,6 +67,109 @@ class RouterManagerFilesTests(unittest.TestCase):
 
     def connect(self, source=None):
         return connect_router_manager_files(self.source if source is None else source, root=str(self.root))
+
+    @contextmanager
+    def apply_environment(self):
+        role = router_manager_files._data_role(self.source)
+        data = self.data.resolve()
+        with patch.object(router_manager_files, "_data_role",
+                          return_value=replace(role, path=replace(role.path, value=str(data)))), \
+                patch.object(router_manager_files, "XRAY_CONFIG_DIRECTORY", str(self.root.resolve())):
+            yield
+
+    def test_apply_detects_unsafe_backup_and_journal_directories_during_connection(self):
+        with self.apply_environment():
+            for name in (APPLY_BACKUP_DIRECTORY, APPLY_JOURNAL_DIRECTORY):
+                directory = self.data / name
+                for kind in ("permissions", "symlink", "file"):
+                    with self.subTest(store=name, kind=kind):
+                        if kind == "permissions":
+                            directory.mkdir()
+                            directory.chmod(0o755)
+                        elif kind == "symlink":
+                            directory.symlink_to(self.data, target_is_directory=True)
+                        else:
+                            directory.write_bytes(b"fixture")
+                        before = self.snapshot()
+                        with read_only():
+                            result = connect_router_draft_apply(self.source)
+                        after = self.snapshot()
+                        if kind == "permissions":
+                            directory.rmdir()
+                        else:
+                            directory.unlink()
+                        self.assertIsInstance(result, ErrorDetail)
+                        self.assertEqual(result.code, "draft_apply_permissions")
+                        self.assertEqual(after, before)
+
+    def test_apply_accepts_missing_and_private_directories_without_creating_anything(self):
+        directories = tuple(self.data / name for name in (APPLY_BACKUP_DIRECTORY, APPLY_JOURNAL_DIRECTORY))
+        with self.apply_environment():
+            for exists in (False, True):
+                with self.subTest(exists=exists):
+                    if exists:
+                        for directory in directories:
+                            directory.mkdir(mode=0o700)
+                    before = self.snapshot()
+                    with read_only():
+                        ports = connect_router_draft_apply(self.source)
+                        self.assertNotIsInstance(ports, ErrorDetail)
+                        self.assertIsNone(ports.readiness())
+                    self.assertEqual(self.snapshot(), before)
+
+    def test_apply_rejects_operation_directory_owned_by_another_user(self):
+        with self.apply_environment():
+            for name in (APPLY_BACKUP_DIRECTORY, APPLY_JOURNAL_DIRECTORY):
+                with self.subTest(store=name):
+                    directory = self.data / name
+                    directory.mkdir(mode=0o700)
+                    with patch.object(os, "geteuid", return_value=os.geteuid() + 1), read_only():
+                        result = connect_router_draft_apply(self.source)
+                    directory.rmdir()
+                    self.assertIsInstance(result, ErrorDetail)
+                    self.assertEqual(result.code, "draft_apply_permissions")
+
+    def test_apply_rechecks_existing_directory_write_permission(self):
+        journal = self.data / APPLY_JOURNAL_DIRECTORY
+        with self.apply_environment():
+            ports = connect_router_draft_apply(self.source)
+            self.assertNotIsInstance(ports, ErrorDetail)
+            journal.mkdir(mode=0o700)
+            identity = journal.stat()
+            access = os.access
+
+            def denied(path, mode, *, dir_fd, **kwargs):
+                if os.path.samestat(os.fstat(dir_fd), identity):
+                    return False
+                return access(path, mode, dir_fd=dir_fd, **kwargs)
+
+            with patch.object(os, "access", side_effect=denied), read_only():
+                error = ports.readiness()
+            self.assertIsNotNone(error)
+            self.assertEqual(error.code, "draft_apply_permissions")
+
+    def test_unsafe_apply_storage_leaves_menu_action_unavailable_before_xray(self):
+        self.populate()
+        (self.data / APPLY_BACKUP_DIRECTORY).mkdir(mode=0o755)
+        stores = self.connect()
+        with self.apply_environment(), read_only(), \
+                patch.object(composition, "StoragePlacementFiles", return_value=self.source), \
+                patch.object(composition, "connect_router_manager_files", return_value=stores), \
+                patch("keenvpn.adapters.xray_isolated_port.IsolatedInstalledXray") as xray:
+            xray.return_value.coordinator_available.return_value = True
+            sources = composition.router_sources(apply_draft=True)
+            self.assertIsNone(sources.draft_apply)
+            menu_sources = composition.MenuSources(
+                drafts=sources.drafts, draft_apply_unavailable=sources.draft_apply_unavailable,
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with patch.object(entrypoints, "router_sources", return_value=menu_sources):
+                code = entrypoints.vpn_menu(["--apply-draft"], io.StringIO("7\n3\n"), stdout, stderr)
+            xray.return_value.test.assert_not_called()
+        self.assertEqual((code, stderr.getvalue()), (0, ""))
+        self.assertIn("каталог копий или журнал применения", stdout.getvalue())
+        self.assertNotIn("Применить показанные изменения?", stdout.getvalue())
+        self.assert_private(stdout.getvalue())
 
     def populate(self):
         DraftSessionFiles(str(self.drafts)).create_draft(draft_fixture.session(note="TEST_ONLY_SECRET"))

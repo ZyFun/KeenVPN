@@ -17,6 +17,7 @@ from keenvpn.application.quick_check import QuickCheck
 from keenvpn.application.routing import ExplainRoute
 from keenvpn.application.routing_rules import ListRoutingRules
 from keenvpn.application.saved_draft import CompareSavedDraft, CheckSavedDraft
+from keenvpn.application.saved_draft_apply import ApplySavedDraftHandler
 from keenvpn.interfaces.cli.menu import (
     BACK_NUMBER, MAX_ITEM_NUMBER, MAX_TITLE_LENGTH, REASON_MESSAGES, Menu, MenuAction, MenuError, MenuItem,
     MenuNavigator, Selection, SelectionKind, UnavailableReason, valid_action_id, valid_title,
@@ -307,6 +308,7 @@ class TreeTests(unittest.TestCase):
             "settings.storage": InspectManagerMetadata.name,
             "draft.diff": CompareSavedDraft.name,
             "draft.check": CheckSavedDraft.name,
+            "draft.apply": ApplySavedDraftHandler.name,
             "draft.save_and_exit": InspectMenuExit.name,
             "draft.discard": DiscardDraft.name,
         })

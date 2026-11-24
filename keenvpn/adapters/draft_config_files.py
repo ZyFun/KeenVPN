@@ -4,18 +4,16 @@ from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 import errno
-import fcntl
 import hashlib
 import os
 import posixpath
 import stat
-import struct
 from typing import NoReturn
 
 from keenvpn.adapters.entware_files import (
     DIRECTORY_FLAGS, PathFailure, confirm_directory_path, digest_file, walk_directory,
 )
-from keenvpn.adapters.file_writes import rename_new_file, write_all
+from keenvpn.adapters.file_writes import exclusive_rename_available, read_linux_inode_flags, rename_new_file, write_all
 from keenvpn.adapters.router_sources import XRAY_PART_LIMIT, SourceFingerprints
 from keenvpn.application.draft_backup import FileMetadata
 from keenvpn.application.draft_file_apply import (
@@ -32,9 +30,6 @@ _NAME_MAX_BYTES = 255
 
 _SYSTEM = os.uname()
 _LINUX_ARCH = _SYSTEM.machine if _SYSTEM.sysname == "Linux" else None
-# Linux задаёт FS_IOC_GETFLAGS как _IOR('f', 1, long), а ext4 возвращает unsigned int.
-_IOCTL_LONG_SIZE = struct.calcsize("@l")
-_FS_IOC_GETFLAGS = (2 << 30) | (_IOCTL_LONG_SIZE << 16) | (ord("f") << 8) | 1
 _EXT4_LAYOUT_FLAGS = 0x00080000 | 0x10000000  # EXTENTS и INLINE_DATA
 
 _PUBLICATION_REFUSALS = {
@@ -77,14 +72,7 @@ def _extended_attributes(descriptor: int) -> list[str]:
 
 
 def _has_unsupported_linux_flags(descriptor: int) -> bool:
-    if _LINUX_ARCH is None:
-        return False
-    if _LINUX_ARCH not in ("aarch64", "x86_64"):
-        raise OSError(errno.ENOTSUP, "Неизвестный ABI чтения флагов inode Linux.")
-    raw = bytearray(_IOCTL_LONG_SIZE)
-    fcntl.ioctl(descriptor, _FS_IOC_GETFLAGS, raw)
-    flags, = struct.unpack_from("=I", raw)
-    return bool(flags & ~_EXT4_LAYOUT_FLAGS)
+    return bool(read_linux_inode_flags(descriptor, _LINUX_ARCH) & ~_EXT4_LAYOUT_FLAGS)
 
 
 def _matches_original(parent: int, name: str, info: os.stat_result | None, metadata: FileMetadata | None) -> bool:
@@ -251,13 +239,7 @@ class DraftConfigFiles(SourceFingerprints):
         return self._location(target)[2]
 
     def supports_exclusive_rename(self) -> bool:
-        # Относительные имена с заведомо недействительными дескрипторами
-        # проверяют наличие вызова, не обращаясь к файловой системе.
-        try:
-            rename_new_file("source", "target", src_dir_fd=-1, dst_dir_fd=-1)
-        except OSError as error:
-            return error.errno == errno.EBADF
-        return False
+        return exclusive_rename_available(rename_new_file)
 
     def supports_exclusive_rename_in(self, targets: tuple[DraftFileTarget, ...]) -> bool:
         directories = dict.fromkeys(self._location(target)[0] for target in targets)

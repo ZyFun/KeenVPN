@@ -1,11 +1,13 @@
 """Проверки границы native ABI на двойниках, без системных вызовов Linux."""
 
 import ctypes
+from io import StringIO
 from pathlib import Path
 import sys
+import termios
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from keenvpn.adapters import xray_linux_native as native
@@ -134,6 +136,50 @@ class LinuxNativeTests(unittest.TestCase):
             with self.assertRaises(IsolationUnavailable):
                 self.api.require_coordinator()
             syscall.assert_not_called()
+
+    def test_coordinator_accepts_handlers_of_full_screen_terminal(self):
+        from keenvpn.interfaces.cli.interactive import _terminal_session
+
+        sigquit = native.signal.SIGQUIT
+        previous = native.signal.signal(sigquit, native.signal.SIG_DFL)
+        self.addCleanup(native.signal.signal, sigquit, previous)
+        stdout = Mock(spec=StringIO)
+        stdout.fileno.return_value = 2
+        with patch.object(self.api, 'capabilities', return_value=(native.REQUIRED_CAPABILITIES, 0, 0)), \
+                patch.object(native.os, 'listdir', return_value=['123']), \
+                patch.object(self.api, '_call') as syscall, patch.object(termios, 'tcsetattr'), \
+                patch.object(termios, 'tcflush') as flush:
+            with _terminal_session(1, stdout, None, None):
+                self.assertTrue(callable(native.signal.getsignal(sigquit)))
+                self.api.require_coordinator()
+            self.assertIs(native.signal.getsignal(sigquit), native.signal.SIG_DFL)
+            syscall.assert_called_once()
+            flush.assert_not_called()
+
+    def test_full_screen_terminal_preserves_body_error_and_restores_signal(self):
+        from keenvpn.interfaces.cli.interactive import _terminal_session
+
+        sigquit = native.signal.SIGQUIT
+        self.addCleanup(native.signal.signal, sigquit, native.signal.getsignal(sigquit))
+        for initial in (native.signal.SIG_DFL, native.signal.SIG_IGN):
+            with self.subTest(initial=initial):
+                native.signal.signal(sigquit, initial)
+                stdout = Mock(spec=StringIO)
+                stdout.fileno.return_value = 2
+                original, configured = object(), object()
+                failure = RuntimeError("Ошибка в теле сеанса терминала.")
+                with patch.object(termios, 'tcsetattr') as set_attributes, \
+                        patch.object(termios, 'tcflush') as flush, self.assertRaises(RuntimeError) as caught:
+                    with _terminal_session(1, stdout, original, configured):
+                        if initial is native.signal.SIG_IGN:
+                            self.assertIs(native.signal.getsignal(sigquit), initial)
+                        raise failure
+                self.assertIs(caught.exception, failure)
+                self.assertIs(native.signal.getsignal(sigquit), initial)
+                flush.assert_called_once_with(2, termios.TCOFLUSH)
+                self.assertEqual(set_attributes.call_args_list, [
+                    call(1, termios.TCSANOW, configured), call(1, termios.TCSANOW, original),
+                ])
 
     def test_no_pid_or_signal_wildcards(self):
         for tid in (0, -1, True, 1 << 31):

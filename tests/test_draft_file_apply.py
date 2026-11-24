@@ -21,7 +21,7 @@ from keenvpn.adapters.draft_config_files import DraftConfigFiles
 from keenvpn.adapters.draft_session_files import DraftSessionFiles
 from keenvpn.adapters.file_writes import rename_new_file
 from keenvpn.adapters.keenetic_rci_http import RciResource
-from keenvpn.application.draft_file_apply import FileStepFailure, run_draft_file_apply
+from keenvpn.application.draft_file_apply import FileStepFailure
 from keenvpn.application.draft_session import draft_revision_token
 from keenvpn.application.ports import RouterReadError, RouterReadFailure
 from keenvpn.application.source_baseline import capture_baseline
@@ -32,6 +32,7 @@ from keenvpn.domain.draft_snapshot import DraftDiffSnapshot
 from keenvpn.domain.keenetic_native import KeeneticHotspotSettings
 from keenvpn.domain.source_baseline import BaselineSource
 from keenvpn.domain.xray_config import XrayConfigSet
+from tests.support.draft_file_steps import exercise_file_steps
 from tests.support.router_files import INIT, XRAY_CONFIGS
 
 
@@ -84,7 +85,7 @@ class DraftFileApplyTests(unittest.TestCase):
         self.token = draft_revision_token(self.revision)
 
     def run_apply(self):
-        return run_draft_file_apply(self.drafts, self.files, DRAFT_ID, self.token, self.storage)
+        return exercise_file_steps(self.drafts, self.files, DRAFT_ID, self.token, self.storage)
 
     def assert_failure(self, result, code, *, completed=(), part="first.json"):
         self.assertIs(result.failure.code, code)

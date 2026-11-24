@@ -11,6 +11,9 @@ from keenvpn.domain.manager_metadata import metadata_revision
 from keenvpn.domain.source_baseline import BaselineSource
 
 
+DRAFT_JOURNAL_SCHEMA_VERSION = 3
+
+
 class DraftJournalStorage(Protocol):
     """Приватное хранилище журнала с проверкой предыдущей версии."""
 
@@ -19,6 +22,23 @@ class DraftJournalStorage(Protocol):
 
         None как ожидаемая ревизия разрешает только создание. При отказе,
         конфликте или неопределённом исходе записи вызвать исключение.
+        """
+        ...
+
+
+class DraftApplyJournalStorage(DraftJournalStorage, Protocol):
+    """Журнал, по которому можно отказать новой попытке при незавершённой предыдущей."""
+
+    def is_clear(self) -> bool: ...
+
+    def next_sequence(self) -> int:
+        """Сверить историю и определить номер новой попытки под общей блокировкой."""
+        ...
+
+    def last_applied_parts(self) -> tuple[int, ...] | None:
+        """Вернуть номера частей для последнего подтверждённого diff или None.
+
+        При незавершённом или непроверяемом журнале вызвать исключение.
         """
         ...
 
@@ -37,11 +57,30 @@ class DraftStage(StrEnum):
     VERIFY = "verify"
     VERIFY_BACKUP = "verify_backup"
     VERIFY_RESTORED_ROUTE = "verify_restored_route"
+    CLOSE_DRAFT = "close_draft"
 
 
 class StageDirection(StrEnum):
     APPLY = "apply"
     COMPENSATE = "compensate"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class DraftFilePlanStep:
+    """Файловый шаг до записи, без имени части и содержимого."""
+
+    source: BaselineSource
+    part_index: int | None
+    before_sha256: str | None
+    after_sha256: str | None
+
+    def _export(self) -> dict[str, object]:
+        return {
+            "source": self.source,
+            "part_index": self.part_index,
+            "before_sha256": self.before_sha256,
+            "after_sha256": self.after_sha256,
+        }
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -84,19 +123,23 @@ class DraftJournal:
 
     def __init__(
         self, storage: DraftJournalStorage, draft_id: str, backup: VerifiedDraftBackup,
-        process: dict[str, object] | None,
+        process: dict[str, object] | None, *, file_plan: tuple[DraftFilePlanStep, ...],
+        diff_parts: tuple[int, ...] | None, sequence: int | None,
     ) -> None:
         self._storage = storage
         # ID проверенной копии однозначно определяет одну попытку применения.
         self._header = {
             "format": "keenvpn-draft-journal",
-            "schema_version": 1,
+            "schema_version": DRAFT_JOURNAL_SCHEMA_VERSION,
             "operation_id": backup.backup_id,
             "draft_id": draft_id,
             "draft_revision": backup.draft_revision,
             "backup_id": backup.backup_id,
             "backup_sha256": backup.sha256,
             "process": process,
+            "file_plan": [step._export() for step in file_plan],
+            "diff_parts": diff_parts,
+            "sequence": sequence,
         }
         self._operation_id = backup.backup_id
         self._revision = None

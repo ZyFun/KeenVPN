@@ -3,7 +3,7 @@
 Единственный модуль интерфейса, которому разрешён импорт конкретных адаптеров.
 Сборка по умолчанию не подключает ни одного источника: пункты, сценарию
 которых нужен источник, показываются недоступными. Чтение роутера включается
-при запуске `vpn-menu --read-router` или `vpn-setup`: подключаются источники файлов Xray,
+при запуске `vpn-menu --read-router`, `vpn-menu --apply-draft` или `vpn-setup`: подключаются источники файлов Xray,
 XKeen и геобаз Entware, наблюдения процесса Xray и состояния Keenetic через
 локальный RCI. Черновик и метаданные подключаются только по подтверждённой
 роли data; отказ подключения показывается без путей и UUID. Отмена требует явно
@@ -21,19 +21,21 @@ XKeen и геобаз Entware, наблюдения процесса Xray и с�
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
+from keenvpn.adapters.geo_category_files import GeoCategoryFiles
 from keenvpn.adapters.router_sources import (
     GeoCandidateFiles, GeoDatabaseFiles, KeeneticHotspotRuntimeRci, KeeneticHotspotSettingsRci, KeeneticPoliciesRci,
     KeeneticRegistrationsRci, XKeenInitFile, XKeenListFiles, XKeenSettingsFile, XrayConfigFiles, XrayProcessObserver,
     SourceFingerprints,
 )
-from keenvpn.adapters.router_manager_files import connect_router_manager_files
+from keenvpn.adapters.router_manager_files import connect_router_draft_apply, connect_router_manager_files
 from keenvpn.adapters.storage_placement_files import StoragePlacementFiles
-from keenvpn.application.contract import OperationIdFactory, new_operation_id
+from keenvpn.application.contract import ErrorDetail, OperationIdFactory, new_operation_id
 from keenvpn.application.keenetic_state import InspectKeeneticStateHandler
 from keenvpn.application.proxy_config import InspectProxyConfigHandler
+from keenvpn.application.saved_draft_apply import ApplySavedDraftHandler
 from keenvpn.interfaces.cli.bindings import MenuSources, SectionActions
 from keenvpn.interfaces.cli.menu import Menu, MenuError, UnavailableReason
 from keenvpn.interfaces.cli.sections import connections, devices, draft, failsafe, routing, settings, status
@@ -56,17 +58,18 @@ def default_sources() -> MenuSources:
     return MenuSources()
 
 
-def router_sources() -> MenuSources:
-    """Источники `vpn-menu --read-router` и `vpn-setup` для чтения проверенной платформы.
+def router_sources(*, apply_draft: bool = False) -> MenuSources:
+    """Источники роутера. Запись подключается только для явно запрошенного режима.
 
     Подключаются файлы Entware, процесс Xray и локальный RCI.
     При сборке читается размещение DATA для подключения приватных файлов.
     При отказе оба хранилища остаются неподключёнными с безопасной причиной.
     Остальные источники читаются при выполнении сценария. Членство в наборах
     геобаз не подключается. При сборке записей, создания каталогов и импорта
-    нет; проверочный процесс и временные файлы возможны только в пункте 7 → 2.
+    нет. Проверочный процесс запускается при проверке кандидата из 7 → 2 или 7 → 3.
     """
-    stores = connect_router_manager_files(StoragePlacementFiles())
+    placement = StoragePlacementFiles()
+    stores = connect_router_manager_files(placement)
     # Необязательные зависимости runner не должны ломать остальные пункты
     # меню. Проверки платформы и полномочий выполняет сам порт перед запуском.
     try:
@@ -75,7 +78,7 @@ def router_sources() -> MenuSources:
         tester = None
     else:
         tester = IsolatedInstalledXray()
-    return MenuSources(
+    sources = MenuSources(
         policies=KeeneticPoliciesRci(), hotspot=KeeneticHotspotSettingsRci(), registrations=KeeneticRegistrationsRci(),
         runtime=KeeneticHotspotRuntimeRci(), xray=XrayConfigFiles(), xkeen_settings=XKeenSettingsFile(),
         xkeen_init=XKeenInitFile(), xkeen_lists=XKeenListFiles(), geodata=GeoDatabaseFiles(),
@@ -83,6 +86,21 @@ def router_sources() -> MenuSources:
         drafts=stores.drafts, metadata=stores.metadata, storage_error=stores.error,
         fingerprints=SourceFingerprints(), candidate_assets=GeoCandidateFiles(), installed_xray=tester,
     )
+    if not apply_draft or stores.error is not None:
+        return sources
+    if tester is None or not tester.coordinator_available():
+        return replace(sources, draft_apply_unavailable=UnavailableReason.DRAFT_APPLY_XRAY_UNAVAILABLE)
+    ports = connect_router_draft_apply(placement)
+    if isinstance(ports, ErrorDetail):
+        reason = (UnavailableReason.DRAFT_APPLY_PERMISSIONS if ports.code == "draft_apply_permissions"
+                  else UnavailableReason.STORAGE_NOT_CONFIRMED)
+        return replace(sources, draft_apply_unavailable=reason)
+    catalogs = GeoCategoryFiles(sources.candidate_assets)
+    apply = ApplySavedDraftHandler(
+        ports.drafts, ports.drafts, ports.files, ports.backup, ports.journal, tester=tester,
+        readiness=ports.readiness, geodata=sources.geodata, assets=sources.candidate_assets, catalogs=catalogs,
+    )
+    return replace(sources, drafts=ports.drafts, draft_apply=apply, geo_catalogs=catalogs)
 
 
 def _bindings(

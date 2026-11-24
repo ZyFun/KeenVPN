@@ -30,6 +30,9 @@ _MARK = {
     UnavailableReason.STORAGE_NOT_CONFIRMED: "DATA не подтверждён",
     UnavailableReason.DRAFT_STORE_NOT_CONNECTED: "хранилище не подключено",
     UnavailableReason.DRAFT_DISCARD_NOT_CONNECTED: "только чтение",
+    UnavailableReason.DRAFT_APPLY_NOT_CONNECTED: "запись не подключена",
+    UnavailableReason.DRAFT_APPLY_XRAY_UNAVAILABLE: "проверка Xray недоступна",
+    UnavailableReason.DRAFT_APPLY_PERMISSIONS: "нет доступа на запись",
     UnavailableReason.INPUT_REQUIRED: "нужен ввод",
     UnavailableReason.NO_AVAILABLE_ACTIONS: "нет доступных пунктов",
 }
@@ -735,7 +738,7 @@ class InteractiveMenu:
         if isinstance(level, InputLevel) or self._searching:
             footer = f"Введено символов: {len(self._text)} · Enter подтвердить · Esc отменить"
         if self._question:
-            footer = "Введите ответ и нажмите Enter · Esc отменить"
+            footer = "↑↓ просмотр · ответ + Enter · Esc отменить"
         messages = _cells([self._notice], width, "warning") if self._notice else []
         if self._digits and not self._invalid_number:
             messages += _cells(["Номер: " + self._digits], width)

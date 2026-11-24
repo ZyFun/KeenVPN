@@ -14,7 +14,7 @@ import signal
 from time import monotonic
 
 from keenvpn.adapters.xray_candidate_test import IsolationUnavailable, OutputLimitExceeded, XrayTestExit
-from keenvpn.adapters.xray_linux_native import LinuxAarch64, SyscallStop, UINT64_MAX
+from keenvpn.adapters.xray_linux_native import XRAY_CANCEL_SIGNALS, LinuxAarch64, SyscallStop, UINT64_MAX
 from keenvpn.adapters.xray_owned_wait import ProcessCleanupFailed, wait_owned
 from keenvpn.adapters.xray_syscall_policy import Decision, MAX_THREADS, XraySyscallPolicy
 
@@ -280,7 +280,7 @@ class TraceGroup:
             raise ProcessCleanupFailed
         if self.leader is None or self.all_reaped:
             return
-        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, XRAY_CANCEL_SIGNALS)
         try:
             if not self.leader_reaped:
                 try:

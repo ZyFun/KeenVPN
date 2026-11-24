@@ -10,9 +10,9 @@ from keenvpn.application.contract import (
 )
 from keenvpn.application.draft_session import check_draft_current, valid_expected_draft
 from keenvpn.application.installation import read_geo_databases
-from keenvpn.application.ports import DraftSessionStore, GeoDatabaseSource, SourceFingerprintSource
+from keenvpn.application.ports import DraftSessionReader, GeoDatabaseSource, SourceFingerprintSource
 from keenvpn.domain.config_document import valid_document_name
-from keenvpn.domain.geodata import GeoDataState, UnsupportedGeoReference, parse_geo_reference
+from keenvpn.domain.geodata import GeoDataState, GeoReference, UnsupportedGeoReference, parse_geo_reference
 from keenvpn.domain.manager_metadata import valid_metadata_revision
 from keenvpn.domain.routing import ConditionFamily, GeoDatabase, GeoDatabaseKind
 from keenvpn.domain.routing_import import ImportReason as Reason, RoutingScheme, inspect_routing_declarations
@@ -230,12 +230,35 @@ def _catalog_index(catalogs: tuple[GeoCategoryCatalog, ...]):
     return index
 
 
+def _geo_references(refs: CandidateReferences) -> tuple[GeoReference | UnsupportedGeoReference, ...]:
+    return tuple(ref for value in refs.values if (ref := parse_geo_reference(value)) is not None)
+
+
+def _geo_key(ref: GeoReference) -> tuple[GeoDatabaseKind, str]:
+    kind = GeoDatabaseKind.GEOIP if ref.family is ConditionFamily.IP else GeoDatabaseKind.GEOSITE
+    return kind, ref.file_name
+
+
+def referenced_geo_revisions(
+    xray: XrayConfigSet, revisions: tuple[GeoDatabase, ...],
+) -> tuple[GeoDatabase, ...]:
+    """Выбрать ожидаемые ревизии для ссылок, которые сверяет статическая проверка."""
+    refs = candidate_references(xray)
+    if refs.case_variant:
+        return ()
+    references = _geo_references(refs)
+    if any(type(ref) is UnsupportedGeoReference for ref in references):
+        return ()
+    required = {_geo_key(ref) for ref in references if type(ref) is GeoReference}
+    return tuple(item for item in revisions if (item.kind, item.reference) in required)
+
+
 def _geo_check(refs: CandidateReferences, revisions: tuple[GeoDatabase, ...],
                source: GeoDatabaseSource | None, catalogs: tuple[GeoCategoryCatalog, ...]) -> CheckView:
     code = "candidate_geo_categories"
     if refs.case_variant:
         return _check(code, CheckStatus.UNSUPPORTED, Reason.FIELD_CASE_VARIANT.value)
-    references = tuple(ref for value in refs.values if (ref := parse_geo_reference(value)) is not None)
+    references = _geo_references(refs)
     if any(type(ref) is UnsupportedGeoReference for ref in references):
         return _check(code, CheckStatus.FAILED, "invalid_geo_reference")
     if not references:
@@ -252,7 +275,7 @@ def _geo_check(refs: CandidateReferences, revisions: tuple[GeoDatabase, ...],
     incomplete = {"schema_incomplete"} if refs.schema_invalid else set()
     for resolution in GeoDataState(inventory, references).resolve():
         ref = resolution.reference
-        kind = GeoDatabaseKind.GEOIP if ref.family is ConditionFamily.IP else GeoDatabaseKind.GEOSITE
+        kind, name = _geo_key(ref)
         file = resolution.file
         if file is None:
             incomplete.add("file_not_inventoried")
@@ -261,12 +284,12 @@ def _geo_check(refs: CandidateReferences, revisions: tuple[GeoDatabase, ...],
             return _check(code, CheckStatus.FAILED, "missing_geo_file")
         if not file.size:
             return _check(code, CheckStatus.FAILED, "corrupt_geo_file")
-        revision = expected.get((kind, file.name))
+        revision = expected.get((kind, name))
         if revision is None:
             incomplete.add("geo_revision_unknown")
         elif revision != file.sha256:
             return _check(code, CheckStatus.FAILED, "geo_revision_changed")
-        key = (kind, file.name, file.sha256)
+        key = (kind, name, file.sha256)
         if evidence is None or key not in evidence:
             incomplete.add("geo_categories_unverified")
             continue
@@ -291,7 +314,7 @@ class CheckDraftCandidateHandler:
     ни одного хеша без подтверждения содержимого недостаточно для успеха.
     """
 
-    def __init__(self, store: DraftSessionStore, fingerprints: SourceFingerprintSource,
+    def __init__(self, store: DraftSessionReader, fingerprints: SourceFingerprintSource,
                  geodata: GeoDatabaseSource | None = None, catalogs: tuple[GeoCategoryCatalog, ...] = (),
                  *, operation_ids: OperationIdFactory = new_operation_id) -> None:
         self._store = store

@@ -1,6 +1,6 @@
 """Просмотр и проверки сохранённого кандидата без записи и терминального ввода."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar, Protocol
 
 from keenvpn.application.checks import CheckView
@@ -10,12 +10,13 @@ from keenvpn.application.contract import (
 )
 from keenvpn.application.draft_candidate import (
     CheckDraftCandidate, CheckDraftCandidateHandler, DraftCandidate, DraftCandidateView, GeoCategoryCatalog,
+    referenced_geo_revisions,
 )
 from keenvpn.application.draft_diff import CompareDraft, CompareDraftHandler, DraftDiffView
 from keenvpn.application.draft_session import (
     CheckDraftBaseline, CheckDraftBaselineHandler, read_expected_draft, valid_expected_draft,
 )
-from keenvpn.application.ports import DraftSessionStore, GeoDatabaseSource, SourceFingerprintSource
+from keenvpn.application.ports import DraftSessionReader, GeoDatabaseSource, SourceFingerprintSource
 from keenvpn.application.xray_candidate import (
     MAX_ASSET_BYTES, MAX_TOTAL_ASSET_BYTES, CandidateAsset, CheckInstalledXray, CheckInstalledXrayHandler,
     InstalledXrayPort, candidate_geo_references,
@@ -99,7 +100,7 @@ _CATALOG_SOURCE = ErrorDetail(ErrorCategory.SOURCE_FAILED, "draft_catalogs_unava
 
 
 class _SavedDraft:
-    def __init__(self, store: DraftSessionStore, fingerprints: SourceFingerprintSource,
+    def __init__(self, store: DraftSessionReader, fingerprints: SourceFingerprintSource,
                  *, operation_ids: OperationIdFactory = new_operation_id) -> None:
         self._store, self._fingerprints, self._operation_ids = store, fingerprints, operation_ids
         self._compare = CompareDraftHandler(store, fingerprints, operation_ids=operation_ids)
@@ -131,8 +132,10 @@ class CompareSavedDraftHandler(_SavedDraft):
             return failed(operation_id, name, state)
         result = self._compare.execute(CompareDraft(draft_id=command.draft_id,
             expected_revision=command.expected_revision, original=state.original, candidate=state.snapshot))
-        return (succeeded(operation_id, name, result.data) if result.succeeded
-                else failed(operation_id, name, result.error))
+        if not result.succeeded:
+            return failed(operation_id, name, result.error)
+        view = replace(result.data, unknown_sources_changed=state.has_unknown_source_changes())
+        return succeeded(operation_id, name, view)
 
 
 class CheckSavedDraftHandler(_SavedDraft):
@@ -144,7 +147,7 @@ class CheckSavedDraftHandler(_SavedDraft):
     результаты. Два чтения не блокируют внешнего писателя после завершения.
     """
 
-    def __init__(self, store: DraftSessionStore, fingerprints: SourceFingerprintSource,
+    def __init__(self, store: DraftSessionReader, fingerprints: SourceFingerprintSource,
                  geodata: GeoDatabaseSource | None = None, assets: CandidateAssetSource | None = None,
                  catalogs: GeoCategorySource | None = None, tester: InstalledXrayPort | None = None,
                  *, operation_ids: OperationIdFactory = new_operation_id) -> None:
@@ -161,7 +164,11 @@ class CheckSavedDraftHandler(_SavedDraft):
         except Exception:
             return failed(self._operation_ids(), CheckDraftCandidate.name, _STATIC_INPUT)
         try:
-            catalogs = () if self._catalogs is None else self._catalogs.read_catalogs(revisions)
+            catalogs = ()
+            if self._catalogs is not None:
+                required = referenced_geo_revisions(candidate.xray, revisions)
+                if required:
+                    catalogs = self._catalogs.read_catalogs(required)
         except Exception:
             return failed(self._operation_ids(), CheckDraftCandidate.name, _CATALOG_SOURCE)
         return CheckDraftCandidateHandler(self._store, self._fingerprints, self._geodata, catalogs,

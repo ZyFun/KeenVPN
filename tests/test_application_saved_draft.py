@@ -16,6 +16,7 @@ from keenvpn.application.saved_draft import (
     CompareSavedDraft, CompareSavedDraftHandler, CheckSavedDraft, CheckSavedDraftHandler,
 )
 from keenvpn.application.xray_candidate import CheckInstalledXrayHandler, XrayTestOutcome as Outcome
+from keenvpn.domain.config_document import ConfigDocument
 from keenvpn.domain.draft_candidate_state import build_draft_candidate
 from keenvpn.domain.draft_session import draft_revision, encode_draft_session
 from keenvpn.domain.draft_snapshot import DraftDiffSnapshot
@@ -174,10 +175,32 @@ class SavedDraftTests(unittest.TestCase):
         self.assertEqual(result.data.binary.reason, 'geo_revision_unknown')
         self.assertFalse(self.inputs.assets.calls or self.inputs.tester.calls)
 
-    def test_unused_expected_file_does_not_become_binary_dependency(self):
-        self.update(revisions=(*fixture.REVISIONS, replace(fixture.REVISIONS[0], reference='other.dat')))
-        self.assertIs(self.execute().data.binary.status, CheckStatus.PASSED)
+    def test_unused_expected_file_does_not_become_a_dependency(self):
+        ip, site = fixture.REVISIONS
+        self.update(revisions=(*fixture.REVISIONS, replace(ip, reference='other.dat'),
+                               replace(ip, reference=site.reference)))
+        result = self.execute().data
+        self.assertEqual(result.static.outcome, 'passed')
+        self.assertIs(result.binary.status, CheckStatus.PASSED)
+        self.assertEqual(self.inputs.catalogs.calls, [fixture.REVISIONS])
         self.assertEqual({n for n, _ in self.inputs.assets.calls}, set(fixture.DATA))
+
+    def test_static_catalog_selection_accepts_single_dns_reference(self):
+        snapshot = fixture.snapshot()
+        first, last = snapshot.xray_configs.parts
+        document = last.export()
+        document["routing"]["rules"] = document["routing"]["rules"][-1:]
+        document["dns"] = {"servers": [{"address": "198.51.100.1", "domains": ["geosite:TEST_SITE"]}]}
+        candidate = replace(snapshot, xray_configs=XrayConfigSet((
+            first, ConfigDocument(last.name, json.dumps(document).encode()),
+        )))
+        self.update(candidate=candidate)
+        self.inputs.catalogs.values = (self.inputs.catalogs.values[1],)
+        report = self.execute().data
+        self.assertEqual(self.inputs.catalogs.calls, [(fixture.REVISIONS[1],)])
+        self.assertEqual(report.static.outcome, "passed")
+        self.assertEqual(report.binary.reason, "both_geo_references_required")
+        self.assertFalse(self.inputs.assets.calls or self.inputs.tester.calls)
 
     def test_absent_runner_keeps_static_success_separate(self):
         result = self.execute(tester=None)

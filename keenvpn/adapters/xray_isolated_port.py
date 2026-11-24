@@ -14,7 +14,7 @@ from keenvpn.adapters.xray_candidate_test import (
     MEMORY_LIMIT, IsolationUnavailable, StagedXrayTest, TIMEOUT, valid_memory_limit,
 )
 from keenvpn.adapters.xray_image_files import BINARY_SIZE
-from keenvpn.adapters.xray_linux_native import LinuxAarch64
+from keenvpn.adapters.xray_linux_native import XRAY_CANCEL_SIGNALS, LinuxAarch64
 from keenvpn.adapters.xray_linux_runner import LinuxXrayRunner
 from keenvpn.adapters.xray_owned_wait import ProcessCleanupFailed, WorkerOwnership, wait_owned
 from keenvpn.adapters.xray_private_mount import (
@@ -27,9 +27,6 @@ from keenvpn.application.xray_candidate import (
     XrayTestOutcome as Outcome, checked_port_input,
 )
 from keenvpn.domain.source_baseline import MAX_BASELINE_PARTS
-
-
-_CANCEL_SIGNALS = frozenset((signal.SIGINT, signal.SIGTERM, signal.SIGHUP))
 
 
 class _WorkerCancellation:
@@ -49,10 +46,10 @@ class _WorkerCancellation:
     def begin_cleanup(self) -> None:
         # Состояние предшествует ОС-вызову: pthread_sigmask может доставить Python-pending сигнал.
         self.stopping = True
-        signal.pthread_sigmask(signal.SIG_BLOCK, _CANCEL_SIGNALS)
+        signal.pthread_sigmask(signal.SIG_BLOCK, XRAY_CANCEL_SIGNALS)
 
     def result(self, outcome: Outcome) -> Outcome:
-        if outcome is Outcome.PASSED and (self.requested or _CANCEL_SIGNALS.intersection(signal.sigpending())):
+        if outcome is Outcome.PASSED and (self.requested or XRAY_CANCEL_SIGNALS.intersection(signal.sigpending())):
             return Outcome.INTERRUPTED
         return outcome
 
@@ -100,7 +97,7 @@ def _worker(native: LinuxAarch64, candidate: XrayTestInput, deadline: float,
         native.prctl(1, int(signal.SIGKILL))
         if os.getppid() != parent_pid:
             raise IsolationUnavailable
-        for number in _CANCEL_SIGNALS:
+        for number in XRAY_CANCEL_SIGNALS:
             signal.signal(number, cancellation.cancel)
         signal.signal(signal.SIGCHLD, signal.SIG_DFL)
         close_other_fds(frozenset((response,)))
@@ -204,7 +201,7 @@ def _cleanup_worker(owner: WorkerOwnership) -> bool:
         return False
     if owner.leader_reaped:
         return owner.terminal_status == 0
-    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, XRAY_CANCEL_SIGNALS)
     try:
         for sig, seconds in ((signal.SIGINT, 2.5), (signal.SIGKILL, 0.5)):
             if owner.leader_reaped:
@@ -232,6 +229,14 @@ class IsolatedInstalledXray:
     def __init__(self, *, memory_limit: int = MEMORY_LIMIT) -> None:
         self._memory_limit = memory_limit
 
+    def coordinator_available(self) -> bool:
+        """Проверить платформу и полномочия без запуска Xray."""
+        try:
+            LinuxAarch64().require_coordinator()
+        except (IsolationUnavailable, OSError):
+            return False
+        return True
+
     def test(self, candidate: XrayTestInput) -> Outcome:
         owner = WorkerOwnership()
         descriptors: set[int] = set()
@@ -249,7 +254,7 @@ class IsolatedInstalledXray:
             original_namespace = namespace_identity()
             if monotonic() >= deadline:
                 raise TimeoutError
-            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, XRAY_CANCEL_SIGNALS)
             try:
                 response, sender = private_pipe()
                 descriptors.update((response, sender))
@@ -291,7 +296,7 @@ class IsolatedInstalledXray:
         finally:
             # Вложенные consuming wait восстанавливают именно эту защищённую маску.
             # Повторная отмена доставляется лишь после отчёта, всех fd и проверки ns.
-            cleanup_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+            cleanup_mask = signal.pthread_sigmask(signal.SIG_BLOCK, XRAY_CANCEL_SIGNALS)
             try:
                 try:
                     cleaned = _cleanup_worker(owner)

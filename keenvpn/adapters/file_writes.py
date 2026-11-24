@@ -1,12 +1,18 @@
 """Запись и публикация файлов через уже открытые дескрипторы."""
 
+from collections.abc import Callable
 import errno
+import fcntl
 import os
+import struct
 
 
 _LINUX_RENAMEAT2 = {"aarch64": 276, "x86_64": 316}
 _RENAME_NOREPLACE = 1
 _DARWIN_RENAME_EXCL = 0x00000004
+# Linux задаёт FS_IOC_GETFLAGS как _IOR('f', 1, long), ext4 возвращает unsigned int.
+_IOCTL_LONG_SIZE = struct.calcsize("@l")
+_FS_IOC_GETFLAGS = (2 << 30) | (_IOCTL_LONG_SIZE << 16) | (ord("f") << 8) | 1
 
 
 def write_all(descriptor: int, content: bytes) -> None:
@@ -17,6 +23,27 @@ def write_all(descriptor: int, content: bytes) -> None:
         if written <= 0:
             raise OSError(errno.EIO, "short write")
         view = view[written:]
+
+
+def read_linux_inode_flags(descriptor: int, architecture: str | None) -> int:
+    """Прочитать флаги inode на поддерживаемой Linux ABI."""
+    if architecture is None:
+        return 0
+    if architecture not in _LINUX_RENAMEAT2:
+        raise OSError(errno.ENOTSUP, "Неизвестный ABI чтения флагов inode Linux.")
+    raw = bytearray(_IOCTL_LONG_SIZE)
+    fcntl.ioctl(descriptor, _FS_IOC_GETFLAGS, raw)
+    flags, = struct.unpack_from("=I", raw)
+    return flags
+
+
+def exclusive_rename_available(rename: Callable[..., None]) -> bool:
+    """Проверить наличие вызова без записи на диск."""
+    try:
+        rename("source", "target", src_dir_fd=-1, dst_dir_fd=-1)
+    except OSError as error:
+        return error.errno == errno.EBADF
+    return False
 
 
 def rename_new_file(source: str, target: str, *, src_dir_fd: int, dst_dir_fd: int) -> None:

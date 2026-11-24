@@ -13,7 +13,8 @@ from keenvpn.application.draft_file_apply import (
     fingerprint_after_file, plan_draft_files,
 )
 from keenvpn.application.draft_journal import (
-    DraftJournal, DraftJournalStatus, DraftJournalStorage, DraftStage, DraftStageEvent, StageDirection,
+    DraftFilePlanStep, DraftJournal, DraftJournalStatus, DraftJournalStorage, DraftStage, DraftStageEvent,
+    StageDirection,
 )
 from keenvpn.application.ports import DraftApplyLock
 from keenvpn.domain.draft_session import StoredDraftSession
@@ -207,21 +208,22 @@ def _file_step(
     expected: dict[BaselineSource, SourceFingerprint],
     publications: dict[DraftFileTarget, FilePublication],
     check_process: Callable[[], FileStepFailure | None], *, part_index: int | None,
-    check_initial_state: Callable[[], FileStepFailure | None] | None = None,
-    check_initial_revision: Callable[[], FileStepFailure | None] | None = None,
+    check_apply_state: Callable[[], FileStepFailure | None],
+    check_before_publication: Callable[[], FileStepFailure | None] | None = None,
+    check_revision: Callable[[], FileStepFailure | None] | None = None,
 ) -> _Step:
     target = change.target
 
     def write(
-        item: DraftFileChange, check_initial: Callable[[], FileStepFailure | None] | None = None,
-        check_revision: Callable[[], FileStepFailure | None] | None = None,
+        item: DraftFileChange, *, applying: bool = False,
     ) -> FileStepResult:
         before = expected[target.source]
 
         def check_current() -> FileStepFailure | None:
-            failure = None if check_initial is None else check_initial()
+            failure = check_before_publication() if applying and check_before_publication is not None else None
+            failure = failure or (check_apply_state() if applying else None)
             failure = failure or check_file_source(files, before) or check_process()
-            return failure if failure is not None or check_revision is None else check_revision()
+            return failure if failure is not None or not applying or check_revision is None else check_revision()
 
         result = files.write_draft_file(item, check_current)
         if (type(result) is not FileStepResult or type(result.cleanup_failed) is not bool
@@ -238,7 +240,7 @@ def _file_step(
         return result
 
     def apply() -> _Outcome:
-        result = write(change, check_initial_state, check_initial_revision)
+        result = write(change, applying=True)
         if result.code is not None:
             return _Outcome(result.code, result.cleanup_failed)
         published = result.published
@@ -264,16 +266,16 @@ def _native_step(
     candidate: SourceFingerprint, files: DraftConfigFileSource,
     expected: dict[BaselineSource, SourceFingerprint],
     check_process: Callable[[], FileStepFailure | None], *,
-    check_initial_backup: Callable[[], FileStepFailure | None] | None = None,
+    check_initial_state: Callable[[], FileStepFailure | None] | None = None,
     check_initial_revision: Callable[[], FileStepFailure | None] | None = None,
 ) -> _Step:
     def write(
         request: NativeChange, before: SourceFingerprint, after: SourceFingerprint,
-        check_backup: Callable[[], FileStepFailure | None] | None = None,
+        check_initial: Callable[[], FileStepFailure | None] | None = None,
         check_revision: Callable[[], FileStepFailure | None] | None = None,
     ) -> FileStepFailure | None:
         def check_current() -> FileStepFailure | None:
-            failure = None if check_backup is None else check_backup()
+            failure = None if check_initial is None else check_initial()
             failure = failure or check_file_source(files, before) or check_process()
             return failure if failure is not None or check_revision is None else check_revision()
 
@@ -290,7 +292,7 @@ def _native_step(
         return failure
 
     def apply() -> _Outcome:
-        failure = write(change, current, candidate, check_initial_backup, check_initial_revision)
+        failure = write(change, current, candidate, check_initial_state, check_initial_revision)
         if failure is not None:
             return _Outcome(failure)
         reverse = NativeChange(change.source, change.after, change.before)
@@ -442,24 +444,32 @@ def _execute(
     return DraftJournalStatus.RECOVERY_REQUIRED if cleanup_failed else DraftJournalStatus.COMPENSATED
 
 
-def run_draft_journal_apply(
+def _run_draft_journal_apply(
     lock: DraftApplyLock, files: DraftJournalFileSource, draft_id: object, expected_revision: object,
     storage: DraftBackupStorage, journal_storage: DraftJournalStorage, *, verify: Callable[[], bool],
+    check_candidate: Callable[[StoredDraftSession], ErrorDetail | None],
+    check_before_baseline: Callable[[], ErrorDetail | None] | None = None,
+    check_before_publication: Callable[[], FileStepFailure | None] | None = None,
+    next_session_sequence: Callable[[], int] | None = None,
     native: DraftNativePort | None = None, process: DraftProcessPort | None = None,
     process_change: ProcessChange | None = None,
     requires_network_verification: bool = False, verify_restored: Callable[[], bool] | None = None,
 ) -> DraftJournalApplyResult | DraftFileApplyRejection | ErrorDetail:
-    """Применить проверенный и подтверждённый черновик под общей блокировкой.
+    """Внутренний исполнитель Prepare/ApplySavedDraft под общей блокировкой.
 
     verify выполняет только чтение и возвращает True после всех обязательных
     проверок живого поведения. Если операция требует сетевой проверки, вызывающий
     указывает requires_network_verification и передаёт отдельную verify_restored
     для проверки исходного режима после обратных изменений.
     Адаптеры изменяют только собственный ресурс.
+    При подключённом next_session_sequence сессия точечной правки существующих
+    частей Xray получает номер попытки и завершается после проверки записи
+    и копии. Номер и завершение сессии защищены той же блокировкой.
     При неопределённом исходе требуется отдельная сверка перед восстановлением.
     """
     if (
-        not callable(verify) or (process_change is not None and not _valid_process_change(process_change))
+        not callable(verify) or not callable(check_candidate)
+        or (process_change is not None and not _valid_process_change(process_change))
         or type(requires_network_verification) is not bool
         or (verify_restored is not None and not callable(verify_restored))
         or (requires_network_verification and verify_restored is None)
@@ -467,6 +477,8 @@ def run_draft_journal_apply(
         return invalid_command()
 
     plan: tuple[PlannedFileChange, ...] = ()
+    diff_parts: tuple[int, ...] | None = None
+    sequence: int | None = None
     native_plan: list[tuple[NativeChange, SourceFingerprint, SourceFingerprint]] = []
     process_before = None
     if process_change is not None:
@@ -474,12 +486,26 @@ def run_draft_journal_apply(
         process_before = DraftProcessBackup(before.state.running, before.state.autostart, before.revision)
 
     def prepare(original: PreparedSnapshot, candidate: PreparedSnapshot) -> ErrorDetail | None:
-        nonlocal plan
+        nonlocal plan, diff_parts, sequence
         try:
             prepared = plan_draft_files(original, candidate, files)
             if isinstance(prepared, ErrorDetail):
                 return prepared
             plan = prepared
+            if next_session_sequence is not None:
+                xray = BaselineSource.XRAY_CONFIGS
+                originals = original.sources[xray]
+                if (not plan or originals is None or process_change is not None
+                        or any(change.target.source is not xray or change.before is None or change.content is None
+                               for change in plan)
+                        or any(original.sources[source] != candidate.sources[source]
+                               for source in BaselineSource if source is not xray)):
+                    return _PREFLIGHT_FAILED
+                positions = {part: index for index, part in enumerate(sorted(originals))}
+                diff_parts = tuple(positions[change.target.part] for change in plan)
+                sequence = next_session_sequence()
+                if type(sequence) is not int or sequence < 1:
+                    return _PREFLIGHT_FAILED
             for source in _NATIVE_SOURCES:
                 before, after = original.sources[source], candidate.sources[source]
                 if before != after:
@@ -553,8 +579,14 @@ def run_draft_journal_apply(
         def check_revision() -> FileStepFailure | None:
             return draft_failure(recheck.revision())
 
+        def check_close() -> FileStepFailure | None:
+            return None if sequence is None else draft_failure(recheck.check_close())
+
         def check_initial_state() -> FileStepFailure | None:
-            return check_backup() or check_draft()
+            return check_backup() or check_draft() or check_close()
+
+        def check_later_file() -> FileStepFailure | None:
+            return check_backup() or check_close()
 
         # Номер ссылается на отсортированные ключи parts в проверенной копии.
         xray_parts = sorted(part for source, part, _ in backup.files
@@ -564,15 +596,16 @@ def run_draft_journal_apply(
             _file_step(
                 files, change, item.before, expected, publications, check_process,
                 part_index=None if change.target.part is None else part_indices[change.target.part],
-                check_initial_state=check_initial_state if index == 0 else None,
-                check_initial_revision=check_revision if index == 0 else None,
+                check_before_publication=check_before_publication,
+                check_apply_state=check_initial_state if index == 0 else check_later_file,
+                check_revision=check_revision if index == 0 or check_before_publication is not None else None,
             )
             for index, (item, change) in enumerate(zip(plan, changes, strict=True))
         ]
         for change, before, after in native_plan:
             steps.append(_native_step(
                 native, change, before, after, files, expected, check_process,
-                check_initial_backup=check_backup if not steps else None,
+                check_initial_state=check_initial_state if not steps else None,
                 check_initial_revision=check_revision if not steps else None,
             ))
 
@@ -602,14 +635,36 @@ def run_draft_journal_apply(
             return _Outcome(check_process())
 
         steps.append(_Step(DraftStage.VERIFY, verify_applied))
-        steps.append(_Step(DraftStage.VERIFY_BACKUP, lambda: _Outcome(check_backup() or check_sources() or check_process())))
-        journal = DraftJournal(journal_storage, stored.session.draft_id, backup,
-                               _process_record(process_change, process_before))
+
+        def check_applied_and_backup() -> FileStepFailure | None:
+            return check_backup() or check_sources() or check_process()
+
+        steps.append(_Step(DraftStage.VERIFY_BACKUP, lambda: _Outcome(check_applied_and_backup())))
+        file_plan = tuple(
+            DraftFilePlanStep(step.source, step.part_index, step.before_sha256, step.after_sha256)
+            for step in steps if step.stage is DraftStage.FILE
+        )
+        journal = DraftJournal(
+            journal_storage, stored.session.draft_id, backup,
+            _process_record(process_change, process_before), file_plan=file_plan, diff_parts=diff_parts,
+            sequence=sequence,
+        )
         status = _execute(
             journal, steps, check_backup, check_process, check_sources, check_draft,
             restore_running_process_last=process_change is not None and process_change.before.state.running,
             verify_restored=verify_restored,
         )
+        if status is DraftJournalStatus.APPLIED and sequence is not None:
+            def close_draft() -> _Outcome:
+                recheck.close_applied_draft()
+                return _Outcome(check_applied_and_backup())
+
+            outcome = _run_step(
+                journal, _Step(DraftStage.CLOSE_DRAFT, close_draft), StageDirection.APPLY,
+                check=check_applied_and_backup,
+            )
+            if outcome is None or outcome.failure is not None or journal.failed:
+                status = DraftJournalStatus.RECOVERY_REQUIRED
         if not journal.persist(status) and status is not DraftJournalStatus.REJECTED:
             status = DraftJournalStatus.RECOVERY_REQUIRED
         return DraftJournalApplyResult(backup, status, tuple(journal.events), journal.confirmed_events, journal.failed)
@@ -621,5 +676,8 @@ def run_draft_journal_apply(
 
     return run_draft_apply_with_backup_recheck(
         lock, files, draft_id, expected_revision, files, storage, apply,
-        check_prepared=prepare, process_before=process_before, on_lock_release_error=lock_release_failed,
+        check_before_baseline=check_before_baseline,
+        check_current=check_candidate, check_prepared=prepare, process_before=process_before,
+        check_draft_close=next_session_sequence is not None,
+        on_lock_release_error=lock_release_failed,
     )

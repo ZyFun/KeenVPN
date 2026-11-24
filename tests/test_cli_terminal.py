@@ -315,7 +315,7 @@ class CompositionTests(unittest.TestCase):
         self.assertIsNone(found["draft.save_and_exit"])
         self.assertIs(found["draft.discard"], UnavailableReason.DRAFT_STORE_NOT_CONNECTED)
         # Объяснение маршрута читает импортированную схему: без источников Xray и XKeen пункт недоступен.
-        for action_id in set(BOUND_SCENARIOS) - available - {"draft.discard"}:
+        for action_id in set(BOUND_SCENARIOS) - available - {"draft.discard", "draft.apply"}:
             self.assertIs(found[action_id], UnavailableReason.SOURCE_NOT_CONNECTED, action_id)
         for action_id in set(ALL_ACTION_IDS) - set(BOUND_SCENARIOS) - {"settings.about"}:
             self.assertIs(found[action_id], UnavailableReason.NOT_IMPLEMENTED, action_id)

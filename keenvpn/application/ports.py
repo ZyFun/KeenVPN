@@ -387,15 +387,27 @@ class DraftSessionReader(Protocol):
         ...
 
 
+class LockedDraftSession(DraftSessionReader, Protocol):
+    """Сессия под блокировкой применения."""
+
+    def check_close_applied_draft(self, expected_revision: str, operation_id: str | None = None) -> None:
+        """Проверить известные препятствия закрытию без записи."""
+        ...
+
+    def close_applied_draft(self, expected_revision: str, operation_id: str) -> None:
+        """Сохранить закрываемую сессию отдельно и подтвердить её полную ревизию."""
+        ...
+
+
 class DraftApplyLock(Protocol):
     """Эксклюзивная координация применения и операций записи черновика."""
 
-    def lock_for_apply(self) -> AbstractContextManager[DraftSessionReader | None]:
-        """Удерживать общую блокировку и предоставить чтение сессии под ней.
+    def lock_for_apply(self) -> AbstractContextManager[LockedDraftSession | None]:
+        """Удерживать общую блокировку чтения и завершения применённой сессии.
 
         При занятой блокировке — DraftSessionStoreError с видом BUSY без
-        ожидания. None означает, что самого хранилища ещё нет. Чтение через
-        возвращённый объект допустимо только внутри контекста.
+        ожидания. None означает, что самого хранилища ещё нет. Операции через
+        возвращённый объект допустимы только внутри контекста.
         """
         ...
 

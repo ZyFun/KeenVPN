@@ -9,7 +9,7 @@ from time import monotonic
 from keenvpn.adapters.xray_candidate_test import IsolationUnavailable, XrayTestExit, XrayTestInvocation
 from keenvpn.adapters.xray_image_files import installed_binary, populate_cage, verify_invocation
 from keenvpn.adapters.xray_initial_memory import InitialMemory, STACK_LIMIT, auxiliary_sizes, initial_break, parse_maps
-from keenvpn.adapters.xray_linux_native import LinuxAarch64
+from keenvpn.adapters.xray_linux_native import XRAY_CANCEL_SIGNALS, LinuxAarch64
 from keenvpn.adapters.xray_memory_budget import XrayMemoryBudget
 from keenvpn.adapters.xray_private_mount import PrivateMounts, bounded_read
 from keenvpn.adapters.xray_syscall_policy import MAX_DESCRIPTORS, XraySyscallPolicy
@@ -112,7 +112,7 @@ class LinuxXrayRunner:
         self._group = TraceGroup(self.native, self.deadline, request.output_limit,
                                  self._after_exec, self._verify_thread)
         self._check_time()
-        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, XRAY_CANCEL_SIGNALS)
         try:
             stdout = private_pipe()
             self._startup_fds.update(stdout)
@@ -172,7 +172,7 @@ class LinuxXrayRunner:
         except KeyboardInterrupt:
             self._begin_cleanup()
         failed = False
-        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, XRAY_CANCEL_SIGNALS)
         try:
             if self._group is not None:
                 try:

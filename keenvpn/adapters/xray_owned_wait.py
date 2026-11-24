@@ -5,6 +5,8 @@ import os
 import signal
 from typing import Protocol
 
+from keenvpn.adapters.xray_linux_native import XRAY_CANCEL_SIGNALS
+
 
 class ProcessCleanupFailed(Exception):
     """Владение процессом или завершение очистки не подтверждено."""
@@ -38,7 +40,7 @@ terminal/ECHILD предшествует восстановлению маски
 """
     if owner.leader is None or type(owner.leader) is not int or not 0 < owner.leader < 1 << 31:
         raise ProcessCleanupFailed
-    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, XRAY_CANCEL_SIGNALS)
     try:
         owner.wait_uncertain = True
         try:

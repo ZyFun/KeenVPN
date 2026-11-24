@@ -19,6 +19,9 @@ from keenvpn.domain.source_baseline import BaselineSource, MAX_BASELINE_PARTS, v
 from keenvpn.domain.xray_config import XrayConfigSet
 
 
+_SNAPSHOT_SOURCES = frozenset(source.value for source in BaselineSource)
+
+
 class DraftCandidateStateError(ValueError):
     """Фиксированный отказ без приватных полей и цепочки чужого исключения."""
 
@@ -163,6 +166,17 @@ class DraftCandidateState:
     def snapshot(self) -> DraftDiffSnapshot:
         """Полный кандидат известных источников, включая байты и порядок частей."""
         return _read_snapshot(self.export()["snapshot"], original=False)
+
+    def has_unknown_source_changes(self) -> bool:
+        """Сравнить закрытые записи снимков с учётом типов JSON и порядка."""
+        document = self.export()
+
+        def unknown_sources(section: str) -> UnknownFields:
+            return UnknownFields({
+                name: value for name, value in document[section].items() if name not in _SNAPSHOT_SOURCES
+            })
+
+        return unknown_sources("original") != unknown_sources("snapshot")
 
     @property
     def geo_revisions(self) -> tuple[GeoDatabase, ...]:

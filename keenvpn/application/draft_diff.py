@@ -11,7 +11,7 @@ from keenvpn.application.contract import (
 from keenvpn.application.draft_diff_changes import DiffEntry, snapshot_changes
 from keenvpn.application.draft_diff_snapshot import DraftDiffSnapshot, prepare_snapshot
 from keenvpn.application.draft_session import check_draft_current, read_expected_draft, valid_expected_draft
-from keenvpn.application.ports import DraftSessionStore, SourceFingerprintSource
+from keenvpn.application.ports import DraftSessionReader, SourceFingerprintSource
 from keenvpn.application.source_baseline import BASELINE_CHANGED, compare_baseline
 
 
@@ -43,18 +43,22 @@ class CompareDraft:
 
 @dataclass(frozen=True, slots=True)
 class DraftDiffView:
-    """Полный отчёт просмотра. Пустой кортеж означает проверенное совпадение."""
+    """Безопасный отчёт о знакомых изменениях и изменении неизвестных источников."""
 
     entries: tuple[DiffEntry, ...]
+    unknown_sources_changed: bool = False
 
     def to_dict(self) -> dict[str, object]:
-        return {"entries": [entry.to_dict() for entry in self.entries]}
+        report: dict[str, object] = {"entries": [entry.to_dict() for entry in self.entries]}
+        if self.unknown_sources_changed:
+            report["unknown_sources_changed"] = True
+        return report
 
 
 class CompareDraftHandler:
     """Сверить исходное содержимое с сессией и проверить актуальность перед выдачей отчёта."""
 
-    def __init__(self, store: DraftSessionStore, fingerprints: SourceFingerprintSource,
+    def __init__(self, store: DraftSessionReader, fingerprints: SourceFingerprintSource,
                  *, operation_ids: OperationIdFactory = new_operation_id) -> None:
         self._store = store
         self._fingerprints = fingerprints

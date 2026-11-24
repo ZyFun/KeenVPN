@@ -71,6 +71,22 @@ class ApplyPrivateFile(PrivateFileStore[_StoredApplyFile]):
             raise
         return directory
 
+    def directory_writable(self) -> bool:
+        """Проверить доступ каталога операции без создания или синхронизации."""
+        try:
+            parent_path, name = self._location()
+            with self._walk(parent_path) as parent:
+                directory = self._open_directory(parent, name, create=False)
+                if directory is None:
+                    return os.access(".", os.W_OK | os.X_OK, dir_fd=parent, effective_ids=True)
+                try:
+                    self._check_identity(directory)
+                    return os.access(".", os.W_OK | os.X_OK, dir_fd=directory, effective_ids=True)
+                finally:
+                    os.close(directory)
+        except (self.error_type, OSError, NotImplementedError):
+            return False
+
     def _decode(self, content: bytes) -> _StoredApplyFile:
         if not content or len(content) > self.max_size:
             self._raise(StoreFailure.INVALID)

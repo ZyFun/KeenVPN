@@ -51,6 +51,9 @@ class UnavailableReason(StrEnum):
     """Хранилище сессии черновика не подключено."""
     DRAFT_DISCARD_NOT_CONNECTED = "draft_discard_not_connected"
     """У меню есть источник чтения черновика, но отмена ему не разрешена."""
+    DRAFT_APPLY_NOT_CONNECTED = "draft_apply_not_connected"
+    DRAFT_APPLY_XRAY_UNAVAILABLE = "draft_apply_xray_unavailable"
+    DRAFT_APPLY_PERMISSIONS = "draft_apply_permissions"
     INPUT_REQUIRED = "input_required"
     """Сценарий есть, но пункту нужен ввод значений, которого это меню не принимает."""
     NO_AVAILABLE_ACTIONS = "no_available_actions"
@@ -74,6 +77,14 @@ REASON_MESSAGES: Mapping[UnavailableReason, str] = MappingProxyType({
     ),
     UnavailableReason.DRAFT_DISCARD_NOT_CONNECTED: (
         "Хранилище черновика подключено только для чтения. Отмена не выполняется."
+    ),
+    UnavailableReason.DRAFT_APPLY_NOT_CONNECTED: "В этом режиме применение не выполняется.",
+    UnavailableReason.DRAFT_APPLY_XRAY_UNAVAILABLE: (
+        "Применение не выполняется: изолированный исполнитель проверки Xray недоступен на этой платформе или с текущими правами."
+    ),
+    UnavailableReason.DRAFT_APPLY_PERMISSIONS: (
+        "Применение не выполняется: не подтверждён доступ на запись в DATA, каталог Xray, "
+        "каталог копий или журнал применения."
     ),
     UnavailableReason.INPUT_REQUIRED: (
         "Пункт требует ввода значений, который это меню не принимает: действие не выполняется."

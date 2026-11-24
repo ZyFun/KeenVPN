@@ -1,8 +1,8 @@
 """Точки входа `vpn-menu` и `vpn-setup` с внедряемыми потоками.
 
 Функции возвращают код завершения; потоки и аргументы процесса передаёт
-тонкий скрипт. `vpn-menu` принимает единственный флаг `--read-router`,
-который явно включает чтение роутера; `vpn-setup` аргументов не принимает.
+тонкий скрипт. `vpn-menu` принимает `--read-router` для чтения или
+`--apply-draft` для применения с подтверждением; `vpn-setup` аргументов не принимает.
 Неверные аргументы не повторяются в сообщении. Прерывание и непредвиденная
 ошибка завершаются фиксированным текстом без traceback: в нём могли бы
 оказаться пути и содержимое источников.
@@ -25,13 +25,14 @@ EXIT_INTERRUPTED = 130
 """Код завершения после Ctrl+C: 128 плюс номер сигнала SIGINT."""
 
 INTERRUPTED_MESSAGE = "Прервано."
-FAILURE_MESSAGE = "Меню завершилось с внутренней ошибкой; настройки не менялись."
+FAILURE_MESSAGE = "Меню завершилось с внутренней ошибкой."
 READ_ROUTER_FLAG = "--read-router"
 """Флаг `vpn-menu`: подключить источники чтения роутера.
 
 `vpn-menu` без флага источники не подключает; `vpn-setup` использует
 источники чтения роутера без аргументов.
 """
+APPLY_DRAFT_FLAG = "--apply-draft"
 
 Assembler = Callable[[], MenuAssembly]
 
@@ -66,10 +67,12 @@ def vpn_menu(argv: Sequence[str], stdin: TextInput, stdout: TextOutput, stderr: 
     arguments = tuple(argv)
     if arguments == (READ_ROUTER_FLAG,):
         sources = router_sources
+    elif arguments == (APPLY_DRAFT_FLAG,):
+        sources = lambda: router_sources(apply_draft=True)
     elif not arguments:
         sources = default_sources
     else:
-        stderr.write(f"vpn-menu принимает только флаг {READ_ROUTER_FLAG}.\n")
+        stderr.write(f"vpn-menu принимает один из флагов {READ_ROUTER_FLAG} или {APPLY_DRAFT_FLAG}.\n")
         return EXIT_USAGE
     return _run(lambda: assemble_main_menu(sources()), stdin, stdout, stderr, interactive=True)
 

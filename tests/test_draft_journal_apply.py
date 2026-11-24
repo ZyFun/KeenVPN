@@ -22,7 +22,7 @@ from keenvpn.adapters.draft_session_files import DRAFT_FILE_NAME, DraftSessionFi
 from keenvpn.adapters.keenetic_rci_http import RciResource
 from keenvpn.application.draft_file_apply import FileStepFailure, FileStepResult
 from keenvpn.application.draft_journal import DraftJournalStatus
-from keenvpn.application.draft_journal_apply import ProcessChange, ProcessSnapshot, ProcessState, run_draft_journal_apply
+from keenvpn.application.draft_journal_apply import ProcessChange, ProcessSnapshot, ProcessState, _run_draft_journal_apply
 from keenvpn.application.draft_session import draft_revision_token
 from keenvpn.application.source_baseline import capture_baseline
 from keenvpn.domain.config_document import ConfigDocument
@@ -133,9 +133,9 @@ class DraftJournalApplyTests(unittest.TestCase):
 
     def apply(self, *, verify=lambda: True, mixed=False, lock=None,
               requires_network_verification=False, verify_restored=None):
-        return run_draft_journal_apply(
+        return _run_draft_journal_apply(
             self.drafts if lock is None else lock, self.files, DRAFT_ID, self.token, self.storage,
-            self.journal, verify=verify, native=self.native if mixed else None,
+            self.journal, verify=verify, check_candidate=lambda _stored: None, native=self.native if mixed else None,
             process=self.process if mixed else None, process_change=self.target if mixed else None,
             requires_network_verification=requires_network_verification, verify_restored=verify_restored,
         )
@@ -217,14 +217,31 @@ class DraftJournalApplyTests(unittest.TestCase):
 
     def test_native_only_candidate_uses_same_backup_and_journal(self):
         self.save(replace(self.mixed_candidate, xray_configs=self.original.xray_configs))
-        result = run_draft_journal_apply(
+        result = _run_draft_journal_apply(
             self.drafts, self.files, DRAFT_ID, self.token, self.storage, self.journal,
-            native=self.native, verify=lambda: True,
+            native=self.native, verify=lambda: True, check_candidate=lambda _stored: None,
         )
         self.assert_status(result, "applied")
         self.assertEqual(len(self.native.calls), 1)
         self.assertEqual(self.resources[RciResource.HOTSPOT_SETTINGS]["mode"], "next")
         self.assertEqual(self.first.read_bytes(), ORIGINAL)
+
+    def test_unrelated_change_during_first_native_port_preparation_blocks_write(self):
+        self.save(replace(self.mixed_candidate, xray_configs=self.original.xray_configs))
+        change = self.native.change
+
+        def prepare_native(request, check_current):
+            self.first.write_bytes(CANDIDATE)
+            return change(request, check_current)
+
+        with patch.object(self.native, "change", side_effect=prepare_native):
+            result = _run_draft_journal_apply(
+                self.drafts, self.files, DRAFT_ID, self.token, self.storage, self.journal,
+                native=self.native, verify=lambda: True, check_candidate=lambda _stored: None,
+            )
+        self.assert_status(result, "rejected")
+        self.assertEqual(self.native.calls, [])
+        self.assertEqual(self.first.read_bytes(), CANDIDATE)
 
     def test_process_conflict_refuses_before_any_file_write(self):
         self.save(self.mixed_candidate)
@@ -765,7 +782,7 @@ class DraftJournalApplyTests(unittest.TestCase):
 
         def publish_then_remove_backup(change, check):
             result = write(change, check)
-            if change.target.part == self.first.name:
+            if change.target.part == self.second.name and result.code is None:
                 backup, = self.backups.glob("*.json")
                 backup.unlink()
             return result
@@ -775,6 +792,7 @@ class DraftJournalApplyTests(unittest.TestCase):
 
         self.assert_status(result, "recovery_required")
         self.assertEqual(self.first.read_bytes(), CANDIDATE)
+        self.assertEqual(self.second.read_bytes(), CANDIDATE)
         self.assertEqual(self.process.calls, [])
         outcome = next(event for event in result.events if event.stage == "process" and event.phase == "finished")
         self.assertIs(outcome.failure, FileStepFailure.READ_FAILED)

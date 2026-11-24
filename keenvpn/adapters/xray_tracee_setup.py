@@ -11,7 +11,7 @@ from typing import NoReturn
 
 from keenvpn.adapters.xray_candidate_test import IsolationUnavailable, XrayTestInvocation
 from keenvpn.adapters.xray_initial_memory import STACK_LIMIT
-from keenvpn.adapters.xray_linux_native import LinuxAarch64
+from keenvpn.adapters.xray_linux_native import XRAY_CANCEL_SIGNALS, LinuxAarch64
 from keenvpn.adapters.xray_private_mount import bounded_read
 from keenvpn.adapters.xray_syscall_policy import MAX_DESCRIPTORS
 
@@ -88,7 +88,7 @@ def exec_tracee(native: LinuxAarch64, cage: str, request: XrayTestInvocation,
                 stdin: int, stdout: int, stderr: int, parent_pid: int) -> NoReturn:
     """Вызывается только после собственного fork; исключения ловит child-ветка без вывода."""
     _parent_death(native, parent_pid)
-    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGCHLD):
+    for number in XRAY_CANCEL_SIGNALS | {signal.SIGCHLD}:
         signal.signal(number, signal.SIG_DFL)
     os.dup2(stdin, 0, inheritable=True)
     os.dup2(stdout, 1, inheritable=True)

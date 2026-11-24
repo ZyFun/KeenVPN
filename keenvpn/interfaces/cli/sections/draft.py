@@ -2,8 +2,11 @@
 
 import re
 
-from keenvpn.application.contract import OperationIdFactory, Result
+from keenvpn.application.contract import ErrorDetail, OperationIdFactory, Result
 from keenvpn.application.draft_diff import DraftDiffView
+from keenvpn.application.draft_file_apply import DraftFileApplyRejection, FileStepFailure
+from keenvpn.application.draft_journal import DraftJournalStatus, StageDirection
+from keenvpn.application.draft_journal_apply import DraftJournalApplyResult
 from keenvpn.application.draft_session import (
     DiscardDraft, DiscardDraftHandler, DraftDiscardOutcome, DraftDiscardView, DraftView, InspectDraft,
     InspectDraftHandler,
@@ -24,6 +27,7 @@ from keenvpn.interfaces.cli.terminal import ExitCheck
 ACTION_CAPTIONS = {
     "draft.diff": "Сравнение сохранённого черновика с исходной ревизией. Значения замаскированы.",
     "draft.check": "Проверка сохранённого черновика. Запуск Xray зависит от кандидата и условий проверки.",
+    "draft.apply": "Проверка ревизии и Xray, просмотр изменений и подтверждение записи.",
     "draft.save_and_exit": "Выход с проверкой сохранённого черновика.",
 }
 
@@ -102,7 +106,7 @@ def present_draft_diff(view: DraftDiffView) -> list[str]:
     """Показывать только вид операции, область и порядковые позиции без значений."""
     if type(view) is not DraftDiffView:
         raise TypeError("Ожидается DraftDiffView.")
-    if not view.entries:
+    if not view.entries and not view.unknown_sources_changed:
         return ["Изменений нет: полные снимки совпадают."]
     lines = ["Изменения без секретов:"]
     for item in view.entries:
@@ -113,6 +117,8 @@ def present_draft_diff(view: DraftDiffView) -> list[str]:
             position += f"; позиция {count(item.position + 1)}"
         lines.append(f"{identifier(item.source.value)} / {identifier(item.area)}: "
                      f"{_OPERATIONS[item.operation.value]}{position}")
+    if view.unknown_sources_changed:
+        lines.append("Изменились неизвестные источники.")
     return lines
 
 
@@ -138,14 +144,58 @@ def present_saved_draft_check(view: SavedDraftCheckView) -> list[str]:
     return lines
 
 
+_APPLY_JOURNAL_STEP = "Сверьте журнал применения и фактическое состояние перед новой записью."
+_APPLY_FAILURE_STEPS = {
+    FileStepFailure.CONFLICT: "Сверьте текущие файлы, геобазы и черновик перед повторной попыткой.",
+    FileStepFailure.READ_FAILED: "Проверьте доступность источников и резервной копии.",
+    FileStepFailure.WRITE_FAILED: "Проверьте права записи и свободное место в хранилище.",
+    FileStepFailure.UNCONFIRMED: _APPLY_JOURNAL_STEP,
+}
+
+
+def _present_apply_result(result: DraftJournalApplyResult | DraftFileApplyRejection | ErrorDetail) -> list[str]:
+    lock_warning = "Не удалось подтвердить освобождение блокировки."
+    if isinstance(result, ErrorDetail):
+        return present_error(result)
+    if isinstance(result, DraftFileApplyRejection):
+        return [*present_error(result.error), lock_warning]
+    lines = [{
+        DraftJournalStatus.APPLIED: "Изменения записаны. Команды управления службой не выполнялись.",
+        DraftJournalStatus.REJECTED: "Применение отклонено до записи действующих файлов.",
+        DraftJournalStatus.COMPENSATED: "Применение прервано. Предыдущее состояние восстановлено.",
+        DraftJournalStatus.RECOVERY_REQUIRED: "Итог записи не подтверждён. Требуется явное восстановление.",
+    }[result.status]]
+    first_failure = None
+    for event in result.events:
+        if event.phase != "finished":
+            continue
+        action = "применения" if event.direction is StageDirection.APPLY else "компенсации"
+        if event.failure is not None:
+            lines.append(f"Отказ {action} на этапе {event.stage.value} / {event.failure.value}.")
+            first_failure = first_failure or event.failure
+        if event.cleanup_failed:
+            lines.append(f"Сбой очистки на этапе {action} {event.stage.value} / cleanup_failed.")
+    if result.journal_failed:
+        lines.append("Не удалось подтвердить запись журнала.")
+    if result.lock_release_failed:
+        lines.append(lock_warning)
+    if result.status is DraftJournalStatus.RECOVERY_REQUIRED or result.journal_failed:
+        lines.append("Следующий шаг: " + _APPLY_JOURNAL_STEP)
+    elif first_failure is not None:
+        lines.append("Следующий шаг: " + _APPLY_FAILURE_STEPS[first_failure])
+    return lines
+
+
 def bind_actions(
     bindings: SectionActions, sources: MenuSources, operation_ids: OperationIdFactory, storage_notice: list[str],
 ) -> ExitCheck:
     """Подключить доступные операции с черновиком и общую проверку выхода."""
     drafts = sources.draft_store
+    bindings["draft.apply"] = sources.draft_apply_unavailable
     bindings["draft.discard"] = (UnavailableReason.DRAFT_STORE_NOT_CONNECTED if drafts is None
                                  else UnavailableReason.DRAFT_DISCARD_NOT_CONNECTED)
     if sources.storage_error is not None:
+        bindings["draft.apply"] = UnavailableReason.STORAGE_NOT_CONFIRMED
         bindings["draft.diff"] = UnavailableReason.STORAGE_NOT_CONFIRMED
         bindings["draft.check"] = UnavailableReason.STORAGE_NOT_CONFIRMED
         if drafts is None:
@@ -184,20 +234,53 @@ def bind_actions(
         check = CheckSavedDraftHandler(drafts, sources.fingerprints, sources.geodata,
             sources.candidate_assets, sources.geo_catalogs, sources.installed_xray, operation_ids=operation_ids)
 
-        def saved_action(handler, command_type, presenter):
+        def last_applied_diff() -> list[str]:
+            if sources.draft_apply is None:
+                return [NO_SAVED_DRAFT]
+            diff = sources.draft_apply.last_applied_diff()
+            if isinstance(diff, ErrorDetail):
+                return present_error(diff)
+            if diff is None:
+                return [NO_SAVED_DRAFT]
+            return ["Последняя подтверждённая операция.", *present_draft_diff(diff)]
+
+        def saved_action(handler, command_type, presenter, *, on_empty=None):
             def action():
                 inspected = inspect_draft.execute(InspectDraft())
                 if not inspected.succeeded:
                     return present_result(inspected, presenter)
                 view = inspected.data.draft
                 if view is None:
-                    return [NO_SAVED_DRAFT]
+                    return [NO_SAVED_DRAFT] if on_empty is None else on_empty()
                 # ID и токен остаются в состоянии вызова и не выводятся.
                 return present_result(handler.execute(command_type(draft_id=view.draft_id,
                     expected_revision=view.revision)), presenter)
             return action
 
 
-        bindings["draft.diff"] = saved_action(compare, CompareSavedDraft, present_draft_diff)
+        bindings["draft.diff"] = saved_action(compare, CompareSavedDraft, present_draft_diff, on_empty=last_applied_diff)
         bindings["draft.check"] = saved_action(check, CheckSavedDraft, present_saved_draft_check)
+    if sources.draft_apply is not None and drafts is not None:
+        inspect_for_apply = InspectDraftHandler(drafts, operation_ids=operation_ids)
+        apply = sources.draft_apply
+
+        def apply_action() -> list[str] | ConfirmationRequest:
+            inspected = inspect_for_apply.execute(InspectDraft())
+            if not inspected.succeeded:
+                return present_error(inspected.error)
+            view = inspected.data.draft
+            if view is None:
+                error = apply.check_journal()
+                return [NO_SAVED_DRAFT] if error is None else present_error(error)
+            preview = apply.prepare(view.draft_id, view.revision)
+            if isinstance(preview, (DraftFileApplyRejection, ErrorDetail)):
+                return _present_apply_result(preview)
+            lines = ["Исходная ревизия подтверждена.", *present_saved_draft_check(preview.checks),
+                     *present_draft_diff(preview.diff)]
+            if preview.rejection is not None:
+                return [*lines, *present_error(preview.rejection)]
+            lines.extend(("Применить показанные изменения?", "1. Отмена", "2. Применить"))
+            return ConfirmationRequest(tuple(lines), lambda: _present_apply_result(apply.apply(preview)))
+
+        bindings["draft.apply"] = apply_action
     return exit_check

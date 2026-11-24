@@ -9,6 +9,7 @@ from keenvpn.application.ports import (
     XKeenSettingsSource, XrayConfigSource, XrayProcessSource, SourceFingerprintSource,
 )
 from keenvpn.application.saved_draft import CandidateAssetSource, GeoCategorySource
+from keenvpn.application.saved_draft_apply import ApplySavedDraftHandler
 from keenvpn.application.xray_candidate import InstalledXrayPort
 from keenvpn.interfaces.cli.menu import UnavailableReason
 from keenvpn.interfaces.cli.terminal import Action
@@ -25,7 +26,8 @@ class MenuSources:
     Источники конфигурации только читают. Порт отмены может удалить файл
     выбранной сессии после подтверждения. Отдельный порт проверки Xray
     создаёт временную область и запускает изолированный config test
-    при выборе проверки черновика. Рабочие настройки не меняются.
+    при выборе проверки черновика. Запись возможна только при явно подключённом
+    сценарии применения.
     """
 
     policies: KeeneticPolicySource | None = None
@@ -55,6 +57,9 @@ class MenuSources:
     """Доверенные свидетельства категорий; отсутствие не подменяется именем или SHA."""
     installed_xray: InstalledXrayPort | None = None
     """Изолированный исполнитель; его отсутствие не блокирует статический отчёт."""
+    draft_apply: ApplySavedDraftHandler | None = None
+    """Готовый прикладной сценарий применения с явно разрешённой записью."""
+    draft_apply_unavailable: UnavailableReason = UnavailableReason.DRAFT_APPLY_NOT_CONNECTED
 
     @property
     def keenetic_connected(self) -> bool:

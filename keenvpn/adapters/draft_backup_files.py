@@ -24,6 +24,10 @@ class DraftBackupFiles:
         self._directory = directory
         self._parent_identity = parent_identity
 
+    def directory_writable(self) -> bool:
+        """Проверить доступ к каталогу копий без записи."""
+        return _BackupFile(self._directory, "probe", self._parent_identity).directory_writable()
+
     def _file(self, backup_id: str) -> _BackupFile:
         if not valid_draft_id(backup_id):
             raise DraftBackupStorageError()

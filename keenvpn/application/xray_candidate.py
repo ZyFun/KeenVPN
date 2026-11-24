@@ -11,7 +11,7 @@ from keenvpn.application.contract import (
     check_contract_version, failed, invalid_command, new_operation_id, succeeded,
 )
 from keenvpn.application.draft_session import check_draft_current, valid_expected_draft
-from keenvpn.application.ports import DraftSessionStore, SourceFingerprintSource
+from keenvpn.application.ports import DraftSessionReader, SourceFingerprintSource
 from keenvpn.domain.config_document import ConfigDocument, valid_document_name
 from keenvpn.domain.geodata import STANDARD_FILE_NAMES, UnsupportedGeoReference, parse_geo_reference
 from keenvpn.domain.manager_metadata import valid_metadata_revision
@@ -218,7 +218,7 @@ def _interpret(outcome: object) -> CheckView | ErrorDetail:
 class CheckInstalledXrayHandler:
     """Сверить состояние до проверки и повторно после подготовки, исполнения и очистки."""
 
-    def __init__(self, store: DraftSessionStore, fingerprints: SourceFingerprintSource,
+    def __init__(self, store: DraftSessionReader, fingerprints: SourceFingerprintSource,
                  tester: InstalledXrayPort | None = None, *, operation_ids: OperationIdFactory = new_operation_id) -> None:
         self._store = store
         self._fingerprints = fingerprints
